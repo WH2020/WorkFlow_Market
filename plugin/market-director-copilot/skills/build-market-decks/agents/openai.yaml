@@ -1,7 +1,6 @@
 interface:
   display_name: "市场演示文稿"
-  short_description: "按可替换模板创建政府方案、客户方案和CEO周报PPT"
-  default_prompt: "使用 $build-market-decks 将当前资料制作成可编辑且经过检查的演示文稿。"
+  short_description: "用原生PPTX或SVG Bento Grid创建政府方案、客户方案和CEO周报"
+  default_prompt: "使用 $build-market-decks 先完成逐页策划，再按编辑需求选择 native 或 svg-first 模式，生成并检查演示文稿。"
 policy:
   allow_implicit_invocation: true
-

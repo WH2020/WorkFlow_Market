@@ -10,5 +10,5 @@ data/weflow/state.json
 outputs/*.pptx
 outputs/*.pdf
 outputs/rendered/
+outputs/svg/
 *.log
-

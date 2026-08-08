@@ -1,0 +1,39 @@
+{
+  "deck": {
+    "title": "前沿市场机会扫描",
+    "theme": "industry-research",
+    "width": 1280,
+    "height": 720
+  },
+  "slides": [
+    {
+      "title": "场景验证比概念扩张更接近商业化",
+      "subtitle": "本页结论：优先用可验收的小场景验证数据闭环",
+      "layout": "hero-grid",
+      "source": "来源：示例输入；正式版本需替换为来源登记表记录",
+      "cards": [
+        {
+          "eyebrow": "中心判断",
+          "title": "先验证闭环，再扩大建设范围",
+          "body": "把地方产业诉求、数据采集、模型服务和验收指标放在同一条路径上。",
+          "bullets": ["试点边界可控", "责任主体清晰"],
+          "tone": "accent"
+        },
+        {"eyebrow": "脑机", "title": "政策窗口", "body": "待接入已核验政策卡片。", "tone": "pale"},
+        {"eyebrow": "具身智能", "title": "场景优先", "body": "聚焦真实生产和服务流程，而不是泛化概念。", "tone": "white"},
+        {"eyebrow": "数采", "title": "合规前置", "body": "在方案阶段明确数据来源、授权和使用边界。", "tone": "pale"}
+      ]
+    },
+    {
+      "title": "三类方向的管理含义不同",
+      "subtitle": "用并列卡片帮助 CEO 快速比较",
+      "layout": "three",
+      "source": "来源：示例输入，不可直接对外使用",
+      "cards": [
+        {"title": "脑机", "body": "重视政策、伦理和长期技术验证。", "value": "01", "tone": "accent"},
+        {"title": "具身智能", "body": "重视场景、设备和数据闭环。", "value": "02", "tone": "white"},
+        {"title": "数采", "body": "重视合规、质量和可交付性。", "value": "03", "tone": "pale"}
+      ]
+    }
+  ]
+}
