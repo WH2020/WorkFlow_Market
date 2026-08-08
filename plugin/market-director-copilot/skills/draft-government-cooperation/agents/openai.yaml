@@ -1,0 +1,7 @@
+interface:
+  display_name: "政府合作方案"
+  short_description: "结合地方政策、产业基础和公司能力编制可落地政企合作材料"
+  default_prompt: "使用 $draft-government-cooperation 为指定地区起草有依据的政府合作方案。"
+policy:
+  allow_implicit_invocation: true
+

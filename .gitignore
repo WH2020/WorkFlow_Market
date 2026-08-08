@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/weflow/raw/
+data/weflow/media/
+data/weflow/transcripts/
+data/weflow/frames/
+data/weflow/state.json
+outputs/*.pptx
+outputs/*.pdf
+outputs/rendered/
+*.log
+

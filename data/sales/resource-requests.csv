@@ -1,0 +1,2 @@
+request_id,customer_id,salesperson_id,requested_at,resource_type,request_summary,business_reason,deadline,owner,status,decision,decision_reason,updated_at
+

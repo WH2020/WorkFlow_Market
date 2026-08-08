@@ -1,0 +1,52 @@
+{
+  "active": "ceo-weekly",
+  "templates": [
+    {
+      "id": "ceo-weekly",
+      "name": "CEO 市场周报",
+      "file": "ceo-weekly.pptx",
+      "kind": "weekly",
+      "editable": true,
+      "builtin": true
+    },
+    {
+      "id": "government-formal",
+      "name": "地方政府合作方案",
+      "file": "government-formal.pptx",
+      "kind": "government",
+      "editable": true,
+      "builtin": true
+    },
+    {
+      "id": "customer-solution",
+      "name": "客户解决方案",
+      "file": "customer-solution.pptx",
+      "kind": "customer",
+      "editable": true,
+      "builtin": true
+    },
+    {
+      "id": "industry-research",
+      "name": "行业研究报告",
+      "file": "industry-research.pptx",
+      "kind": "research",
+      "editable": true,
+      "builtin": true
+    },
+    {
+      "id": "sales-review",
+      "name": "销售复盘报告",
+      "file": "sales-review.pptx",
+      "kind": "sales",
+      "editable": true,
+      "builtin": true
+    }
+  ],
+  "generated_files": [
+    "D:\\PersonalWorkSpace\\WorkFlow4Market\\library\\templates\\ceo-weekly.pptx",
+    "D:\\PersonalWorkSpace\\WorkFlow4Market\\library\\templates\\government-formal.pptx",
+    "D:\\PersonalWorkSpace\\WorkFlow4Market\\library\\templates\\customer-solution.pptx",
+    "D:\\PersonalWorkSpace\\WorkFlow4Market\\library\\templates\\industry-research.pptx",
+    "D:\\PersonalWorkSpace\\WorkFlow4Market\\library\\templates\\sales-review.pptx"
+  ]
+}

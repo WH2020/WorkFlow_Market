@@ -1,0 +1,7 @@
+interface:
+  display_name: "市场演示文稿"
+  short_description: "按可替换模板创建政府方案、客户方案和CEO周报PPT"
+  default_prompt: "使用 $build-market-decks 将当前资料制作成可编辑且经过检查的演示文稿。"
+policy:
+  allow_implicit_invocation: true
+

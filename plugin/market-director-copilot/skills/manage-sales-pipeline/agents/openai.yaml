@@ -1,0 +1,7 @@
+interface:
+  display_name: "销售管线管理"
+  short_description: "维护客户阶段、机会健康度、关键行动、风险和资源申请台账"
+  default_prompt: "使用 $manage-sales-pipeline 更新客户进展并输出需要管理层处理的事项。"
+policy:
+  allow_implicit_invocation: true
+

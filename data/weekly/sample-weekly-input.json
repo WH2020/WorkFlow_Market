@@ -1,0 +1,51 @@
+{
+  "reporting_period": "2026-08-03 至 2026-08-07",
+  "generated_at": "2026-08-07T18:00:00+08:00",
+  "audience": "CEO",
+  "headline": "重点机会保持推进，两个事项需要管理层决策",
+  "executive_summary": [
+    "本周完成重点行业资料归档和客户机会梳理。",
+    "政府合作方案进入场景与资源核验阶段。",
+    "客户数据为示例，接入真实台账后自动替换。"
+  ],
+  "decision_requests": [
+    {"title": "资源优先级", "detail": "确认下周方案支持的优先客户。", "owner": "CEO", "due": "下周一"},
+    {"title": "合作边界", "detail": "确认政府项目首期可承诺范围。", "owner": "CEO", "due": "下周三"}
+  ],
+  "metrics": [
+    {"label": "重点客户", "value": 3, "delta": "+1"},
+    {"label": "有效推进", "value": 2, "delta": "+1"},
+    {"label": "待决策事项", "value": 2, "delta": "0"},
+    {"label": "高风险机会", "value": 1, "delta": "+1"}
+  ],
+  "intelligence": [
+    {"topic": "脑机", "finding": "政策和产业信息待接入后生成。", "implication": "保持观察", "source": "示例"},
+    {"topic": "具身智能", "finding": "场景和数据闭环成为合作重点。", "implication": "优先验证场景", "source": "示例"},
+    {"topic": "数采", "finding": "数据合规和交付口径需前置明确。", "implication": "纳入方案门槛", "source": "示例"}
+  ],
+  "pipeline": [
+    {"stage": "需求确认", "count": 3},
+    {"stage": "方案设计", "count": 2},
+    {"stage": "预算/立项", "count": 1},
+    {"stage": "商务推进", "count": 1}
+  ],
+  "priority_customers": [
+    {"name": "示例客户 A", "stage": "方案设计", "health": "黄", "progress": "完成首轮需求澄清", "risk": "关键决策人待确认", "next_action": "安排联合评审"},
+    {"name": "示例客户 B", "stage": "预算/立项", "health": "绿", "progress": "形成项目范围", "risk": "预算窗口较短", "next_action": "补齐测算口径"},
+    {"name": "示例客户 C", "stage": "需求确认", "health": "红", "progress": "信息不足", "risk": "两周无有效动作", "next_action": "管理层决定是否继续投入"}
+  ],
+  "sales_review": [
+    {"salesperson": "销售 A", "fact": "已完成客户需求回传", "gap": "下一步时间未锁定", "manager_action": "协助确定评审时间"},
+    {"salesperson": "销售 B", "fact": "提出方案资源申请", "gap": "业务价值证据不足", "manager_action": "补充资源申请依据"}
+  ],
+  "government_projects": [
+    {"region": "示例地区", "scenario": "产业数据采集平台", "status": "场景核验", "next_action": "核对当地政策和牵头部门", "risk": "资金来源待确认"}
+  ],
+  "next_week": [
+    "完成三个重点客户的下一步动作闭环。",
+    "形成一份地方政府合作方案初稿。",
+    "补齐行业来源卡片并完成可信度复核。"
+  ],
+  "sources": ["示例数据，不可对外使用"]
+}
+

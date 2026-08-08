@@ -1,0 +1,12 @@
+{
+  "salespeople": [
+    {
+      "salesperson_id": "sales-001",
+      "name": "待填写",
+      "weflow_session_id": "",
+      "active": false,
+      "notes": "填写与该销售的微信会话 ID，并将 active 改为 true。"
+    }
+  ]
+}
+

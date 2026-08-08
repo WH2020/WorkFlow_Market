@@ -1,0 +1,7 @@
+interface:
+  display_name: "前沿市场研究"
+  short_description: "检索并核验脑机、具身、数采、政策与市场机会信息"
+  default_prompt: "使用 $research-frontier-markets 研究指定前沿领域并生成带来源的决策简报。"
+policy:
+  allow_implicit_invocation: true
+

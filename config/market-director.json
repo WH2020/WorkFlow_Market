@@ -1,0 +1,32 @@
+{
+  "project_name": "市场总监工作台",
+  "timezone": "Asia/Shanghai",
+  "weekly_report": {
+    "weekday": "FR",
+    "time": "18:00",
+    "audience": "CEO",
+    "min_slides": 7,
+    "max_slides": 10,
+    "default_slides": 8,
+    "active_template": "ceo-weekly"
+  },
+  "weflow": {
+    "base_url": "http://127.0.0.1:5031",
+    "token_env": "WEFLOW_ACCESS_TOKEN",
+    "salespeople_file": "data/sales/salespeople.json",
+    "overlap_seconds": 120,
+    "download_media": true,
+    "extract_video_frames": true,
+    "max_video_frames": 6,
+    "transcription": {
+      "provider": "faster-whisper",
+      "model": "small",
+      "device": "cpu",
+      "compute_type": "int8",
+      "language": "zh",
+      "beam_size": 5,
+      "vad_filter": true
+    }
+  }
+}
+
