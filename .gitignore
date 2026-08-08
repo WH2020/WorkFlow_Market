@@ -11,4 +11,5 @@ outputs/*.pptx
 outputs/*.pdf
 outputs/rendered/
 outputs/svg/
+outputs/reimbursements/
 *.log

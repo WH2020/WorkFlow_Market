@@ -1,0 +1,6 @@
+interface:
+  display_name: "QQ邮箱发票报销整理"
+  short_description: "从QQ邮箱提取发票、核对金额并生成报销单与附件归档"
+  default_prompt: "使用 $qq-mail-invoice-reimbursement 整理指定期间的 QQ 邮箱发票并生成可核对的报销工作簿。"
+policy:
+  allow_implicit_invocation: true

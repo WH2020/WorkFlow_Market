@@ -11,6 +11,7 @@
 5. 生成 PPT 前先完成需求、资料、大纲和逐页策划；最终文件必须检查页面数量、文本溢出、来源和可编辑性。
 6. 周报默认面向 CEO，控制在 7-10 页，首页给出结论和需要 CEO 决策的事项。
 7. 原始微信资料允许处理，但不得自动发送给第三方。对外发送文件前必须由用户确认。
+8. 邮箱发票仅在用户指定账号和期间内读取。不得索取密码、验证码或授权码，不得自动提交报销、转发邮件、上传附件或删除邮件。
 
 ## 数据位置
 
@@ -20,7 +21,7 @@
 - `data/weflow/`：WeFlow 增量数据、转写、媒体索引和运行状态。
 - `data/weekly/`：周报结构化输入。
 - `library/templates/`：可选择、修改或替换的模板库。
-- `outputs/`：方案、复盘和演示文稿输出。
+- `outputs/`：方案、复盘、演示文稿和报销输出；报销原件位于 `outputs/reimbursements/`，不得提交 Git。
 
 ## 默认技能
 
@@ -29,4 +30,4 @@
 - 微信沟通复盘：`$review-sales-conversations`
 - 客户及销售管线：`$manage-sales-pipeline`
 - PPT 与 CEO 周报：`$build-market-decks`
-
+- QQ 邮箱发票报销：`$qq-mail-invoice-reimbursement`
