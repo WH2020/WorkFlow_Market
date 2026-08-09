@@ -7,7 +7,7 @@ description: 创建和修订市场总监使用的 PowerPoint 演示文稿，包�
 
 ## 模板选择
 
-读取 Project 的 `library/templates/template-catalog.json`。用户未指定时按任务类型使用 active 或对应内置模板。用户可以要求：使用默认、仅本次修改、导入为新模板、替换当前模板。使用插件根目录 `scripts/template_manager.py` 管理模板，不覆盖内置文件。
+先使用 `$create-office-documents` 检查 `library/templates/office-template-catalog.json` 中是否有用户明确指定或 active 的公司 PowerPoint 模板；没有时读取 `library/templates/template-catalog.json` 并按任务类型使用对应内置模板。公司模板使用 `scripts/office_template_manager.py` 版本化管理，内置模板使用 `scripts/template_manager.py` 管理；两者均不得被生成结果覆盖。
 
 ## 生产模式
 

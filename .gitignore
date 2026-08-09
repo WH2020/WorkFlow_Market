@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+tmp/
 data/weflow/raw/
 data/weflow/media/
 data/weflow/transcripts/
@@ -11,5 +12,8 @@ outputs/*.pptx
 outputs/*.pdf
 outputs/rendered/
 outputs/svg/
+outputs/office/
 outputs/reimbursements/
+library/templates/office-template-catalog.json
+library/templates/company/
 *.log

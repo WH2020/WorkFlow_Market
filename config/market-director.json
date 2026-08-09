@@ -10,6 +10,11 @@
     "default_slides": 8,
     "active_template": "ceo-weekly"
   },
+  "office_templates": {
+    "catalog": "library/templates/office-template-catalog.json",
+    "company_root": "library/templates/company",
+    "output_root": "outputs/office"
+  },
   "weflow": {
     "base_url": "http://127.0.0.1:5031",
     "token_env": "WEFLOW_ACCESS_TOKEN",
@@ -29,4 +34,3 @@
     }
   }
 }
-

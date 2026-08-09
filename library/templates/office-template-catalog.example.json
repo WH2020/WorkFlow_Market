@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "active_by_type": {
+    "word": null,
+    "excel": null,
+    "powerpoint": null
+  },
+  "active_by_kind": {
+    "word": {},
+    "excel": {},
+    "powerpoint": {}
+  },
+  "templates": []
+}
