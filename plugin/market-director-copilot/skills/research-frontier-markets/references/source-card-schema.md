@@ -10,6 +10,7 @@
 - `important_quotes`：必要时保留原文及页码。
 - `interpretation`：与事实分开的分析。
 - `limitations`：口径、样本、时效和利益相关限制。
+- `exposure_status`：研究接触状态，使用 `未触达`、`匿名触达` 或 `身份暴露`；判定方法见 `research-exposure-check.md`。
 - `status`：`verified`、`pending` 或 `superseded`。
 
 知识卡片更新时保留旧来源，不用新结论覆盖历史记录。
