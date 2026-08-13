@@ -33,6 +33,7 @@ def initialize(project: Path) -> tuple[list[Path], list[Path]]:
             skipped.append(target)
             continue
         temporary: Path | None = None
+        published = False
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             descriptor, temporary_name = tempfile.mkstemp(
@@ -41,13 +42,42 @@ def initialize(project: Path) -> tuple[list[Path], list[Path]]:
             os.close(descriptor)
             temporary = Path(temporary_name)
             shutil.copyfile(source, temporary)
-            temporary.replace(target)
-            created.append(target)
-        except Exception:
-            if temporary is not None:
+            try:
+                os.link(temporary, target)
+            except FileExistsError:
+                skipped.append(target)
                 temporary.unlink(missing_ok=True)
-            for path in reversed(created):
-                path.unlink(missing_ok=True)
+                continue
+            except OSError as error:
+                raise RuntimeError(
+                    f"Atomic no-overwrite creation failed for {target} via hard link: {error} "
+                    f"(errno={error.errno!r}, winerror={getattr(error, 'winerror', None)!r}). "
+                    "Check filesystem hard-link support, free space, connectivity, and permissions."
+                ) from error
+            published = True
+            created.append(target)
+            temporary.unlink()
+        except Exception as error:
+            cleanup_error: OSError | None = None
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as caught_cleanup_error:
+                    cleanup_error = caught_cleanup_error
+            if published:
+                cleanup_detail = (
+                    f" Cleanup retry also failed: {cleanup_error}." if cleanup_error is not None else ""
+                )
+                raise RuntimeError(
+                    f"Initialized {target} without overwriting existing data, but initial "
+                    f"temporary-link cleanup failed: {error}.{cleanup_detail} "
+                    "The target is preserved; rerun initialization after resolving filesystem access."
+                ) from error
+            if cleanup_error is not None:
+                raise RuntimeError(
+                    f"Initialization failed for {target}, and temporary-file cleanup also failed: "
+                    f"{cleanup_error}. Original error: {error}"
+                ) from error
             raise
 
     return created, skipped
