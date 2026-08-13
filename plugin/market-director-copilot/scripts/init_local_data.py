@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -30,11 +32,20 @@ def initialize(project: Path) -> tuple[list[Path], list[Path]]:
         if target.exists():
             skipped.append(target)
             continue
+        temporary: Path | None = None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+            )
+            os.close(descriptor)
+            temporary = Path(temporary_name)
+            shutil.copyfile(source, temporary)
+            temporary.replace(target)
             created.append(target)
         except Exception:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
             for path in reversed(created):
                 path.unlink(missing_ok=True)
             raise
