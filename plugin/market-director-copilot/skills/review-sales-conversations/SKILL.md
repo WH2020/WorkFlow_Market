@@ -1,13 +1,13 @@
 ---
 name: review-sales-conversations
-description: 复盘市场总监与销售人员之间的微信沟通，包括文字、引用、图片、语音和视频。用于周度销售复盘、客户进展提取、承诺检查、异议与风险识别、管理支持建议、沟通质量分析和下一步行动整理。
+description: 复盘市场总监与销售人员之间的微信沟通，包括文字、引用、图片、语音和视频。用于周度销售复盘、客户进展提取、承诺检查、客户异议分析、演示或话术复盘、销售辅导、管理支持建议、沟通质量分析和下一步行动整理。
 ---
 
 # 销售沟通复盘
 
 ## 数据准备
 
-需要最新数据时，先运行插件根目录 `scripts/weflow_sync.py`。Token 只能从 `WEFLOW_ACCESS_TOKEN` 环境变量读取。使用 Project 的 `data/sales/salespeople.json` 决定允许同步的会话。
+需要最新数据时，从 Project 根目录运行插件根目录 `scripts/weflow_sync.py`。Token 只能从 `WEFLOW_ACCESS_TOKEN` 环境变量读取。使用 Project 的 `data/sales/salespeople.json` 决定允许同步的会话；文件缺失时先从 Project 根目录运行 `python plugin/market-director-copilot/scripts/init_local_data.py --project .` 从公开空白模板初始化。
 
 读取 `data/weflow/normalized/` 中的消息、`transcripts/` 中的语音或视频转写、`frames/` 中的视频关键帧，以及消息关联的图片。对看不清或无法转写的媒体明确标记，不猜测内容。
 
@@ -17,8 +17,9 @@ description: 复盘市场总监与销售人员之间的微信沟通，包括文�
 2. 建立带时间戳的事实时间线，保留原消息证据路径。
 3. 提取客户进展、客户异议、销售承诺、管理层承诺、资源申请和截止时间。
 4. 检查承诺是否闭环、下一步是否具体、关键人和预算路径是否明确。
-5. 按 `references/conversation-review-schema.md` 输出复盘。
-6. 将确认后的客户活动交给 `$manage-sales-pipeline` 更新台账。
+5. 出现异议、演示反馈或话术讨论时，读取 `references/sales-coaching-patterns.md`，形成有证据的异议处理或演示改进建议。
+6. 按 `references/conversation-review-schema.md` 输出复盘。
+7. 将确认后的客户活动和销售材料需求交给 `$manage-sales-pipeline` 更新台账。
 
 ## 边界
 

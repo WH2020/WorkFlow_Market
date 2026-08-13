@@ -1,7 +1,6 @@
 interface:
   display_name: "销售沟通复盘"
-  short_description: "分析微信文字、图片、语音和视频证据并形成销售管理行动"
-  default_prompt: "使用 $review-sales-conversations 复盘本周销售微信沟通并整理下一步。"
+  short_description: "基于微信证据复盘客户进展、异议、演示话术和管理行动"
+  default_prompt: "使用 $review-sales-conversations 复盘本周销售微信沟通、客户异议和演示话术，并整理下一步。"
 policy:
   allow_implicit_invocation: true
-

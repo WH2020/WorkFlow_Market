@@ -62,7 +62,9 @@ def safe_name(value: str) -> str:
     return value[:120] or "unknown"
 
 
-def normalize_message(message: dict[str, Any], salesperson_id: str, session_id: str) -> dict[str, Any]:
+def normalize_message(
+    message: dict[str, Any], salesperson_id: str, session_id: str, source_file: str
+) -> dict[str, Any]:
     media_type = message.get("mediaType") or ""
     media = None
     if media_type or message.get("mediaUrl") or message.get("mediaLocalPath"):
@@ -82,6 +84,7 @@ def normalize_message(message: dict[str, Any], salesperson_id: str, session_id: 
         "text": message.get("parsedContent") or message.get("content") or "",
         "quote": message.get("quote"),
         "media": media,
+        "source_file": message.get("sourceFile") or message.get("source_file") or source_file,
         "raw": message,
     }
 
@@ -92,7 +95,8 @@ def sync_session(base_url: str, token: str, spec: dict[str, Any], project: Path,
     path_id = urllib.parse.quote(session_id, safe="")
     result = http_json(base_url, f"/api/v1/sessions/{path_id}/messages", token, {"since": since, "limit": limit})
     messages = result.get("messages", []) if isinstance(result, dict) else []
-    normalized = [normalize_message(item, salesperson_id, session_id) for item in messages]
+    source_file = f"weflow://api/v1/sessions/{urllib.parse.quote(session_id, safe='')}/messages"
+    normalized = [normalize_message(item, salesperson_id, session_id, source_file) for item in messages]
     media_root = project / "data" / "weflow" / "media" / safe_name(session_id)
     for item in normalized:
         media = item.get("media")

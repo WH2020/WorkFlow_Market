@@ -19,18 +19,18 @@
 
 - `config/market-director.json`：全局配置。
 - `data/knowledge/`：来源登记与知识卡片。
-- `data/sales/`：销售、客户、活动和资源申请台账。
+- `data/sales/`：销售、客户、活动、资源申请和销售材料资产台账。
 - `data/weflow/`：WeFlow 增量数据、转写、媒体索引和运行状态。
 - `data/weekly/`：周报结构化输入。
 - `library/templates/`：内置 PPT 模板和本地公司办公模板库；公司上传模板位于 `library/templates/company/`，不得提交 Git。
-- `outputs/`：方案、复盘、办公文档、演示文稿和报销输出；`outputs/office/` 与 `outputs/reimbursements/` 不得提交 Git。
+- `outputs/`：方案、复盘、办公文档、演示文稿和报销输出；整个目录不得提交 Git。
 
 ## 默认技能
 
 - 资料研究：`$research-frontier-markets`
 - 政府合作方案：`$draft-government-cooperation`
 - 微信沟通复盘：`$review-sales-conversations`
-- 客户及销售管线：`$manage-sales-pipeline`
+- 客户、销售管线及销售材料：`$manage-sales-pipeline`
 - PPT 与 CEO 周报：`$build-market-decks`
 - Word、Excel、PPT 办公文档与公司模板库：`$create-office-documents`
 - QQ 邮箱发票报销：`$qq-mail-invoice-reimbursement`
