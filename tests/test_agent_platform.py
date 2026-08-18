@@ -18,7 +18,7 @@ class PlatformTests(unittest.TestCase):
     def test_repository_bundles_validate(self) -> None:
         report = Platform(ROOT).validate_all()
         self.assertEqual(11, report.plugins)
-        self.assertEqual(10, report.workflows)
+        self.assertEqual(11, report.workflows)
         self.assertEqual(2, report.profiles)
         self.assertEqual(11, report.services)
 
@@ -156,6 +156,19 @@ class PlatformTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "structured writes require a tool node"):
             validate_workflow(workflow, plugin)
 
+    def test_structured_write_tool_requires_direct_approval(self) -> None:
+        plugin, workflow = self._sample_workflow()
+        plugin["permissions"].append("knowledge.write")
+        workflow["nodes"][1] = {
+            "id": "finish",
+            "type": "tool",
+            "tool": "knowledge.write",
+            "depends_on": ["start"],
+            "permissions": ["knowledge.write"],
+        }
+        with self.assertRaisesRegex(WorkflowError, "requires exactly one direct approval"):
+            validate_workflow(workflow, plugin)
+
     def test_unbounded_subagent_is_rejected(self) -> None:
         plugin, workflow = self._sample_workflow()
         workflow["nodes"][0] = {
@@ -223,13 +236,13 @@ class PlatformTests(unittest.TestCase):
 
     def test_execution_plan_is_deterministic_and_preserves_gates_and_boundaries(self) -> None:
         platform = Platform(ROOT)
-        first = platform.plan_workflow("shared.research.frontier", "product-director")
-        second = platform.plan_workflow("shared.research.frontier", "product-director")
+        first = platform.plan_workflow("shared.research.frontier-subagent", "product-director")
+        second = platform.plan_workflow("shared.research.frontier-subagent", "product-director")
         self.assertEqual(first, second)
         nodes = [node for stage in first["stages"] for node in stage["nodes"]]
         subagent = next(node for node in nodes if node["type"] == "subagent")
         source = json.loads(
-            (ROOT / "vertical_plugins" / "shared" / "research" / "workflows" / "frontier-research.json").read_text(encoding="utf-8")
+            (ROOT / "vertical_plugins" / "shared" / "research" / "workflows" / "frontier-research-subagent.json").read_text(encoding="utf-8")
         )
         source_subagent = next(node for node in source["nodes"] if node["type"] == "subagent")
         self.assertEqual(source_subagent["boundary"], subagent["boundary"])

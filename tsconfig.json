@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2022"
+  },
+  "include": [
+    "pi/extensions/**/*.ts",
+    "pi/tests/**/*.ts",
+    "tests/task-runtime.test.ts",
+    "tests/vertical-workflow-selection.test.ts"
+  ]
+}

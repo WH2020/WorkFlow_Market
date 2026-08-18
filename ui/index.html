@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>总监工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header><div><p class="eyebrow">LOCAL · PRIVATE · APPROVAL FIRST</p><h1>总监工作台</h1></div><span class="local">仅本机运行</span></header>
+  <main>
+    <section class="hero"><div><h2>把工作交给助手，关键决定仍由你确认</h2><p>选择角色与服务，提交任务；工作流、审批和产物会在这里留下清晰轨迹。</p></div><div id="notice" aria-live="polite"></div></section>
+    <section class="panel"><h2>1. 选择你的工作角色</h2><div id="profiles" class="profile-tabs"></div></section>
+    <section class="panel"><h2>2. 选择要处理的事情</h2><div id="services" class="service-grid"></div></section>
+    <section class="panel task-form"><h2>3. 创建任务</h2><label>任务说明<textarea id="request" maxlength="4000" placeholder="例如：请整理某省具身智能扶持政策，形成一页政府合作方案框架，并标出待确认事项。"></textarea></label><button id="create" class="primary">提交给 AI 助手</button><p class="hint">提交后由 Pi 工作流接手。这里不会直接改写业务数据或绕过审批。</p></section>
+    <section class="split"><div class="panel"><h2>当前任务</h2><div id="tasks" class="empty">正在读取任务状态…</div></div><div class="panel"><h2>知识与销售台账</h2><div id="data-summary" class="summary"></div></div></section>
+    <section class="split"><div class="panel"><h2>工作流阶段</h2><div id="workflow" class="empty">选择服务或任务后显示。</div></div><div class="panel"><h2>最近产物</h2><div id="outputs" class="empty">暂无可显示的产物。</div></div></section>
+  </main>
+  <template id="task-template"><article class="task"><div class="task-title"><strong></strong><span class="status"></span></div><p class="task-meta"></p><p class="task-request"></p><div class="task-actions"></div></article></template>
+  <script src="/app.js"></script>
+</body>
+</html>

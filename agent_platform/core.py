@@ -271,6 +271,41 @@ def validate_workflow(workflow: dict[str, Any], plugin: Plugin | dict[str, Any])
     for node_id in node_map:
         visit(node_id)
 
+    for node_id, node in node_map.items():
+        if node.get("type") != "tool" or node.get("tool") not in {
+            "knowledge.write", "sales.write"
+        }:
+            continue
+        dependencies = node.get("depends_on", [])
+        direct_approvals = [
+            dependency for dependency in dependencies
+            if node_map[dependency].get("type") == "approval"
+        ]
+        if len(dependencies) != 1 or len(direct_approvals) != 1:
+            raise WorkflowError(
+                f"{workflow_id}/{node_id}: structured write tool requires exactly one direct approval"
+            )
+        approval_id = direct_approvals[0]
+        approval_node = node_map[approval_id]
+        approval_dependencies = approval_node.get("depends_on", [])
+        if (
+            len(approval_dependencies) != 1
+            or node_map[approval_dependencies[0]].get("type") not in {"agent", "validator"}
+        ):
+            raise WorkflowError(
+                f"{workflow_id}/{approval_id}: write approval requires one direct agent/validator predecessor"
+            )
+        protected_writes = [
+            candidate for candidate in node_map.values()
+            if candidate.get("type") == "tool"
+            and candidate.get("tool") in {"knowledge.write", "sales.write"}
+            and approval_id in candidate.get("depends_on", [])
+        ]
+        if len(protected_writes) != 1:
+            raise WorkflowError(
+                f"{workflow_id}/{approval_id}: approval must protect exactly one direct structured write"
+            )
+
     actual_entries = {node_id for node_id, node in node_map.items() if not node["depends_on"]}
     declared_entries = set(references_by_field["entry_nodes"])
     if actual_entries != declared_entries:

@@ -8,7 +8,7 @@
   "permissions": ["knowledge.read", "web.read", "artifact.write"],
   "dependencies": [
     {"id": "shared.knowledge", "version": ">=1.0.0"},
-    {"id": "shared.research", "version": ">=1.0.0"},
+    {"id": "shared.research", "version": ">=2.0.0"},
     {"id": "shared.documents", "version": ">=1.0.0"},
     {"id": "shared.weekly-report", "version": ">=1.0.0"}
   ],

@@ -1,4 +1,9 @@
 .venv/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
 .pi/
 node_modules/
 __pycache__/
