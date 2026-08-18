@@ -74,7 +74,7 @@ export type WorkflowTask = {
 
 export type PendingWriteIntent = {
   intent_id: string;
-  logical_tool: "knowledge.write" | "sales.write";
+  logical_tool: StructuredWriteTool;
   canonical_payload: string;
   payload_sha256: string;
   proposed_at: string;
@@ -84,6 +84,14 @@ export type PendingWriteIntent = {
   approved_by_node?: string;
   committed_at?: string;
 };
+
+export type StructuredWriteTool = "knowledge.write" | "sales.write" | "artifact.deck.write";
+
+const STRUCTURED_WRITE_TOOLS = new Set<StructuredWriteTool>([
+  "knowledge.write",
+  "sales.write",
+  "artifact.deck.write",
+]);
 
 export type CompletionActor = "model" | "adapter" | "user";
 
@@ -141,7 +149,7 @@ function descendantIds(workflow: RuntimeWorkflow, nodeId: string): Set<string> {
 
 function approvalWriteTools(workflow: RuntimeWorkflow, approvalNodeId: string): string[] {
   return workflow.nodes
-    .filter((node) => node.depends_on.includes(approvalNodeId) && node.type === "tool" && (node.tool === "knowledge.write" || node.tool === "sales.write"))
+    .filter((node) => node.depends_on.includes(approvalNodeId) && node.type === "tool" && STRUCTURED_WRITE_TOOLS.has(node.tool as StructuredWriteTool))
     .map((node) => node.tool!);
 }
 
@@ -299,7 +307,7 @@ export function completeModelNode(
   const protectedWrites = workflow.nodes.filter(
     (candidate) =>
       candidate.type === "tool" &&
-      (candidate.tool === "knowledge.write" || candidate.tool === "sales.write") &&
+      STRUCTURED_WRITE_TOOLS.has(candidate.tool as StructuredWriteTool) &&
       directApprovals.some((approval) => candidate.depends_on.includes(approval.id)),
   );
   if (protectedWrites.length > 0) {
@@ -323,7 +331,7 @@ export function completeModelNode(
 export function proposeWriteIntent(
   source: WorkflowTask,
   workflow: RuntimeWorkflow,
-  logicalTool: "knowledge.write" | "sales.write",
+  logicalTool: StructuredWriteTool,
   payload: unknown,
   expectedVersion: number,
 ): WorkflowTask {
@@ -393,7 +401,7 @@ export function assertApprovedWriteIntent(
 export function beginWriteCommit(
   source: WorkflowTask,
   workflow: RuntimeWorkflow,
-  logicalTool: "knowledge.write" | "sales.write",
+  logicalTool: StructuredWriteTool,
   payload: unknown,
   expectedVersion: number,
 ): WorkflowTask {
@@ -412,7 +420,7 @@ export function beginWriteCommit(
 
 export function recoverWriteFailure(
   source: WorkflowTask,
-  logicalTool: "knowledge.write" | "sales.write",
+  logicalTool: StructuredWriteTool,
   payload: unknown,
   outcome: "not_committed" | "ambiguous",
   expectedVersion: number,
@@ -454,10 +462,22 @@ export function completeLogicalTool(
       `Logical tool ${logicalTool} must match exactly one current tool node; found ${matches.length}`,
     );
   }
-  if (logicalTool === "knowledge.write" || logicalTool === "sales.write") {
+  if (STRUCTURED_WRITE_TOOLS.has(logicalTool as StructuredWriteTool)) {
     assertApprovedWriteIntent(state, logicalTool, payload);
     state.pending_write!.status = "committed";
     state.pending_write!.committed_at = now();
+  }
+  if (logicalTool === "artifact.deck.write" && note) {
+    try {
+      const details = JSON.parse(note) as { path?: unknown; receipt?: unknown };
+      for (const candidate of [details.path, details.receipt]) {
+        if (typeof candidate === "string" && candidate && !state.artifacts.includes(candidate)) {
+          state.artifacts.push(candidate);
+        }
+      }
+    } catch {
+      // Tool completion remains valid even if an older adapter supplied a non-JSON note.
+    }
   }
   state.completed_nodes.push(matches[0]!.id);
   appendAudit(state, "tool_completed", "adapter", matches[0]!.id, note);

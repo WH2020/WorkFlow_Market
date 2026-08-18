@@ -15,7 +15,26 @@ pi
 
 Pi Package 会按当前 Profile 动态加载所需 Skills；切换 Profile 时自动重载资源。产品总监不会加载市场/销售 Skill，市场总监也不会加载产品 Skill。未进入 Profile 的旧版邮箱与聊天 Skill 不会加载。第三方 Pi Package 具备本机执行权限，安装前应先审阅来源。
 
-行业研究和政府合作方案需要公开检索。在本机环境变量中配置 `BRAVE_SEARCH_API_KEY` 后再启动 Pi；密钥不要放进 `.env`、JSON、截图或 Git。适配器只调用 Brave 的正式 Web Search API；未配置、配额不足或网络异常时会停在当前 DAG 节点。[官方认证说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
+行业研究和政府合作方案需要公开检索。在本机环境变量中配置 `BRAVE_SEARCH_API_KEY` 后再启动 Pi；密钥不要放进 `.env`、JSON、截图或 Git。适配器先调用 Brave 正式 Web Search API 发现来源，再由受控 `web.open` 读取选中的正文；读取连接固定到已核验的公网地址，DNS 与连接空闲各限 10 秒，网页下载及在线 PDF 提取合计限 30 秒，并拒绝重定向。未配置、配额不足、私网目标或网络异常时会停在当前 DAG 节点。[官方认证说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
+
+### PDF 与 PPT 运行时
+
+本地 PDF 放在 Project 的 `inputs/` 或 `data/inbox/` 下，并在任务中写明精确相对路径。这两个目录不会提交到 Git。项目依赖中已包含 `pdfjs-dist`，解析器和本地文本层兜底都在同一个隔离子进程中运行，单次最多 45 秒、256 MiB、32 MiB 输入和指定页数/字符预算；兜底另有限制对象、引用、数据流和解压总量。`WORKFLOW_PDFJS_MODULE` 只用于显式覆盖解析模块；通常不需要设置。PDF.js 无法解析时的兜底结果会标为 `extraction_reliability=limited`，只能以 `pending` 待核验来源入库；扫描件仍需先转换为可检索 PDF。
+
+周报 PPT 需要 Codex 工作区附带的演示文稿运行时。先通过 Codex 的工作区依赖加载器取得路径，再在启动 Pi 的同一终端设置：
+
+```text
+WORKFLOW_ARTIFACT_NODE          = Node.js executable
+WORKFLOW_ARTIFACT_TOOL_PATH     = <Node.js packages>/@oai/artifact-tool
+WORKFLOW_PRESENTATIONS_MARKER   = <Presentations Skill>/container_tools/mark_artifact_operation_started.mjs
+WORKFLOW_ARTIFACT_PYTHON        = Python executable
+WORKFLOW_SLIDES_TEST            = <Presentations Skill>/container_tools/slides_test.py
+RUNTIME_NODE                    = Node.js executable
+RUNTIME_NODE_MODULES            = Node.js packages
+RUNTIME_BIN_DIR                 = Override binaries
+```
+
+这些值必须是本机绝对路径，不要提交到仓库。缺少任一 PPT 依赖时，`artifact.deck.write` 会停止并指出缺项；不会回退到 `python-pptx` 或生成伪 `.pptx`。
 
 ## 选择岗位
 
@@ -34,6 +53,7 @@ Pi Package 会按当前 Profile 动态加载所需 Skills；切换 Profile 时�
 ```text
 /director-services
 /director-run industry-research 调研近三个月国内具身智能数据采集政策与项目
+/director-run pdf-import 读取 inputs/某报告.pdf，按页提取证据并准备写入知识库
 /director-run government-proposal 为某地形成脑机接口试点合作框架
 /director-run product-discovery 核验一线工程师远程诊断工具的机会
 /director-run product-prd 为设备告警闭环形成可验收 PRD
@@ -79,14 +99,23 @@ python ui/server.py
 - `knowledge.search` / `knowledge.write`：检索和带版本更新来源登记。
 - `sales.read` / `sales.write`：一次读取一个或多个销售表；只允许新增和带版本更新，不允许删除、改主键或写未知字段。
 - `web.search`：使用用户配置的 Brave Search API，只返回标题、URL、摘要和时间信息。
+- `web.open`：一次读取最多 6 个搜索结果或用户明确提供的公开 URL；固定使用预先核验的公网地址，拒绝二次 DNS、重定向、私网地址、密钥参数和 8 MiB 以上正文，清除 HTML 中的脚本与样式。在线 PDF 自动转入 PDF 文本提取。
+- `pdf.read`：只读取 `inputs/` 或 `data/inbox/` 下明确的普通 `.pdf`，最大 32 MiB，返回稳定来源 ID、文本、可靠度、截断状态和实际返回页码证据；文本层不足时失败停止。
+- `weekly.snapshot`：按北京时间聚合当前 Profile 的任务/审计、知识新增和受管任务登记的产物；只有市场总监读取销售三张表，产品总监不会跨 Profile 读取销售数据。每类数据都返回命中数、返回数和截断标记。
+- `artifact.deck.write`：接收已冻结并批准的 4–10 页结构化周报载荷；载荷的 Profile、period、`snapshot_sha256`、来源 URL 和本地来源 SHA-256 必须与当前任务持久化快照一致。在 task/intent 私有目录中使用 `@oai/artifact-tool` 构建，逐页生成 PNG/layout、检查 speaker notes 来源并运行官方 `slides_test.py`；QA 通过后才独占提交到 `outputs/`，不覆盖已有文件。
 - 所有结构化数据文件继续位于本地 `data/`；适配器采用独占锁、同目录临时文件原子替换和 `.pi/director-runtime/commits/` 提交日志。若数据已替换但任务快照尚未推进，重试会按提交前后哈希完成恢复；哈希两边都不匹配时停止并要求人工核对。
+- 网页/PDF 工具生成的 URL allow-set 与精确 `knowledge.write` mutation 按任务写入 `.pi/director-runtime/evidence/`。Pi 重启后会重新加载该 registry；工具来源 ID 不在本任务 registry 中、或 mutation 内容发生变化时，写入会被拒绝。
 
 ## 当前限制与边界
 
 - 硬门禁适用于 `/director-run` 或工作台创建的“受管任务”，不是操作系统沙箱；第三方 Pi 扩展和用户在受管任务之外执行的命令仍拥有其自身权限。
-- 受管任务运行期间禁用通用 Bash，`data/` 结构化写入不能使用普通 `write` / `edit` 绕过；目前完整的 Word、Excel、PPT 生成仍取决于后续受控文件适配器，缺少时只交付结构化内容。
-- 默认行业研究按 `web.search` → `knowledge.search` 顺序执行：先完成外部来源发现，再读取内部知识，避免把内部资料带入外部查询。仓库另有 `shared.research.frontier-subagent` 契约，但在安装隔离 Subagent 执行器前不会作为默认服务运行，也不能被模型静默完成。
-- 当前 `web.search` 是来源发现适配器，只返回 Brave 提供的标题、URL、摘要和时间信息，不抓取网页正文。需要逐字核验的一手材料应由用户提供正文/PDF，或等后续加入受控 `web.open` 适配器；仅凭摘要形成的细节必须标记为“待验证”。
+- 受管任务运行期间禁用通用 Bash，`data/` 结构化写入不能使用普通 `write` / `edit` 绕过；当前只有周报 PPT 具备受控文件生成链路，通用 Word、Excel 和任意模板 PPT 尚未实现。
+- 默认行业研究按 `web.search` → `web.open` → `knowledge.search` 顺序执行：先发现和读取外部来源，再读取内部知识，避免把内部资料带入外部查询。仓库另有 `shared.research.frontier-subagent` 契约，但在安装隔离 Subagent 执行器前不会作为默认服务运行，也不能被模型静默完成。
+- `web.open` 只处理公开、无需登录的 HTML、纯文本和 PDF，不执行 JavaScript、不保留登录态、不绕过反爬或访问控制。`user_provided=true` 只允许用于用户在当前任务中直接给出的 URL；该语义依赖主 Agent 遵守工具契约。
+- PDF 只提取已有文本层，不做 OCR。在线 PDF 的 PDF.js 解析失败时直接安全停止；本地受控目录文件可在同一受限子进程中使用标为 `limited` 的文本层兜底。主 Agent 进程不解析 PDF 数据流。扫描版、复杂字体映射或损坏 PDF 可能需要用户转换为可检索 PDF 后重试。
+- Windows 下 Codex 附带的画布运行时可能在全部 PNG 写完后返回原生清理状态 `0xC0000409`。兼容运行器只接受这个精确状态，并同时校验渲染清单路径仍在私有 QA 目录、页数与 PNG 名称/数量/非空/唯一性一致、PPTX 内 notes 页数量正确且每页恰有一个 `[Sources]` 块，然后才继续执行官方 `slides_test.py`；正文构建失败、缺页、空页或来源备注异常仍会失败停止，结果中会明确标注降级 QA。
+- HTML 与 PDF 正文都属于不可信输入；Agent 不执行其中的指令。当前网页正文抽取不是浏览器渲染器，复杂 JavaScript 页面可能需要用户另行导出资料。
+- 产品总监周报当前聚合任务、知识来源和本 Profile 产物，不读取市场销售台账；更细的产品指标/路线图业务快照仍需后续专用适配器。
 - 不读取个人微信聊天；需要分析的信息由用户上传或从已授权的结构化数据源提供。
 - 不自动发送文件、提交审批、改变客户阶段或批准产品发布。
 - 当前批量写入事务边界是一张 CSV；多张销售表不会在一个事务中同时提交。

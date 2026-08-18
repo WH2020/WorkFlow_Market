@@ -7,7 +7,8 @@
   "nodes": [
     {"id": "scope", "type": "agent", "skill": "research-frontier-markets", "depends_on": [], "permissions": ["knowledge.read"]},
     {"id": "public_research", "type": "tool", "tool": "web.search", "depends_on": ["scope"], "permissions": ["web.read"]},
-    {"id": "internal_evidence", "type": "tool", "tool": "knowledge.search", "depends_on": ["public_research"], "permissions": ["knowledge.read"]},
+    {"id": "open_sources", "type": "tool", "tool": "web.open", "depends_on": ["public_research"], "permissions": ["web.read"]},
+    {"id": "internal_evidence", "type": "tool", "tool": "knowledge.search", "depends_on": ["open_sources"], "permissions": ["knowledge.read"]},
     {"id": "synthesize", "type": "agent", "skill": "research-frontier-markets", "depends_on": ["internal_evidence"], "permissions": ["artifact.write"]},
     {"id": "validate", "type": "validator", "check": "sources_dates_regions_and_fact_labels", "depends_on": ["synthesize"], "permissions": []},
     {"id": "approve_knowledge", "type": "approval", "policy": "owner_confirms_research_knowledge_records", "depends_on": ["validate"], "permissions": []},

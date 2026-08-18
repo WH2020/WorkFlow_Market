@@ -174,6 +174,12 @@ test("managed tasks block unknown tools and restrict ordinary writes to outputs"
       runtime.context,
     ) as { block?: boolean };
     assert.equal(prematureArtifactWrite.block, true);
+    const disguisedDeckWrite = guard(
+      { toolName: "write", input: { path: "outputs/fake.pptx.", content: "not a deck" } },
+      runtime.context,
+    ) as { block?: boolean; reason?: string };
+    assert.equal(disguisedDeckWrite.block, true);
+    assert.match(disguisedDeckWrite.reason ?? "", /PPTX/u);
     assert.equal(guard({ toolName: "read", input: { path: "README.md" } }, runtime.context), undefined);
     assert.equal(
       (guard({ toolName: "read", input: { path: join(root, "README.md") } }, runtime.context) as { block?: boolean }).block,
@@ -192,6 +198,12 @@ test("managed tasks block unknown tools and restrict ordinary writes to outputs"
       (guard({ toolName: "read", input: { path: "README.md" } }, runtime.context) as { block?: boolean }).block,
       true,
     );
+    const writeDuringToolStage = guard(
+      { toolName: "write", input: { path: "outputs/report.md", content: "bypass" } },
+      runtime.context,
+    ) as { block?: boolean; reason?: string };
+    assert.equal(writeDuringToolStage.block, true);
+    assert.match(writeDuringToolStage.reason ?? "", /确定性 Tool/u);
     await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;

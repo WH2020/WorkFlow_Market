@@ -216,6 +216,37 @@ test("approval is bound to the exact frozen batch and commit can roll back safel
   assert.equal(recovered.pending_write?.status, "approved");
 });
 
+test("weekly deck is frozen before approval and records committed artifacts", () => {
+  const workflow: RuntimeWorkflow = {
+    id: "test.weekly-deck",
+    nodes: [
+      { id: "snapshot", type: "tool", tool: "weekly.snapshot", depends_on: [] },
+      { id: "build", type: "agent", depends_on: ["snapshot"] },
+      { id: "validate", type: "validator", depends_on: ["build"] },
+      { id: "approve", type: "approval", depends_on: ["validate"] },
+      { id: "render", type: "tool", tool: "artifact.deck.write", depends_on: ["approve"] },
+    ],
+  };
+  const payload = { schema_version: "1.0", output_name: "weekly.pptx" };
+  let task = start(workflow);
+  task = completeLogicalTool(task, workflow, "weekly.snapshot", task.version);
+  task = completeModelNode(task, workflow, "build", task.version);
+  assert.throws(() => completeModelNode(task, workflow, "validate", task.version), /Prepare the exact artifact.deck.write/);
+  task = proposeWriteIntent(task, workflow, "artifact.deck.write", payload, task.version);
+  task = completeModelNode(task, workflow, "validate", task.version);
+  task = approveNode(task, workflow, "approve", task.version);
+  assertApprovedWriteIntent(task, "artifact.deck.write", payload);
+  task = beginWriteCommit(task, workflow, "artifact.deck.write", payload, task.version);
+  task = completeLogicalTool(
+    task, workflow, "artifact.deck.write", task.version,
+    JSON.stringify({ path: "outputs/weekly.pptx", receipt: ".pi/director-runtime/artifact-commits/intent.json" }),
+    payload,
+  );
+  assert.equal(task.status, "completed");
+  assert.equal(task.pending_write?.status, "committed");
+  assert.deepEqual(task.artifacts, ["outputs/weekly.pptx", ".pi/director-runtime/artifact-commits/intent.json"]);
+});
+
 test("external approval rejects a stale or replaced intent hash", () => {
   const task = readyForApproval();
   const requested = {

@@ -3,11 +3,12 @@
   "plugin": "shared.weekly-report",
   "display_name": "每周工作汇报",
   "entry_nodes": ["collect_week"],
-  "output_nodes": ["approve"],
+  "output_nodes": ["render_deck"],
   "nodes": [
-    {"id": "collect_week", "type": "tool", "tool": "knowledge.search", "depends_on": [], "permissions": ["knowledge.read"]},
-    {"id": "build_deck", "type": "agent", "skill": "build-director-decks", "depends_on": ["collect_week"], "permissions": ["artifact.write"]},
-    {"id": "validate_deck", "type": "validator", "check": "ppt_structure_sources_and_render", "depends_on": ["build_deck"], "permissions": []},
-    {"id": "approve", "type": "approval", "policy": "user_confirms_before_external_use", "depends_on": ["validate_deck"], "permissions": []}
+    {"id": "collect_week", "type": "tool", "tool": "weekly.snapshot", "depends_on": [], "permissions": ["knowledge.read", "sales.read", "task.audit.read", "artifact.read"]},
+    {"id": "build_payload", "type": "agent", "skill": "build-director-decks", "depends_on": ["collect_week"], "permissions": []},
+    {"id": "validate_payload", "type": "validator", "check": "deterministic_frozen_deck_payload", "depends_on": ["build_payload"], "permissions": []},
+    {"id": "approve", "type": "approval", "policy": "user_confirms_exact_payload_before_artifact_commit", "depends_on": ["validate_payload"], "permissions": []},
+    {"id": "render_deck", "type": "tool", "tool": "artifact.deck.write", "depends_on": ["approve"], "permissions": ["artifact.write"]}
   ]
 }

@@ -1,0 +1,14 @@
+{
+  "id": "shared.research.pdf-import",
+  "plugin": "shared.research",
+  "display_name": "PDF 资料提取与入库",
+  "entry_nodes": ["read_pdf"],
+  "output_nodes": ["persist_knowledge"],
+  "nodes": [
+    {"id": "read_pdf", "type": "tool", "tool": "pdf.read", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "extract_knowledge", "type": "agent", "skill": "research-frontier-markets", "depends_on": ["read_pdf"], "permissions": ["artifact.write"]},
+    {"id": "validate_evidence", "type": "validator", "check": "pdf_pages_source_fields_and_fact_labels", "depends_on": ["extract_knowledge"], "permissions": []},
+    {"id": "approve_knowledge", "type": "approval", "policy": "owner_confirms_pdf_knowledge_record", "depends_on": ["validate_evidence"], "permissions": []},
+    {"id": "persist_knowledge", "type": "tool", "tool": "knowledge.write", "depends_on": ["approve_knowledge"], "permissions": ["knowledge.write"]}
+  ]
+}

@@ -17,6 +17,10 @@ data/sales/*
 !data/sales/*.example.*
 data/weekly/*
 !data/weekly/*.example.*
+data/inbox/*
+!data/inbox/.gitkeep
+inputs/*
+!inputs/.gitkeep
 data/weflow/
 outputs/
 library/templates/office-template-catalog.json

@@ -42,7 +42,7 @@ pi install -l .
 pi
 ```
 
-如需公开资料检索，在本机环境中设置 `BRAVE_SEARCH_API_KEY`；密钥不要写入仓库。未配置时研究和政府方案会停在公开检索节点并给出说明，不会回退到非官方网页抓取。[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
+如需公开资料检索，在本机环境中设置 `BRAVE_SEARCH_API_KEY`；密钥不要写入仓库。`web.search` 只发现来源，后续 `web.open` 才读取正文；正文读取固定到已核验的公网地址，拒绝重定向、本机/私网地址、危险协议、疑似带密钥 URL 和超限响应，并限制 DNS、连接空闲和总处理时间。[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
 Pi 扩展会按当前 Profile 动态加载 Skills；产品总监不会加载市场/销售 Skill，市场总监也不会加载产品 Skill，未进入任何 Profile 的旧版邮箱与聊天 Skill 不会加载。
 
@@ -52,6 +52,7 @@ Pi 扩展会按当前 Profile 动态加载 Skills；产品总监不会加载市�
 /director-profile
 /director-profile product-director
 /director-services
+/director-run pdf-import 读取 inputs/example.pdf，提取页码证据并准备入库
 /director-run product-prd 为设备端告警功能形成 PRD
 /director-status
 /director-approve
@@ -82,7 +83,7 @@ python -m agent_platform list-services --profile product-director
 
 ## 知识库
 
-两个 Profile 都依赖 `shared.knowledge`。受控适配器把现有 `data/knowledge/source-register.csv` 作为来源登记入口，并要求所有结论标记为“已证实事实、分析判断、待验证假设、未知信息”。结构化写入会先冻结完整批次和 SHA-256 校验码，工作台展示具体内容并把审批绑定到该校验码；批准后才使用稳定 ID、记录版本、文件锁、提交日志和原子替换写入。同一 CSV 的最多 100 条变更按一个批次提交，跨销售表不伪装成一个事务。正式业务数据仍只保存在本地，公开仓库只提交 `.example` 模板。
+两个 Profile 都依赖 `shared.knowledge`。受控适配器把现有 `data/knowledge/source-register.csv` 作为来源登记入口，并要求所有结论标记为“已证实事实、分析判断、待验证假设、未知信息”。网页或 PDF 读取形成的来源 URL 与精确入库 mutation 会按任务持久化到 `.pi/director-runtime/evidence/`，Agent 重启后仍不能用另一份内容冒充原证据。结构化写入会先冻结完整批次和 SHA-256 校验码，工作台展示具体内容并把审批绑定到该校验码；批准后才使用稳定 ID、记录版本、文件锁、提交日志和原子替换写入。同一 CSV 的最多 100 条变更按一个批次提交，跨销售表不伪装成一个事务。正式业务数据仍只保存在本地，公开仓库只提交 `.example` 模板。
 
 ## 项目结构
 
@@ -101,8 +102,8 @@ docs/                             架构、开发和操作说明
 
 ## 当前范围
 
-当前版本是可安装、可受管执行的本地原型：已包含按 Profile 隔离的 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售/公开检索适配器和本地工作台。它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、完整办公文件执行适配器，也未内置隔离 Subagent 执行器。默认行业研究先做公开来源发现，再读取内部知识，避免把内部材料带入外部查询；仓库保留可选的有边界 Subagent Workflow，安装隔离执行器前不会被默认服务调用。
+当前版本是可安装、可受管执行的本地原型：已包含按 Profile 隔离的 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售适配器、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT 生成与 QA、本地工作台。它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器，也未内置隔离 Subagent 执行器。默认行业研究按 `web.search` → `web.open` → `knowledge.search` 执行，避免把内部材料带入外部查询；仓库保留可选的有边界 Subagent Workflow，安装隔离执行器前不会被默认服务调用。
 
-公开检索当前用于发现来源，只返回搜索服务提供的标题、URL、摘要和时间信息，不自动抓取网页正文。需要精确引用或一手材料核验时，应提供正文/PDF；否则相应细节必须保留为待验证。
+本地 PDF 只从 `inputs/` 或 `data/inbox/` 读取明确文件，两处目录默认被 Git 忽略。随包安装的 PDF.js 和本地受限文本层兜底都在独立子进程中运行，限制为 45 秒和 256 MiB；不可靠兜底结果只能保持 `pending`，在线 PDF 不执行兜底。周报先生成可审阅的精确载荷并等待 Approval，批准后才使用 Codex 工作区附带的 `@oai/artifact-tool` 构建、逐页渲染、检查来源备注和运行 `slides_test.py`，最后独占提交到 `outputs/`。首次使用前需按 [Pi 使用说明](docs/PI使用说明.md) 配置对应绝对路径。缺少依赖时工作流会停在确定性工具节点，不会把结构化文本伪装成 PPT。
 
 现有 Codex 市场总监插件仍可按 [旧版使用说明](docs/使用说明.md) 使用；它与新的 Pi Agent 是适配层关系，不是新架构的核心依赖。

@@ -7,7 +7,8 @@
   "nodes": [
     {"id": "frame_problem", "type": "agent", "skill": "product-discovery", "depends_on": [], "permissions": ["knowledge.read"]},
     {"id": "research", "type": "tool", "tool": "web.search", "depends_on": ["frame_problem"], "permissions": ["web.read"]},
-    {"id": "opportunity_brief", "type": "agent", "skill": "product-discovery", "depends_on": ["research"], "permissions": ["artifact.write"]},
+    {"id": "open_sources", "type": "tool", "tool": "web.open", "depends_on": ["research"], "permissions": ["web.read"]},
+    {"id": "opportunity_brief", "type": "agent", "skill": "product-discovery", "depends_on": ["open_sources"], "permissions": ["artifact.write"]},
     {"id": "evidence_gate", "type": "validator", "check": "problem_evidence_assumptions_and_validation_plan", "depends_on": ["opportunity_brief"], "permissions": []},
     {"id": "approve_knowledge", "type": "approval", "policy": "product_owner_confirms_opportunity_record", "depends_on": ["evidence_gate"], "permissions": []},
     {"id": "update_knowledge", "type": "tool", "tool": "knowledge.write", "depends_on": ["approve_knowledge"], "permissions": ["knowledge.write"]}

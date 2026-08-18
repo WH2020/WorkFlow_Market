@@ -1,27 +1,41 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
+  readdirSync,
   renameSync,
+  rmSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
+import { normalizePublicUrl, openWebSource, readLocalPdf } from "./source-readers.ts";
 
 export type AdapterHooks = {
   projectRoot: () => string;
-  beforeLogicalTool: (logicalTool: string, params: unknown) => { intent_id?: string; payload_sha256?: string } | void;
+  beforeLogicalTool: (logicalTool: string, params: unknown) => {
+    intent_id?: string;
+    payload_sha256?: string;
+    task_id?: string;
+    profile_id?: string;
+    authorized_urls?: string[];
+  } | void;
   afterLogicalTool: (logicalTool: string, params: unknown, details: unknown) => void;
   onLogicalToolError: (
-    logicalTool: "knowledge.write" | "sales.write",
+    logicalTool: "knowledge.write" | "sales.write" | "artifact.deck.write",
     params: unknown,
     outcome: "not_committed" | "ambiguous",
     error: unknown,
@@ -44,6 +58,11 @@ type CsvTable = {
 const MAX_CSV_BYTES = 16 * 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = 2 * 1024 * 1024;
 const MAX_WEB_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_DECK_BYTES = 100 * 1024 * 1024;
+const MAX_WEEKLY_PERIOD_DAYS = 31;
+const MAX_WEEKLY_TASK_FILES = 500;
+const MAX_WEEKLY_OUTPUT_FILES = 200;
+const MAX_WEEKLY_SOURCE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
@@ -184,8 +203,8 @@ export function serializeCsv(table: CsvTable): string {
   return `${lines.map((line) => line.map(csvEscape).join(",")).join("\r\n")}\r\n`;
 }
 
-function readTable(path: string, definition: TableDefinition): CsvTable {
-  const parsed = parseCsv(readFileSync(path, "utf8"));
+function parseTableContent(content: string, path: string, definition: TableDefinition): CsvTable {
+  const parsed = parseCsv(content);
   if (parsed.length === 0) throw new Error(`CSV 缺少表头：${path}`);
   const headers = parsed[0];
   if (headers.length === 0 || headers.some((header) => header.trim() === "")) {
@@ -205,6 +224,10 @@ function readTable(path: string, definition: TableDefinition): CsvTable {
     return Object.fromEntries(headers.map((header, column) => [header, values[column]]));
   });
   return { headers, rows };
+}
+
+function readTable(path: string, definition: TableDefinition): CsvTable {
+  return parseTableContent(readFileSync(path, "utf8"), path, definition);
 }
 
 function recordVersion(headers: string[], row: Record<string, string>): string {
@@ -259,6 +282,30 @@ function validateSalesAssets(rows: Record<string, string>[]): void {
   }
 }
 
+function validateKnowledgeRecords(rows: Record<string, string>[]): void {
+  const statuses = new Set(["verified", "pending", "superseded"]);
+  for (const row of rows) {
+    const id = row.source_id || "<missing>";
+    if (!statuses.has(row.status)) throw new Error(`知识来源 ${id} 的 status 必须是 verified、pending 或 superseded`);
+    for (const field of ["published_date", "accessed_date"]) {
+      if (!row[field]?.trim()) continue;
+      const date = row[field].slice(0, 10);
+      const parsed = new Date(`${date}T00:00:00Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+        throw new Error(`知识来源 ${id} 的 ${field} 必须是 ISO 日期`);
+      }
+    }
+    if (row.status === "verified") {
+      for (const field of ["publisher", "accessed_date", "source_type", "quality", "notes"]) {
+        if (!row[field]?.trim()) throw new Error(`已核验知识来源 ${id} 缺少 ${field}`);
+      }
+      if (!row.url.trim() && !/evidence_refs=/u.test(row.notes)) {
+        throw new Error(`已核验知识来源 ${id} 必须有 URL 或 notes 中的 evidence_refs`);
+      }
+    }
+  }
+}
+
 function publicRows(table: CsvTable, rows: Record<string, string>[]) {
   return rows.map((row) => ({ ...row, _record_version: recordVersion(table.headers, row) }));
 }
@@ -269,6 +316,287 @@ function normalizeLimit(limit: number | undefined): number {
     throw new Error(`limit 必须是 1-${MAX_LIMIT} 的整数`);
   }
   return limit;
+}
+
+function parsePeriod(period: { start: string; end: string }): { start: string; end: string; startMs: number; endExclusiveMs: number } {
+  const parse = (value: string, field: string): number => {
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) throw new Error(`${field} 必须是 ISO 日期`);
+    const validationTimestamp = Date.parse(`${value}T00:00:00.000Z`);
+    const timestamp = Date.parse(`${value}T00:00:00.000+08:00`);
+    if (!Number.isFinite(timestamp) || !Number.isFinite(validationTimestamp) || new Date(validationTimestamp).toISOString().slice(0, 10) !== value) {
+      throw new Error(`${field} 不是有效日期`);
+    }
+    return timestamp;
+  };
+  const startMs = parse(period.start, "period.start");
+  const endMs = parse(period.end, "period.end");
+  if (startMs > endMs) throw new Error("周报周期开始日期不能晚于结束日期");
+  const endExclusiveMs = endMs + 86_400_000;
+  if ((endExclusiveMs - startMs) / 86_400_000 > MAX_WEEKLY_PERIOD_DAYS) {
+    throw new Error(`周报周期不能超过 ${MAX_WEEKLY_PERIOD_DAYS} 天`);
+  }
+  return { ...period, startMs, endExclusiveMs };
+}
+
+function dateInPeriod(value: string | undefined, period: ReturnType<typeof parsePeriod>): boolean {
+  if (!value) return false;
+  const timestamp = Date.parse(value.length === 10 ? `${value}T00:00:00.000+08:00` : value);
+  return Number.isFinite(timestamp) && timestamp >= period.startMs && timestamp < period.endExclusiveMs;
+}
+
+function binarySha256(path: string): string {
+  const hash = createHash("sha256");
+  const descriptor = openSync(path, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    while (true) {
+      const bytesRead = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  return hash.digest("hex");
+}
+
+type WeeklySourceVersion = { source_id: string; path: string; sha256: string; bytes: number; version: string };
+
+function weeklyTextSnapshot(
+  root: string,
+  path: string,
+  sourceId: string,
+  maxBytes: number,
+): { source: WeeklySourceVersion; text: string } {
+  const meta = lstatSync(path);
+  if (!meta.isFile() || meta.isSymbolicLink()) throw new Error(`周报来源不是普通文件：${relative(root, path)}`);
+  const canonical = realpathSync.native(path);
+  if (!isContained(root, canonical)) throw new Error(`周报来源越出项目目录：${relative(root, path)}`);
+  const descriptor = openSync(canonical, "r");
+  let content: Buffer;
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || opened.size > maxBytes) throw new Error(`周报来源超过安全上限：${relative(root, canonical)}`);
+    content = readFileSync(descriptor);
+    if (content.length > maxBytes) throw new Error(`周报来源读取期间超过安全上限：${relative(root, canonical)}`);
+  } finally {
+    closeSync(descriptor);
+  }
+  const digest = createHash("sha256").update(content).digest("hex");
+  const source = {
+    source_id: sourceId,
+    path: relative(root, canonical).replaceAll("\\", "/"),
+    sha256: digest,
+    bytes: content.length,
+    version: `sha256:${digest}`,
+  };
+  return { source, text: content.toString("utf8") };
+}
+
+function weeklyBinarySnapshot(
+  root: string,
+  path: string,
+  sourceId: string,
+): { source: WeeklySourceVersion; modifiedAt: string } {
+  const meta = lstatSync(path);
+  if (!meta.isFile() || meta.isSymbolicLink()) throw new Error(`周报来源不是普通文件：${relative(root, path)}`);
+  const canonical = realpathSync.native(path);
+  if (!isContained(root, canonical)) throw new Error(`周报来源越出项目目录：${relative(root, path)}`);
+  const descriptor = openSync(canonical, "r");
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let opened: ReturnType<typeof fstatSync>;
+  try {
+    opened = fstatSync(descriptor);
+    while (true) {
+      const bytesRead = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  const digest = hash.digest("hex");
+  return {
+    source: {
+      source_id: sourceId,
+      path: relative(root, canonical).replaceAll("\\", "/"),
+      sha256: digest,
+      bytes: opened.size,
+      version: `sha256:${digest}`,
+    },
+    modifiedAt: opened.mtime.toISOString(),
+  };
+}
+
+export function collectWeeklySnapshot(
+  projectRoot: string,
+  requestedPeriod: { start: string; end: string },
+  profileId?: string,
+): Record<string, unknown> {
+  const period = parsePeriod(requestedPeriod);
+  const root = realpathSync.native(resolve(projectRoot));
+  const sources: WeeklySourceVersion[] = [];
+  let sourceBytes = 0;
+  const account = (source: WeeklySourceVersion): void => {
+    sourceBytes += source.bytes;
+    if (sourceBytes > MAX_WEEKLY_SOURCE_BYTES) throw new Error("周报快照来源总量超过 32 MiB 安全上限");
+    sources.push(source);
+  };
+
+  const tasks: Record<string, unknown>[] = [];
+  const allowedOutputPaths = new Set<string>();
+  const truncation: {
+    tasks: { discovered: number; inspected: number; returned: number; truncated: boolean };
+    sales: Record<string, { matched: number; returned: number; truncated: boolean }>;
+    knowledge: { matched: number; returned: number; truncated: boolean };
+    outputs: { discovered: number; inspected: number; returned: number; truncated: boolean };
+  } = {
+    tasks: { discovered: 0, inspected: 0, returned: 0, truncated: false },
+    sales: {},
+    knowledge: { matched: 0, returned: 0, truncated: false },
+    outputs: { discovered: 0, inspected: 0, returned: 0, truncated: false },
+  };
+  const taskDirectory = resolve(root, ".pi", "director-runtime", "tasks");
+  if (existsSync(taskDirectory)) {
+    const directoryMeta = lstatSync(taskDirectory);
+    if (!directoryMeta.isDirectory() || directoryMeta.isSymbolicLink()) throw new Error("任务状态目录必须是普通目录");
+    const canonicalTasks = realpathSync.native(taskDirectory);
+    if (!isContained(root, canonicalTasks)) throw new Error("任务状态目录越出项目目录");
+    const names = readdirSync(canonicalTasks).filter((name) => /^[A-Za-z0-9_-]{1,128}\.json$/u.test(name));
+    const taskCandidates = names.map((name) => {
+      const path = join(canonicalTasks, name);
+      const meta = lstatSync(path);
+      if (!meta.isFile() || meta.isSymbolicLink() || meta.size > 1024 * 1024) throw new Error(`任务状态文件无效：${name}`);
+      return { name, modified: meta.mtimeMs };
+    }).sort((left, right) => right.modified - left.modified || left.name.localeCompare(right.name));
+    const selectedTasks = taskCandidates.slice(0, MAX_WEEKLY_TASK_FILES);
+    truncation.tasks = {
+      discovered: taskCandidates.length,
+      inspected: selectedTasks.length,
+      returned: 0,
+      truncated: taskCandidates.length > selectedTasks.length,
+    };
+    for (const { name } of selectedTasks) {
+      const path = join(canonicalTasks, name);
+      const taskSnapshot = weeklyTextSnapshot(root, path, `task:${name.slice(0, -5)}`, 1024 * 1024);
+      const task = JSON.parse(taskSnapshot.text) as Record<string, unknown>;
+      if (profileId && task.profile_id !== profileId) continue;
+      const matchingAudit = Array.isArray(task.audit)
+        ? task.audit.filter((event) => event && typeof event === "object" && dateInPeriod(String((event as Record<string, unknown>).at ?? ""), period))
+        : [];
+      const audit = matchingAudit.slice(0, 500);
+      if (!dateInPeriod(String(task.created_at ?? ""), period) && !dateInPeriod(String(task.updated_at ?? ""), period) && audit.length === 0) continue;
+      account(taskSnapshot.source);
+      if (Array.isArray(task.artifacts)) {
+        for (const artifact of task.artifacts) {
+          if (typeof artifact === "string" && /^outputs\/[^/\\\0]{1,180}$/u.test(artifact)) allowedOutputPaths.add(artifact);
+        }
+      }
+      tasks.push({
+        task_id: task.task_id,
+        profile_id: task.profile_id,
+        service_id: task.service_id,
+        workflow_id: task.workflow_id,
+        request: typeof task.request === "string" ? task.request.slice(0, 1000) : "",
+        status: task.status,
+        version: task.version,
+        completed_nodes: Array.isArray(task.completed_nodes) ? task.completed_nodes.slice(0, 100) : [],
+        artifacts: Array.isArray(task.artifacts) ? task.artifacts.slice(0, 100) : [],
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        audit,
+        audit_total: matchingAudit.length,
+        audit_returned: audit.length,
+        audit_truncated: matchingAudit.length > audit.length,
+      });
+    }
+    truncation.tasks.returned = tasks.length;
+  }
+
+  const sales: Record<string, Record<string, string>[]> = {};
+  const dateFields: Record<string, string[]> = {
+    customers: ["updated_at", "last_evidence_date", "next_action_due"],
+    activities: ["occurred_at", "created_at", "next_action_due"],
+    resource_requests: ["requested_at", "updated_at", "deadline"],
+  };
+  if (profileId === "market-director" || profileId === undefined) {
+    for (const tableName of ["customers", "activities", "resource_requests"] as const) {
+      const definition = SALES_TABLES[tableName];
+      const path = resolveDataFile(root, "sales", definition.file);
+      const tableSnapshot = weeklyTextSnapshot(root, path, `sales:${tableName}`, MAX_CSV_BYTES);
+      const table = parseTableContent(tableSnapshot.text, path, definition);
+      account(tableSnapshot.source);
+      const matchingRows = table.rows.filter((row) => dateFields[tableName]!.some((field) => dateInPeriod(row[field], period)));
+      sales[tableName] = publicRows(table, matchingRows).slice(0, 1000);
+      truncation.sales[tableName] = {
+        matched: matchingRows.length,
+        returned: sales[tableName].length,
+        truncated: matchingRows.length > sales[tableName].length,
+      };
+    }
+  }
+
+  const knowledgePath = resolveDataFile(root, "knowledge", KNOWLEDGE_DEFINITION.file);
+  const knowledgeSnapshot = weeklyTextSnapshot(root, knowledgePath, "knowledge:source-register", MAX_CSV_BYTES);
+  const knowledgeTable = parseTableContent(knowledgeSnapshot.text, knowledgePath, KNOWLEDGE_DEFINITION);
+  account(knowledgeSnapshot.source);
+  const matchingKnowledge = knowledgeTable.rows.filter((row) => dateInPeriod(row.accessed_date, period));
+  const knowledge = publicRows(knowledgeTable, matchingKnowledge).slice(0, 1000);
+  truncation.knowledge = {
+    matched: matchingKnowledge.length,
+    returned: knowledge.length,
+    truncated: matchingKnowledge.length > knowledge.length,
+  };
+
+  const outputs: Record<string, unknown>[] = [];
+  const outputDirectory = resolve(root, "outputs");
+  if (existsSync(outputDirectory)) {
+    const outputMeta = lstatSync(outputDirectory);
+    if (!outputMeta.isDirectory() || outputMeta.isSymbolicLink()) throw new Error("outputs/ 必须是普通目录");
+    const canonicalOutputs = realpathSync.native(outputDirectory);
+    if (!isContained(root, canonicalOutputs)) throw new Error("outputs/ 越出项目目录");
+    const names = readdirSync(canonicalOutputs).sort();
+    truncation.outputs.discovered = names.length;
+    const candidates = names.flatMap((name) => {
+      if (!/^[^/\\\0]{1,180}$/u.test(name)) throw new Error("outputs/ 包含不安全文件名");
+      const path = join(canonicalOutputs, name);
+      const meta = lstatSync(path);
+      if (!meta.isFile() || meta.isSymbolicLink() || meta.size > MAX_DECK_BYTES) return [];
+      if (!allowedOutputPaths.has(`outputs/${name}`)) return [];
+      return [{ name, modified: meta.mtimeMs }];
+    }).sort((left, right) => right.modified - left.modified || left.name.localeCompare(right.name));
+    const selectedOutputs = candidates.slice(0, MAX_WEEKLY_OUTPUT_FILES);
+    truncation.outputs.inspected = selectedOutputs.length;
+    truncation.outputs.truncated = candidates.length > selectedOutputs.length;
+    for (const { name } of selectedOutputs) {
+      const path = join(canonicalOutputs, name);
+      const outputSnapshot = weeklyBinarySnapshot(root, path, `output:${name}`);
+      if (!dateInPeriod(outputSnapshot.modifiedAt, period)) continue;
+      account(outputSnapshot.source);
+      outputs.push({
+        path: outputSnapshot.source.path,
+        bytes: outputSnapshot.source.bytes,
+        sha256: outputSnapshot.source.sha256,
+        modified_at: outputSnapshot.modifiedAt,
+      });
+    }
+    truncation.outputs.returned = outputs.length;
+  }
+
+  const snapshotBase = {
+    schema_version: "1.0",
+    period: { start: period.start, end: period.end },
+    profile_id: profileId ?? null,
+    generated_at: new Date().toISOString(),
+    tasks,
+    sales,
+    outputs,
+    knowledge,
+    truncation,
+    source_versions: sources,
+  };
+  return { ...snapshotBase, snapshot_sha256: createHash("sha256").update(JSON.stringify(snapshotBase), "utf8").digest("hex") };
 }
 
 function matchesQuery(row: Record<string, string>, query: string): boolean {
@@ -346,6 +674,458 @@ type CommitReceipt = {
 
 function fileSha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function runDeckBuilder(
+  nodePath: string,
+  builderPath: string,
+  inputPath: string,
+  outputPath: string,
+  qaDirectory: string,
+  expectedSlideCount: number,
+): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      nodePath,
+      [builderPath, "--input", inputPath, "--output", outputPath, "--qa-dir", qaDirectory],
+      { timeout: 180_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: artifactEnvironment() },
+      (error, stdout, stderr) => {
+        if (error) {
+          const output = String(stdout).trim();
+          const lastLine = output.split(/\r?\n/u).at(-1) ?? "";
+          try {
+            const manifest = JSON.parse(lastLine) as { output?: unknown; qa_dir?: unknown; slide_count?: unknown };
+            const code = error.code;
+            const verifiedWindowsCanvasTeardown = process.platform === "win32"
+              && (code === 3221226505 || code === -1073740791 || code === "3221226505" || code === "-1073740791");
+            if (
+              verifiedWindowsCanvasTeardown
+              && manifest.output === outputPath
+              && manifest.qa_dir === qaDirectory
+              && manifest.slide_count === expectedSlideCount
+              && existsSync(outputPath)
+              && lstatSync(outputPath).size > 0
+            ) {
+              resolvePromise(output);
+              return;
+            }
+          } catch {
+            // Fall through to the real build failure below.
+          }
+          reject(new Error(`PPT 构建失败：${String(stderr || stdout || error.message).trim().slice(0, 4000)}`));
+          return;
+        }
+        resolvePromise(String(stdout).trim());
+      },
+    );
+  });
+}
+
+function runSlidesTest(
+  pythonPath: string,
+  testPath: string,
+  outputPath: string,
+  compatibilityRunner: string,
+): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      pythonPath,
+      [compatibilityRunner, testPath, outputPath],
+      {
+        timeout: 180_000,
+        windowsHide: true,
+        maxBuffer: 4 * 1024 * 1024,
+        env: artifactEnvironment(),
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`PPT 溢出检查失败：${String(stderr || stdout || error.message).trim().slice(0, 4000)}`));
+          return;
+        }
+        const result = String(stdout).trim();
+        if (!/Test passed\. No overflow detected\./u.test(result)) {
+          reject(new Error(`PPT 溢出检查未通过：${result.slice(0, 4000)}`));
+          return;
+        }
+        resolvePromise(result);
+      },
+    );
+  });
+}
+
+function runMontage(
+  pythonPath: string,
+  montageScript: string,
+  qaDirectory: string,
+  montagePath: string,
+): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      pythonPath,
+      [
+        montageScript,
+        "--input_dir", qaDirectory,
+        "--output_file", montagePath,
+        "--num_col", "3",
+        "--label_mode", "filename",
+        "--fail_on_image_error",
+      ],
+      { timeout: 120_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: artifactEnvironment() },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`PPT 预览拼图失败：${String(stderr || stdout || error.message).trim().slice(0, 4000)}`));
+          return;
+        }
+        resolvePromise(String(stdout).trim());
+      },
+    );
+  });
+}
+
+function artifactEnvironment(): NodeJS.ProcessEnv {
+  const allowed = new Set([
+    "PATH", "Path", "PATHEXT", "SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "COMSPEC",
+    "TEMP", "TMP", "TMPDIR", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA",
+    "NODE_PATH", "RUNTIME_NODE", "RUNTIME_NODE_MODULES", "RUNTIME_BIN_DIR",
+    "WORKFLOW_ARTIFACT_TOOL_PATH", "WORKFLOW_PRESENTATIONS_MARKER",
+  ]);
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key)));
+}
+
+function assertSafeDeckText(value: unknown, label: string, maxLength: number, singleLine = false): void {
+  if (value === undefined) return;
+  if (typeof value !== "string" || value.length > maxLength) throw new Error(`${label} 类型无效或过长`);
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)) throw new Error(`${label} 含控制字符`);
+  if (/\[\/?Sources\]/iu.test(value)) throw new Error(`${label} 不能伪造 speaker notes 来源标记`);
+  if (singleLine && /[\r\n]/u.test(value)) throw new Error(`${label} 必须是单行文本`);
+}
+
+type DeckPayload = {
+  schema_version: "1.0";
+  snapshot_sha256: string;
+  output_name: string;
+  profile_id: "market-director" | "product-director";
+  template_id: "ceo-weekly";
+  period: { start: string; end: string };
+  slides: Array<{
+    title: string;
+    subtitle?: string;
+    eyebrow?: string;
+    lead?: string;
+    body?: string[];
+    callout?: string;
+    notes?: string;
+    sources?: Array<{ title: string; url?: string; path?: string; sha256?: string; page?: number }>;
+  }>;
+};
+
+export function assertDeckPayload(value: DeckPayload): void {
+  if (value.schema_version !== "1.0") throw new Error("PPT 载荷 schema_version 必须为 1.0");
+  if (!/^[a-f0-9]{64}$/u.test(value.snapshot_sha256)) throw new Error("PPT 载荷必须包含当前 weekly.snapshot 的 SHA-256");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx$/u.test(value.output_name)) {
+    throw new Error("PPT 输出名必须是 1-120 字符的安全 ASCII .pptx 文件名");
+  }
+  if (value.template_id !== "ceo-weekly") throw new Error("第一版只支持 ceo-weekly 周报模板");
+  if (!new Set(["market-director", "product-director"]).has(value.profile_id)) throw new Error("PPT Profile 无效");
+  parsePeriod(value.period);
+  if (!Array.isArray(value.slides) || value.slides.length < 4 || value.slides.length > 10) {
+    throw new Error("周报 PPT 必须包含 4-10 页");
+  }
+  for (const [index, slide] of value.slides.entries()) {
+    assertSafeDeckText(slide.title, `PPT 第 ${index + 1} 页标题`, 120);
+    if (typeof slide.title !== "string" || !slide.title.trim()) throw new Error(`PPT 第 ${index + 1} 页标题缺失`);
+    assertSafeDeckText(slide.subtitle, `PPT 第 ${index + 1} 页副标题`, 240);
+    assertSafeDeckText(slide.eyebrow, `PPT 第 ${index + 1} 页眉`, 80);
+    assertSafeDeckText(slide.lead, `PPT 第 ${index + 1} 页引导语`, 240);
+    assertSafeDeckText(slide.callout, `PPT 第 ${index + 1} 页结论框`, 240);
+    assertSafeDeckText(slide.notes, `PPT 第 ${index + 1} 页备注`, 4000);
+    const body = slide.body ?? [];
+    if (!Array.isArray(body) || body.length > 7 || body.some((line) => typeof line !== "string" || !line.trim() || line.length > 180)) {
+      throw new Error(`PPT 第 ${index + 1} 页正文必须是最多 7 条、每条不超过 180 字的非空文本`);
+    }
+    body.forEach((line, bodyIndex) => assertSafeDeckText(line, `PPT 第 ${index + 1} 页正文 ${bodyIndex + 1}`, 180));
+    const sources = slide.sources ?? [];
+    if (!Array.isArray(sources) || sources.length > 20) throw new Error(`PPT 第 ${index + 1} 页来源超过 20 条`);
+    for (const source of sources) {
+      assertSafeDeckText(source.title, `PPT 第 ${index + 1} 页来源标题`, 500, true);
+      if (typeof source.title !== "string" || !source.title.trim()) throw new Error(`PPT 第 ${index + 1} 页来源标题无效`);
+      if (!source.url && !source.path) throw new Error(`PPT 第 ${index + 1} 页来源必须包含 url 或 path`);
+      if (source.url) {
+        assertSafeDeckText(source.url, `PPT 第 ${index + 1} 页来源 URL`, 2048, true);
+        if (source.url !== source.url.trim()) throw new Error(`PPT 第 ${index + 1} 页来源 URL 不能包含首尾空白`);
+        let url: URL;
+        try { url = new URL(source.url); } catch { throw new Error(`PPT 第 ${index + 1} 页来源 URL 无效`); }
+        if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`PPT 第 ${index + 1} 页来源只允许 http/https URL`);
+        if (url.username || url.password) throw new Error(`PPT 第 ${index + 1} 页来源 URL 不能包含凭据`);
+        for (const key of url.searchParams.keys()) {
+          if (/(^|[-_])(api[-_]?key|access[-_]?token|token|password|secret|signature|sig|credential)([-_]|$)/iu.test(key)) {
+            throw new Error(`PPT 第 ${index + 1} 页来源 URL 包含敏感查询参数`);
+          }
+        }
+        if (/(token|password|secret|signature|credential|sig)=/iu.test(url.hash)) {
+          throw new Error(`PPT 第 ${index + 1} 页来源 URL 片段包含敏感参数`);
+        }
+      }
+      if (source.path) {
+        assertSafeDeckText(source.path, `PPT 第 ${index + 1} 页来源路径`, 240, true);
+        if (isAbsolute(source.path) || source.path.split(/[\\/]/u).some((segment) => segment === "..")) {
+          throw new Error(`PPT 第 ${index + 1} 页来源路径必须是项目内相对路径`);
+        }
+        if (!/^[a-f0-9]{64}$/u.test(source.sha256 ?? "")) {
+          throw new Error(`PPT 第 ${index + 1} 页本地来源必须包含 weekly.snapshot 中的 SHA-256`);
+        }
+      } else if (source.sha256 !== undefined) {
+        throw new Error(`PPT 第 ${index + 1} 页纯 URL 来源不能携带本地文件 SHA-256`);
+      }
+      if (source.page !== undefined && (!Number.isInteger(source.page) || source.page < 1 || source.page > 100000)) {
+        throw new Error(`PPT 第 ${index + 1} 页来源页码无效`);
+      }
+    }
+  }
+  if (!value.slides.some((slide) => (slide.sources?.length ?? 0) > 0)) {
+    throw new Error("周报 PPT 至少需要一条可追溯来源，来源将写入 speaker notes");
+  }
+}
+
+function assertDeckSourcePaths(root: string, payload: DeckPayload): void {
+  for (const [index, slide] of payload.slides.entries()) {
+    for (const source of slide.sources ?? []) {
+      if (!source.path) continue;
+      const requested = resolve(root, source.path);
+      if (!isContained(root, requested) || !existsSync(requested)) throw new Error(`PPT 第 ${index + 1} 页本地来源不存在或越出项目目录`);
+      const meta = lstatSync(requested);
+      const canonical = realpathSync.native(requested);
+      if (!meta.isFile() || meta.isSymbolicLink() || meta.size > MAX_WEEKLY_SOURCE_BYTES || !isContained(root, canonical)) {
+        throw new Error(`PPT 第 ${index + 1} 页本地来源必须是项目内普通文件`);
+      }
+      if (binarySha256(canonical) !== source.sha256) throw new Error(`PPT 第 ${index + 1} 页本地来源在 Approval 后已发生变化`);
+    }
+  }
+}
+
+type DeckCommitContext = { intent_id: string; payload_sha256: string; task_id: string; profile_id: string };
+class DeckNotCommittedError extends Error {}
+type DeckReceipt = {
+  schema_version: "1.0";
+  intent_id: string;
+  task_id: string;
+  payload_sha256: string;
+  owner: "director_artifact_deck_write";
+  target: string;
+  status: "prepared" | "committed";
+  artifact_sha256: string;
+  bytes: number;
+  slide_count: number;
+  qa: { slides_test: string; preview_directory: string; montage: string };
+  updated_at: string;
+};
+
+function deckReceiptPath(root: string, intentId: string): string {
+  if (!/^[A-Za-z0-9-]{1,128}$/u.test(intentId)) throw new Error("PPT 写入意图 ID 无效");
+  const requested = resolve(root, ".pi", "director-runtime", "artifact-commits");
+  mkdirSync(requested, { recursive: true });
+  const meta = lstatSync(requested);
+  const canonical = realpathSync.native(requested);
+  if (!meta.isDirectory() || meta.isSymbolicLink() || !isContained(root, canonical)) throw new Error("PPT receipt 目录无效");
+  return join(canonical, `${intentId}.json`);
+}
+
+function acquireDeckIntentLock(root: string, intentId: string): { path: string; descriptor: number } {
+  const path = `${deckReceiptPath(root, intentId)}.lock`;
+  try {
+    return { path, descriptor: acquireLock(path) };
+  } catch (error) {
+    if (error instanceof Error && error.message.endsWith(path)) {
+      throw new DeckNotCommittedError("同一 PPT 写入意图正在由另一个任务处理，请稍后重试");
+    }
+    throw error;
+  }
+}
+
+export function holdDeckIntentLockForTests(projectRoot: string, intentId: string): () => void {
+  const root = realpathSync.native(resolve(projectRoot));
+  const held = acquireDeckIntentLock(root, intentId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseLock(held.path, held.descriptor);
+  };
+}
+
+function readCommittedDeckReceipt(root: string, path: string, commit: DeckCommitContext, outputPath: string): DeckReceipt | undefined {
+  if (!existsSync(path)) return undefined;
+  const receipt = JSON.parse(readFileSync(path, "utf8")) as DeckReceipt;
+  if (
+    receipt.schema_version !== "1.0" || receipt.intent_id !== commit.intent_id || receipt.task_id !== commit.task_id ||
+    receipt.payload_sha256 !== commit.payload_sha256 || receipt.owner !== "director_artifact_deck_write" ||
+    receipt.target !== `outputs/${outputPath.split(/[\\/]/u).at(-1)}` ||
+    (receipt.status !== "prepared" && receipt.status !== "committed") ||
+    !/^[a-f0-9]{64}$/u.test(receipt.artifact_sha256) ||
+    !Number.isInteger(receipt.bytes) || receipt.bytes < 1 || receipt.bytes > MAX_DECK_BYTES ||
+    !Number.isInteger(receipt.slide_count) || receipt.slide_count < 4 || receipt.slide_count > 10 ||
+    !receipt.qa || !/Test passed\. No overflow detected\./u.test(receipt.qa.slides_test)
+  ) throw new Error("PPT receipt 与当前任务/意图/载荷不一致，需人工恢复");
+  const previewDirectory = resolve(root, receipt.qa.preview_directory);
+  const montagePath = resolve(root, receipt.qa.montage);
+  if (
+    !isContained(root, previewDirectory) || !isContained(root, montagePath) ||
+    !existsSync(previewDirectory) || !lstatSync(previewDirectory).isDirectory() || lstatSync(previewDirectory).isSymbolicLink() ||
+    !existsSync(montagePath) || !lstatSync(montagePath).isFile() || lstatSync(montagePath).isSymbolicLink()
+  ) throw new Error("PPT receipt 的 QA 证据缺失或越出项目目录，需人工恢复");
+  if (!existsSync(outputPath)) {
+    if (receipt.status === "committed") throw new Error("PPT receipt 标记已提交但正式文件缺失，需人工恢复");
+    return undefined;
+  }
+  const meta = lstatSync(outputPath);
+  if (!meta.isFile() || meta.isSymbolicLink() || meta.size !== receipt.bytes || binarySha256(outputPath) !== receipt.artifact_sha256) {
+    throw new Error("PPT 正式文件与 receipt 哈希不一致，需人工恢复");
+  }
+  if (receipt.status === "prepared") {
+    receipt.status = "committed";
+    receipt.updated_at = new Date().toISOString();
+    atomicWrite(path, `${JSON.stringify(receipt, null, 2)}\n`);
+  }
+  return receipt;
+}
+
+async function buildWeeklyDeck(projectRoot: string, payload: DeckPayload, commit: DeckCommitContext): Promise<Record<string, unknown>> {
+  assertDeckPayload(payload);
+  const root = realpathSync.native(resolve(projectRoot));
+  assertDeckSourcePaths(root, payload);
+  const outputDirectory = resolve(root, "outputs");
+  mkdirSync(outputDirectory, { recursive: true });
+  const outputMeta = lstatSync(outputDirectory);
+  if (!outputMeta.isDirectory() || outputMeta.isSymbolicLink()) throw new Error("outputs/ 必须是项目内普通目录，不能是符号链接");
+  const canonicalOutputDirectory = realpathSync.native(outputDirectory);
+  if (!isContained(root, canonicalOutputDirectory)) throw new Error("outputs/ 越出项目目录");
+  const outputPath = resolve(canonicalOutputDirectory, payload.output_name);
+  if (!isContained(canonicalOutputDirectory, outputPath)) throw new Error("PPT 输出路径越出 outputs/");
+  const receiptPath = deckReceiptPath(root, commit.intent_id);
+  const intentLock = acquireDeckIntentLock(root, commit.intent_id);
+  try {
+    const recovered = readCommittedDeckReceipt(root, receiptPath, commit, outputPath);
+    if (recovered) return {
+      path: recovered.target, receipt: relative(root, receiptPath).replaceAll("\\", "/"), sha256: recovered.artifact_sha256,
+      bytes: recovered.bytes, slide_count: recovered.slide_count, qa: recovered.qa, recovered: true,
+    };
+    if (existsSync(outputPath)) {
+      throw new DeckNotCommittedError(`PPT 输出文件已存在且不属于当前意图，拒绝覆盖：outputs/${payload.output_name}`);
+    }
+
+  const requestedJobDirectory = resolve(root, ".pi", "director-runtime", "deck-jobs");
+  mkdirSync(requestedJobDirectory, { recursive: true });
+  const jobDirectoryMeta = lstatSync(requestedJobDirectory);
+  if (!jobDirectoryMeta.isDirectory() || jobDirectoryMeta.isSymbolicLink()) {
+    throw new Error("PPT 临时任务目录必须是项目内普通目录，不能是符号链接");
+  }
+  const jobDirectory = realpathSync.native(requestedJobDirectory);
+  if (!isContained(root, jobDirectory)) throw new Error("PPT 临时任务目录越出项目目录");
+  const jobId = `${commit.intent_id}-${randomUUID()}`;
+  const ownedJobDirectory = join(jobDirectory, jobId);
+  mkdirSync(ownedJobDirectory, { recursive: false });
+  const ownedCanonical = realpathSync.native(ownedJobDirectory);
+  if (!isContained(jobDirectory, ownedCanonical) || lstatSync(ownedCanonical).isSymbolicLink()) throw new Error("PPT 私有任务目录无效");
+  const inputPath = join(ownedCanonical, "payload.json");
+  const temporaryDeckPath = join(ownedCanonical, "artifact.pptx");
+  const qaDirectory = join(ownedCanonical, "qa");
+  const builderPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "artifacts", "build-director-deck.mjs");
+  const compatibilityRunner = resolve(dirname(fileURLToPath(import.meta.url)), "..", "artifacts", "run-slides-test-compatible.py");
+  const nodePath = process.env.WORKFLOW_ARTIFACT_NODE?.trim() || process.execPath;
+  const pythonPath = process.env.WORKFLOW_ARTIFACT_PYTHON?.trim();
+  const slidesTestPath = process.env.WORKFLOW_SLIDES_TEST?.trim();
+  const montageScript = slidesTestPath ? resolve(dirname(slidesTestPath), "create_montage.py") : "";
+  if (!existsSync(builderPath)) throw new Error("PPT 构建脚本缺失");
+  if (!existsSync(compatibilityRunner)) throw new Error("PPT QA 兼容运行器缺失");
+  if (!pythonPath || !existsSync(pythonPath)) throw new Error("缺少有效的 WORKFLOW_ARTIFACT_PYTHON，无法运行 PPT QA");
+  if (!slidesTestPath || !existsSync(slidesTestPath)) throw new Error("缺少有效的 WORKFLOW_SLIDES_TEST，无法运行 PPT QA");
+  if (!montageScript || !existsSync(montageScript)) throw new Error("PPT 预览拼图工具缺失");
+  writeFileSync(inputPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  let committed = false;
+  try {
+    const stdout = await runDeckBuilder(nodePath, builderPath, inputPath, temporaryDeckPath, qaDirectory, payload.slides.length);
+    if (!existsSync(temporaryDeckPath)) throw new Error("PPT 构建器未生成私有临时文件");
+    const metadata = lstatSync(temporaryDeckPath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1 || metadata.size > MAX_DECK_BYTES) {
+      throw new Error("PPT 输出不是有效大小的普通文件");
+    }
+    for (let index = 1; index <= payload.slides.length; index += 1) {
+      const previewPath = join(qaDirectory, `slide-${String(index).padStart(2, "0")}.png`);
+      if (!existsSync(previewPath)) throw new Error(`PPT 第 ${index} 页预览缺失`);
+      const previewMeta = lstatSync(previewPath);
+      if (!previewMeta.isFile() || previewMeta.isSymbolicLink() || previewMeta.size < 1) {
+        throw new Error(`PPT 第 ${index} 页预览无效`);
+      }
+    }
+    const montagePath = join(qaDirectory, "deck-montage.webp");
+    await runMontage(pythonPath, montageScript, qaDirectory, montagePath);
+    const montageMeta = lstatSync(montagePath);
+    if (!montageMeta.isFile() || montageMeta.isSymbolicLink() || montageMeta.size < 1) {
+      throw new Error("PPT 全页预览拼图无效");
+    }
+    const slidesTest = await runSlidesTest(pythonPath, slidesTestPath, temporaryDeckPath, compatibilityRunner);
+    let build: unknown;
+    try { build = JSON.parse(stdout.split(/\r?\n/u).at(-1) ?? "{}"); } catch { build = { stdout: stdout.slice(0, 1000) }; }
+    const artifactSha256 = binarySha256(temporaryDeckPath);
+    const qa = {
+      slides_test: slidesTest,
+      preview_directory: relative(root, qaDirectory).replaceAll("\\", "/"),
+      montage: relative(root, join(qaDirectory, "deck-montage.webp")).replaceAll("\\", "/"),
+    };
+    const receipt: DeckReceipt = {
+      schema_version: "1.0", intent_id: commit.intent_id, task_id: commit.task_id,
+      payload_sha256: commit.payload_sha256, owner: "director_artifact_deck_write",
+      target: `outputs/${payload.output_name}`, status: "prepared", artifact_sha256: artifactSha256,
+      bytes: metadata.size, slide_count: payload.slides.length, qa, updated_at: new Date().toISOString(),
+    };
+    atomicWrite(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    try {
+      linkSync(temporaryDeckPath, outputPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        if (existsSync(receiptPath)) {
+          try {
+            const current = JSON.parse(readFileSync(receiptPath, "utf8")) as Partial<DeckReceipt>;
+            if (
+              current.status === "prepared" && current.intent_id === commit.intent_id &&
+              current.task_id === commit.task_id && current.payload_sha256 === commit.payload_sha256
+            ) unlinkSync(receiptPath);
+          } catch {
+            // Preserve an unreadable or ownership-mismatched receipt for manual recovery.
+          }
+        }
+        throw new DeckNotCommittedError(`PPT 输出名在提交时被其他任务占用，当前意图未提交：outputs/${payload.output_name}`);
+      }
+      throw error;
+    }
+    receipt.status = "committed";
+    receipt.updated_at = new Date().toISOString();
+    atomicWrite(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    committed = true;
+    return {
+      path: `outputs/${payload.output_name}`,
+      receipt: relative(root, receiptPath).replaceAll("\\", "/"),
+      intent_id: commit.intent_id,
+      payload_sha256: commit.payload_sha256,
+      sha256: artifactSha256,
+      bytes: metadata.size,
+      slide_count: payload.slides.length,
+      build,
+      qa,
+    };
+  } catch (error) {
+    throw error;
+  } finally {
+    if (committed) {
+      if (existsSync(inputPath)) unlinkSync(inputPath);
+      if (existsSync(temporaryDeckPath)) unlinkSync(temporaryDeckPath);
+    } else if (existsSync(ownedCanonical)) {
+      rmSync(ownedCanonical, { recursive: true, force: true });
+    }
+  }
+  } finally {
+    releaseLock(intentLock.path, intentLock.descriptor);
+  }
 }
 
 function receiptPath(projectRoot: string, intentId: string): string {
@@ -504,6 +1284,7 @@ function mutateRecords(
       })),
     };
     if (definition === SALES_TABLES.sales_assets) validateSalesAssets(table.rows);
+    if (definition === KNOWLEDGE_DEFINITION) validateKnowledgeRecords(table.rows);
     const afterContent = serializeCsv(table);
     const receipt: CommitReceipt = {
       schema_version: "1.0",
@@ -560,7 +1341,201 @@ const mutationSchema = Type.Object({
   expected_version: Type.Optional(Type.String({ description: "update 时必填，来自 _record_version" })),
 });
 
+type TaskEvidenceState = {
+  schema_version: "1.0";
+  task_id: string;
+  searched_urls: string[];
+  mutations: Record<string, string>;
+  weekly_snapshot?: WeeklySnapshotEvidence;
+  updated_at: string;
+};
+
+export type WeeklySnapshotEvidence = {
+  profile_id: string;
+  period: { start: string; end: string };
+  snapshot_sha256: string;
+  allowed_urls: string[];
+  source_versions: Array<{ path: string; sha256: string }>;
+};
+
+function canonicalEvidence(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalEvidence).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalEvidence(child)}`)
+      .join(",")}}`;
+  }
+  throw new Error("证据 mutation 必须是有限 JSON 数据");
+}
+
+function taskEvidencePath(projectRoot: string, taskId: string): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(taskId)) throw new Error("证据 registry 的 task_id 无效");
+  const root = realpathSync.native(resolve(projectRoot));
+  const requested = resolve(root, ".pi", "director-runtime", "evidence");
+  mkdirSync(requested, { recursive: true });
+  const meta = lstatSync(requested);
+  const canonical = realpathSync.native(requested);
+  if (!meta.isDirectory() || meta.isSymbolicLink() || !isContained(root, canonical)) throw new Error("证据 registry 目录无效");
+  return join(canonical, `${taskId}.json`);
+}
+
+function readTaskEvidence(projectRoot: string, taskId: string): TaskEvidenceState {
+  const path = taskEvidencePath(projectRoot, taskId);
+  if (!existsSync(path)) {
+    return { schema_version: "1.0", task_id: taskId, searched_urls: [], mutations: {}, updated_at: new Date().toISOString() };
+  }
+  const meta = lstatSync(path);
+  if (!meta.isFile() || meta.isSymbolicLink() || meta.size > 2 * 1024 * 1024) throw new Error("证据 registry 文件无效或过大");
+  const state = JSON.parse(readFileSync(path, "utf8")) as TaskEvidenceState;
+  if (
+    state.schema_version !== "1.0" || state.task_id !== taskId ||
+    !Array.isArray(state.searched_urls) || state.searched_urls.length > 500 ||
+    state.searched_urls.some((url) => typeof url !== "string" || url.length > 2048) ||
+    !state.mutations || typeof state.mutations !== "object" || Array.isArray(state.mutations) ||
+    Object.keys(state.mutations).length > 500 || Object.values(state.mutations).some((value) => typeof value !== "string") ||
+    (state.weekly_snapshot !== undefined && (
+      !state.weekly_snapshot || typeof state.weekly_snapshot !== "object" ||
+      typeof state.weekly_snapshot.profile_id !== "string" ||
+      !state.weekly_snapshot.period || typeof state.weekly_snapshot.period.start !== "string" || typeof state.weekly_snapshot.period.end !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(state.weekly_snapshot.snapshot_sha256) ||
+      !Array.isArray(state.weekly_snapshot.allowed_urls) || state.weekly_snapshot.allowed_urls.length > 1000 ||
+      state.weekly_snapshot.allowed_urls.some((url) => typeof url !== "string" || url.length > 2048) ||
+      !Array.isArray(state.weekly_snapshot.source_versions) || state.weekly_snapshot.source_versions.length > 1000 ||
+      state.weekly_snapshot.source_versions.some((source) => !source || typeof source.path !== "string" || !/^[a-f0-9]{64}$/u.test(source.sha256))
+    ))
+  ) throw new Error("证据 registry 内容无效");
+  return state;
+}
+
+function writeTaskEvidence(projectRoot: string, state: TaskEvidenceState): void {
+  state.updated_at = new Date().toISOString();
+  const content = `${JSON.stringify(state, null, 2)}\n`;
+  if (Buffer.byteLength(content, "utf8") > 2 * 1024 * 1024) throw new Error("证据 registry 超过 2 MiB 安全上限");
+  atomicWrite(taskEvidencePath(projectRoot, state.task_id), content);
+}
+
+export function assertDeckMatchesWeeklySnapshot(
+  projectRoot: string,
+  taskId: string,
+  profileId: string,
+  payload: DeckPayload,
+): void {
+  assertDeckPayload(payload);
+  const snapshot = readTaskEvidence(projectRoot, taskId).weekly_snapshot;
+  if (!snapshot) throw new Error("当前任务缺少持久化 weekly.snapshot 证据；请重新执行周报快照");
+  if (payload.profile_id !== profileId || snapshot.profile_id !== profileId) {
+    throw new Error("PPT 载荷、周报快照与当前受管任务的 Profile 必须一致");
+  }
+  if (payload.period.start !== snapshot.period.start || payload.period.end !== snapshot.period.end) {
+    throw new Error("PPT 载荷周期必须与当前 weekly.snapshot 周期完全一致");
+  }
+  if (payload.snapshot_sha256 !== snapshot.snapshot_sha256) {
+    throw new Error("PPT 载荷 snapshot_sha256 与当前 weekly.snapshot 不一致");
+  }
+  const allowedUrls = new Set(snapshot.allowed_urls);
+  const allowedPaths = new Map(snapshot.source_versions.map((source) => [source.path, source.sha256]));
+  for (const [index, slide] of payload.slides.entries()) {
+    for (const source of slide.sources ?? []) {
+      if (source.url) {
+        const normalized = normalizePublicUrl(source.url).toString();
+        if (normalized !== source.url || !allowedUrls.has(normalized)) {
+          throw new Error(`PPT 第 ${index + 1} 页 URL 来源不在当前 weekly.snapshot 证据中`);
+        }
+      }
+      if (source.path) {
+        const normalizedPath = source.path.replaceAll("\\", "/");
+        if (normalizedPath !== source.path || allowedPaths.get(normalizedPath) !== source.sha256) {
+          throw new Error(`PPT 第 ${index + 1} 页本地来源路径或 SHA-256 不在当前 weekly.snapshot 证据中`);
+        }
+      }
+    }
+  }
+}
+
 export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): void {
+  const searchableUrls = new Map<string, Set<string>>();
+  const evidenceRegistry = new Map<string, Map<string, string>>();
+  const weeklySnapshotRegistry = new Map<string, WeeklySnapshotEvidence>();
+  const loadedEvidence = new Set<string>();
+  const taskKey = (context: { task_id?: string } | void): string => context?.task_id ?? "__standalone__";
+  const loadEvidence = (context: { task_id?: string } | void): { urls: Set<string>; mutations: Map<string, string> } => {
+    const key = taskKey(context);
+    if (key !== "__standalone__" && !loadedEvidence.has(key)) {
+      const persisted = readTaskEvidence(hooks.projectRoot(), key);
+      searchableUrls.set(key, new Set(persisted.searched_urls));
+      evidenceRegistry.set(key, new Map(Object.entries(persisted.mutations)));
+      if (persisted.weekly_snapshot) weeklySnapshotRegistry.set(key, persisted.weekly_snapshot);
+      loadedEvidence.add(key);
+    }
+    const urls = searchableUrls.get(key) ?? new Set<string>();
+    const mutations = evidenceRegistry.get(key) ?? new Map<string, string>();
+    searchableUrls.set(key, urls);
+    evidenceRegistry.set(key, mutations);
+    return { urls, mutations };
+  };
+  const saveEvidence = (context: { task_id?: string } | void): void => {
+    const key = taskKey(context);
+    if (key === "__standalone__") return;
+    const loaded = loadEvidence(context);
+    writeTaskEvidence(hooks.projectRoot(), {
+      schema_version: "1.0",
+      task_id: key,
+      searched_urls: [...loaded.urls].sort(),
+      mutations: Object.fromEntries([...loaded.mutations.entries()].sort(([left], [right]) => left.localeCompare(right))),
+      weekly_snapshot: weeklySnapshotRegistry.get(key),
+      updated_at: new Date().toISOString(),
+    });
+  };
+
+  pi.registerTool({
+    name: "director_weekly_snapshot",
+    label: "读取本周事实快照",
+    description: "按明确周期只读聚合任务审计、销售台账、outputs 元数据和知识库新增来源；每项保留来源版本与 SHA-256。",
+    parameters: Type.Object({
+      period: Type.Object({
+        start: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+        end: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+      }),
+      profile_id: Type.Optional(Type.Union([Type.Literal("market-director"), Type.Literal("product-director")])),
+    }),
+    async execute(_toolCallId, params) {
+      const context = hooks.beforeLogicalTool("weekly.snapshot", params);
+      if (context?.profile_id && params.profile_id && context.profile_id !== params.profile_id) {
+        throw new Error("周报快照 Profile 必须与当前受管任务一致");
+      }
+      const profileId = context?.profile_id ?? params.profile_id;
+      if (!profileId) throw new Error("周报快照缺少受管 Profile 上下文");
+      const result = collectWeeklySnapshot(hooks.projectRoot(), params.period, profileId);
+      if (!context?.task_id) throw new Error("周报快照缺少受管任务上下文");
+      const snapshot = result as {
+        snapshot_sha256: string;
+        period: { start: string; end: string };
+        knowledge: Array<Record<string, unknown>>;
+        source_versions: Array<{ path: string; sha256: string }>;
+      };
+      const allowedUrls = snapshot.knowledge.flatMap((row) => {
+        if (typeof row.url !== "string" || !row.url.trim()) return [];
+        try { return [normalizePublicUrl(row.url).toString()]; } catch { return []; }
+      });
+      loadEvidence(context);
+      weeklySnapshotRegistry.set(context.task_id, {
+        profile_id: profileId,
+        period: snapshot.period,
+        snapshot_sha256: snapshot.snapshot_sha256,
+        allowed_urls: [...new Set(allowedUrls)].sort(),
+        source_versions: snapshot.source_versions.map((source) => ({ path: source.path, sha256: source.sha256 })),
+      });
+      saveEvidence(context);
+      assertResultSize(result);
+      hooks.afterLogicalTool("weekly.snapshot", params, result);
+      return { content: content(result), details: result };
+    },
+  });
+
   pi.registerTool({
     name: "director_web_search",
     label: "检索公开网页",
@@ -572,7 +1547,8 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       search_lang: Type.Optional(Type.String({ pattern: "^[A-Za-z-]{2,10}$", description: "检索语言，例如 zh-hans" })),
     }),
     async execute(_toolCallId, params) {
-      hooks.beforeLogicalTool("web.search", params);
+      const context = hooks.beforeLogicalTool("web.search", params);
+      const allowed = loadEvidence(context).urls;
       const key = process.env.BRAVE_SEARCH_API_KEY?.trim();
       if (!key) {
         throw new Error("公开检索尚未配置。请仅在本机设置 BRAVE_SEARCH_API_KEY 后重试；密钥不得写入仓库。");
@@ -606,17 +1582,149 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
         const results = (payload.web?.results ?? []).slice(0, 10).flatMap((item) => {
           if (typeof item.title !== "string" || typeof item.url !== "string") return [];
           try {
-            const url = new URL(item.url);
-            if (url.protocol !== "https:" && url.protocol !== "http:") return [];
-            return [{ title: item.title.slice(0, 500), url: url.toString().slice(0, 2048), description: typeof item.description === "string" ? item.description.slice(0, 2000) : "", age: typeof item.age === "string" ? item.age.slice(0, 100) : "" }];
+            const url = normalizePublicUrl(item.url);
+            const normalizedUrl = url.toString().slice(0, 2048);
+            allowed.add(normalizedUrl);
+            return [{ title: item.title.slice(0, 500), url: normalizedUrl, description: typeof item.description === "string" ? item.description.slice(0, 2000) : "", age: typeof item.age === "string" ? item.age.slice(0, 100) : "" }];
           } catch { return []; }
         });
         searches.push({ query, results });
       }
       const result = { provider: "brave", searched_at: new Date().toISOString(), searches };
+      saveEvidence(context);
       assertResultSize(result);
       hooks.afterLogicalTool("web.search", params, result);
       return { content: content(result), details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "director_web_open",
+    label: "读取公开网页正文",
+    description: "批量读取上一轮公开检索返回的 URL，或用户在当前任务中明确提供的 URL；拒绝重定向、本机/私网目标、危险协议和超限响应。",
+    parameters: Type.Object({
+      items: Type.Array(Type.Object({
+        url: Type.String({ minLength: 1, maxLength: 2048 }),
+        user_provided: Type.Optional(Type.Boolean({ description: "仅当该 URL 直接来自用户当前任务时设为 true" })),
+        title: Type.Optional(Type.String({ maxLength: 500 })),
+      }), { minItems: 1, maxItems: 6 }),
+      max_pages: Type.Optional(Type.Number({ minimum: 1, maximum: 200 })),
+      max_chars: Type.Optional(Type.Number({ minimum: 1000, maximum: 200000 })),
+    }),
+    async execute(_toolCallId, params) {
+      const context = hooks.beforeLogicalTool("web.open", params);
+      const loaded = loadEvidence(context);
+      const allowed = loaded.urls;
+      const authorizedByUser = new Set(context?.authorized_urls ?? []);
+      const distinctUrls = params.items.map((item) => item.url);
+      if (new Set(distinctUrls).size !== distinctUrls.length) throw new Error("同一批网页正文读取不能包含重复 URL");
+      const sources = [];
+      for (const item of params.items) {
+        const standaloneExplicit = taskKey(context) === "__standalone__" && item.user_provided === true;
+        if (!allowed.has(item.url) && !authorizedByUser.has(item.url) && !standaloneExplicit) {
+          throw new Error("该 URL 不是本次会话的公开检索结果，也未出现在用户原始任务中；请让用户明确提供 URL");
+        }
+        const source = await openWebSource(item.url, {
+          title: item.title,
+          maxPages: params.max_pages,
+          maxChars: params.max_chars,
+        });
+        sources.push(source);
+        loaded.mutations.set(source.source_id, canonicalEvidence(source.knowledge_mutation));
+      }
+      saveEvidence(context);
+      const result = { opened_at: new Date().toISOString(), sources };
+      assertResultSize(result);
+      hooks.afterLogicalTool("web.open", params, result);
+      return { content: content(result), details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "director_pdf_read",
+    label: "读取本地 PDF 资料",
+    description: "只读取项目 inputs/ 或 data/inbox/ 下用户明确指定的普通 PDF 文件，返回带页码的文本证据；不会扫描其他目录。",
+    parameters: Type.Object({
+      path: Type.String({ minLength: 1, maxLength: 1024, description: "项目内相对路径，例如 inputs/report.pdf" }),
+      title: Type.Optional(Type.String({ maxLength: 500 })),
+      max_pages: Type.Optional(Type.Number({ minimum: 1, maximum: 200 })),
+      max_chars: Type.Optional(Type.Number({ minimum: 1000, maximum: 200000 })),
+    }),
+    async execute(_toolCallId, params) {
+      const context = hooks.beforeLogicalTool("pdf.read", params);
+      const result = await readLocalPdf(hooks.projectRoot(), params.path, {
+        title: params.title,
+        maxPages: params.max_pages,
+        maxChars: params.max_chars,
+      });
+      const loaded = loadEvidence(context);
+      loaded.mutations.set(result.source_id, canonicalEvidence(result.knowledge_mutation));
+      saveEvidence(context);
+      assertResultSize(result);
+      hooks.afterLogicalTool("pdf.read", params, result);
+      return { content: content(result), details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "director_artifact_deck_write",
+    label: "生成周报 PPT",
+    description: "使用受控的 @oai/artifact-tool 构建 4-10 页总监周报 PPT，输出到 outputs/，保留逐页来源备注且不覆盖已有文件。",
+    parameters: Type.Object({
+      schema_version: Type.Literal("1.0"),
+      snapshot_sha256: Type.String({ pattern: "^[a-f0-9]{64}$", description: "当前 weekly.snapshot 返回的 snapshot_sha256" }),
+      output_name: Type.String({ minLength: 6, maxLength: 125, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.pptx$" }),
+      profile_id: Type.Union([Type.Literal("market-director"), Type.Literal("product-director")]),
+      template_id: Type.Literal("ceo-weekly"),
+      period: Type.Object({
+        start: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+        end: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+      }),
+      slides: Type.Array(Type.Object({
+        title: Type.String({ minLength: 1, maxLength: 120 }),
+        subtitle: Type.Optional(Type.String({ maxLength: 240 })),
+        eyebrow: Type.Optional(Type.String({ maxLength: 80 })),
+        lead: Type.Optional(Type.String({ maxLength: 240 })),
+        body: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 180 }), { maxItems: 7 })),
+        callout: Type.Optional(Type.String({ maxLength: 240 })),
+        notes: Type.Optional(Type.String({ maxLength: 4000 })),
+        sources: Type.Optional(Type.Array(Type.Object({
+          title: Type.String({ minLength: 1, maxLength: 500 }),
+          url: Type.Optional(Type.String({ maxLength: 2048 })),
+          path: Type.Optional(Type.String({ maxLength: 1024 })),
+          sha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+          page: Type.Optional(Type.Number({ minimum: 1, maximum: 100000 })),
+        }), { maxItems: 20 })),
+      }), { minItems: 4, maxItems: 10 }),
+    }),
+    async execute(_toolCallId, params) {
+      assertDeckPayload(params as DeckPayload);
+      const commit = hooks.beforeLogicalTool("artifact.deck.write", params);
+      let buildStarted = false;
+      try {
+        if (!commit?.intent_id || !commit.payload_sha256 || !commit.task_id || !commit.profile_id) {
+          throw new Error("PPT 写入缺少批准后的任务/意图/载荷/Profile 上下文");
+        }
+        if (commit.profile_id !== params.profile_id) throw new Error("PPT 载荷 Profile 与当前受管任务不一致");
+        assertDeckMatchesWeeklySnapshot(hooks.projectRoot(), commit.task_id, commit.profile_id, params as DeckPayload);
+        buildStarted = true;
+        const result = await buildWeeklyDeck(hooks.projectRoot(), params as DeckPayload, commit as DeckCommitContext);
+        assertResultSize(result);
+        hooks.afterLogicalTool("artifact.deck.write", params, result);
+        return { content: content(result), details: result };
+      } catch (error) {
+        const outputName = typeof params.output_name === "string" ? params.output_name : "";
+        const target = outputName ? resolve(hooks.projectRoot(), "outputs", outputName) : "";
+        hooks.onLogicalToolError(
+          "artifact.deck.write",
+          params,
+          error instanceof DeckNotCommittedError
+            ? "not_committed"
+            : buildStarted && Boolean(target && existsSync(target)) ? "ambiguous" : "not_committed",
+          error,
+        );
+        throw error;
+      }
     },
   });
 
@@ -661,6 +1769,19 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
     async execute(_toolCallId, params) {
       const commit = hooks.beforeLogicalTool("knowledge.write", params);
       if (!commit?.intent_id || !commit.payload_sha256) throw new Error("写入缺少受管提交上下文");
+      const registered = loadEvidence(commit).mutations;
+      for (const mutation of params.mutations) {
+        const expected = registered?.get(mutation.record_id);
+        if (mutation.operation === "insert" && registered.size > 0 && !expected) {
+          throw new Error(`知识来源 ${mutation.record_id} 未出现在本任务读取证据中`);
+        }
+        if (/^(web|pdf)-/u.test(mutation.record_id) && !expected) {
+          throw new Error(`工具来源 ${mutation.record_id} 缺少本任务证据 registry`);
+        }
+        if (expected && canonicalEvidence(mutation) !== expected) {
+          throw new Error(`知识来源 ${mutation.record_id} 与本任务读取证据的冻结 mutation 不一致`);
+        }
+      }
       let path: string | undefined;
       try {
         path = resolveDataFile(hooks.projectRoot(), "knowledge", KNOWLEDGE_DEFINITION.file);
