@@ -1,0 +1,7 @@
+interface:
+  display_name: "总监办公文档"
+  short_description: "按岗位和公司模板生成可编辑办公文件"
+  brand_color: "#3B82F6"
+  default_prompt: "使用 $create-director-documents 按当前岗位和公司模板生成这份办公文档。"
+policy:
+  allow_implicit_invocation: true

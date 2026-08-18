@@ -1,0 +1,12 @@
+{
+  "id": "shared.documents.create",
+  "plugin": "shared.documents",
+  "display_name": "创建办公文件",
+  "entry_nodes": ["collect"],
+  "output_nodes": ["quality_gate"],
+  "nodes": [
+    {"id": "collect", "type": "tool", "tool": "knowledge.search", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "draft", "type": "agent", "skill": "create-director-documents", "depends_on": ["collect"], "permissions": ["artifact.write"]},
+    {"id": "quality_gate", "type": "validator", "check": "document_render_and_source_check", "depends_on": ["draft"], "permissions": []}
+  ]
+}

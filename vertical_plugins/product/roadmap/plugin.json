@@ -1,0 +1,15 @@
+{
+  "api_version": "1.0",
+  "id": "product.roadmap",
+  "version": "1.0.0",
+  "display_name": "产品路线图",
+  "description": "依据目标、证据、依赖和资源约束形成可解释的优先级与路线图。",
+  "category": "product",
+  "permissions": ["knowledge.read", "knowledge.write", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "product.requirements", "version": ">=1.0.0"}
+  ],
+  "skills": ["plan-product-roadmap"],
+  "workflows": ["workflows/roadmap.json"]
+}

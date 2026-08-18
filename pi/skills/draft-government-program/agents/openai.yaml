@@ -1,0 +1,7 @@
+interface:
+  display_name: "政府合作方案"
+  short_description: "基于政策、地方条件和真实能力形成方案"
+  brand_color: "#3B82F6"
+  default_prompt: "使用 $draft-government-program 逐项核对条件，并起草可追溯的地方政府合作方案。"
+policy:
+  allow_implicit_invocation: true

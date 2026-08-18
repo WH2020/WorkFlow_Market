@@ -1,0 +1,29 @@
+{
+  "name": "workflow-director-agent",
+  "version": "0.1.0",
+  "description": "A Pi package for composable market-director and product-director workflows.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WH2020/WorkFlow_Market.git"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "vertical-agent",
+    "workflow",
+    "market-director",
+    "product-director"
+  ],
+  "pi": {
+    "extensions": [
+      "./pi/extensions/vertical-workflow.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

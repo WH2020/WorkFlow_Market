@@ -1,0 +1,7 @@
+interface:
+  display_name: "总监汇报与周报 PPT"
+  short_description: "按岗位生成管理层周报与决策汇报"
+  brand_color: "#3B82F6"
+  default_prompt: "使用 $build-director-decks 汇总本周工作，并按当前岗位生成管理层周报 PPT。"
+policy:
+  allow_implicit_invocation: true

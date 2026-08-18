@@ -1,0 +1,13 @@
+{
+  "manage-agent-knowledge": "pi/skills/manage-agent-knowledge",
+  "research-frontier-markets": "plugin/market-director-copilot/skills/research-frontier-markets",
+  "create-director-documents": "pi/skills/create-director-documents",
+  "build-director-decks": "pi/skills/build-director-decks",
+  "draft-government-program": "pi/skills/draft-government-program",
+  "manage-market-pipeline": "pi/skills/manage-market-pipeline",
+  "product-discovery": "pi/skills/product-discovery",
+  "manage-product-requirements": "pi/skills/manage-product-requirements",
+  "design-product-metrics": "pi/skills/design-product-metrics",
+  "plan-product-roadmap": "pi/skills/plan-product-roadmap",
+  "review-product-release": "pi/skills/review-product-release"
+}

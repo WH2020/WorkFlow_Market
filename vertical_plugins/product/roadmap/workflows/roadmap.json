@@ -1,0 +1,13 @@
+{
+  "id": "product.roadmap.plan",
+  "plugin": "product.roadmap",
+  "display_name": "产品路线图规划",
+  "entry_nodes": ["load_inputs"],
+  "output_nodes": ["approve_roadmap"],
+  "nodes": [
+    {"id": "load_inputs", "type": "tool", "tool": "knowledge.search", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "prioritize", "type": "agent", "skill": "plan-product-roadmap", "depends_on": ["load_inputs"], "permissions": ["artifact.write"]},
+    {"id": "validate", "type": "validator", "check": "goal_evidence_dependencies_capacity_and_tradeoffs", "depends_on": ["prioritize"], "permissions": []},
+    {"id": "approve_roadmap", "type": "approval", "policy": "product_owner_approves_priorities", "depends_on": ["validate"], "permissions": []}
+  ]
+}

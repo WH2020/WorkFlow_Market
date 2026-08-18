@@ -1,0 +1,7 @@
+interface:
+  display_name: "产品发布评审"
+  short_description: "完成发布门槛、回滚准备与上线复盘"
+  brand_color: "#3B82F6"
+  default_prompt: "使用 $review-product-release 评审这个版本是否具备发布条件，并列出阻断项。"
+policy:
+  allow_implicit_invocation: true

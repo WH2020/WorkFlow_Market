@@ -1,0 +1,15 @@
+{
+  "api_version": "1.0",
+  "id": "product.metrics",
+  "version": "1.0.0",
+  "display_name": "产品指标与实验",
+  "description": "把产品目标转为指标口径、目标值、护栏和可执行的验证实验。",
+  "category": "product",
+  "permissions": ["knowledge.read", "knowledge.write", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "product.discovery", "version": ">=1.0.0"}
+  ],
+  "skills": ["design-product-metrics"],
+  "workflows": ["workflows/metrics-experiment.json"]
+}

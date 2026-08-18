@@ -1,0 +1,7 @@
+interface:
+  display_name: "市场与销售管线"
+  short_description: "分析客户进展、资源申请与销售复盘"
+  brand_color: "#3B82F6"
+  default_prompt: "使用 $manage-market-pipeline 分析现有客户台账，并给出拟更新内容和需要确认的资源事项。"
+policy:
+  allow_implicit_invocation: true

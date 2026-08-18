@@ -1,0 +1,7 @@
+interface:
+  display_name: "Agent 知识库"
+  short_description: "关联现有资料并沉淀可追溯的结构化知识"
+  brand_color: "#3B82F6"
+  default_prompt: "使用 $manage-agent-knowledge 关联现有知识库，并给出本次任务的知识快照和拟更新内容。"
+policy:
+  allow_implicit_invocation: true

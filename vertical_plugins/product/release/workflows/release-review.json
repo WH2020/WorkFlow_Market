@@ -1,0 +1,14 @@
+{
+  "id": "product.release.review",
+  "plugin": "product.release",
+  "display_name": "产品发布检查与复盘",
+  "entry_nodes": ["collect_release"],
+  "output_nodes": ["record_decision"],
+  "nodes": [
+    {"id": "collect_release", "type": "tool", "tool": "knowledge.search", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "review", "type": "agent", "skill": "review-product-release", "depends_on": ["collect_release"], "permissions": ["artifact.write"]},
+    {"id": "gate", "type": "validator", "check": "acceptance_risks_observability_and_rollback", "depends_on": ["review"], "permissions": []},
+    {"id": "decision", "type": "approval", "policy": "release_owner_decides_go_no_go", "depends_on": ["gate"], "permissions": []},
+    {"id": "record_decision", "type": "tool", "tool": "knowledge.write", "depends_on": ["decision"], "permissions": ["knowledge.write"]}
+  ]
+}

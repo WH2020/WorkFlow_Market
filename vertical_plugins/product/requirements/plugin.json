@@ -1,0 +1,16 @@
+{
+  "api_version": "1.0",
+  "id": "product.requirements",
+  "version": "1.0.0",
+  "display_name": "需求与 PRD",
+  "description": "通过逐项核对明确范围、状态、异常流和可验收需求。",
+  "category": "product",
+  "permissions": ["knowledge.read", "knowledge.write", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "shared.documents", "version": ">=1.0.0"},
+    {"id": "product.discovery", "version": ">=1.0.0"}
+  ],
+  "skills": ["manage-product-requirements"],
+  "workflows": ["workflows/prd.json"]
+}

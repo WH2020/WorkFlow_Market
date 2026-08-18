@@ -1,0 +1,14 @@
+{
+  "id": "market.government.proposal",
+  "plugin": "market.government",
+  "display_name": "地方政府合作方案",
+  "entry_nodes": ["clarify"],
+  "output_nodes": ["approval"],
+  "nodes": [
+    {"id": "clarify", "type": "agent", "skill": "draft-government-program", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "policy_search", "type": "tool", "tool": "web.search", "depends_on": ["clarify"], "permissions": ["web.read"]},
+    {"id": "draft", "type": "agent", "skill": "draft-government-program", "depends_on": ["policy_search"], "permissions": ["artifact.write"]},
+    {"id": "validate", "type": "validator", "check": "policy_source_and_commitment_boundary", "depends_on": ["draft"], "permissions": []},
+    {"id": "approval", "type": "approval", "policy": "owner_approves_commitments", "depends_on": ["validate"], "permissions": []}
+  ]
+}

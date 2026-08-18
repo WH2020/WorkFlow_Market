@@ -1,0 +1,13 @@
+{
+  "id": "product.metrics.experiment",
+  "plugin": "product.metrics",
+  "display_name": "产品指标与实验设计",
+  "entry_nodes": ["load_goal"],
+  "output_nodes": ["approve_measurement"],
+  "nodes": [
+    {"id": "load_goal", "type": "tool", "tool": "knowledge.search", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "design", "type": "agent", "skill": "design-product-metrics", "depends_on": ["load_goal"], "permissions": ["artifact.write"]},
+    {"id": "validate", "type": "validator", "check": "metric_definition_baseline_target_guardrail_and_experiment", "depends_on": ["design"], "permissions": []},
+    {"id": "approve_measurement", "type": "approval", "policy": "product_owner_approves_measurement_plan", "depends_on": ["validate"], "permissions": []}
+  ]
+}

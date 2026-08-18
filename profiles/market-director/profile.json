@@ -1,0 +1,20 @@
+{
+  "id": "market-director",
+  "display_name": "市场总监 AI 助手",
+  "description": "面向市场总监的开箱即用服务组合，覆盖研究、政府合作、文件、销售推进与周报。",
+  "plugins": [
+    "shared.research",
+    "shared.documents",
+    "shared.weekly-report",
+    "market.government",
+    "market.sales"
+  ],
+  "default_service": "industry-research",
+  "services": [
+    {"id": "industry-research", "display_name": "行业专题研究", "description": "研究脑机、具身、数采等前沿方向并沉淀证据。", "workflow": "shared.research.frontier", "skill": "research-frontier-markets"},
+    {"id": "government-proposal", "display_name": "政府合作方案", "description": "结合地方条件和公开政策形成合作方案。", "workflow": "market.government.proposal", "skill": "draft-government-program"},
+    {"id": "office-document", "display_name": "日常文件", "description": "生成并校验常见办公文件。", "workflow": "shared.documents.create", "skill": "create-director-documents"},
+    {"id": "sales-review", "display_name": "销售推进与复盘", "description": "分析客户进展、资源需求和下一步动作。", "workflow": "market.sales.pipeline-review", "skill": "manage-market-pipeline"},
+    {"id": "weekly-deck", "display_name": "周五工作汇报", "description": "汇总本周事实并生成经确认的 PPT。", "workflow": "shared.reporting.weekly-deck", "skill": "build-director-decks"}
+  ]
+}

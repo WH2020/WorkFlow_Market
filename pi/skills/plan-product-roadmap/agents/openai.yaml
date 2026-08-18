@@ -1,0 +1,7 @@
+interface:
+  display_name: "产品路线图"
+  short_description: "比较机会、容量和风险，形成路线图取舍"
+  brand_color: "#3B82F6"
+  default_prompt: "使用 $plan-product-roadmap 帮我形成 Now/Next/Later 路线图和资源取舍建议。"
+policy:
+  allow_implicit_invocation: true

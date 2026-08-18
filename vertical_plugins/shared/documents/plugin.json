@@ -1,0 +1,12 @@
+{
+  "api_version": "1.0",
+  "id": "shared.documents",
+  "version": "1.0.0",
+  "display_name": "办公文件",
+  "description": "基于可追溯材料生成并校验日常办公文件。",
+  "category": "shared",
+  "permissions": ["knowledge.read", "artifact.write"],
+  "dependencies": [{"id": "shared.knowledge", "version": ">=1.0.0"}],
+  "skills": ["create-director-documents"],
+  "workflows": ["workflows/create-document.json"]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "market.sales.pipeline-review",
+  "plugin": "market.sales",
+  "display_name": "客户推进与销售复盘",
+  "entry_nodes": ["load_accounts"],
+  "output_nodes": ["validate_updates"],
+  "nodes": [
+    {"id": "load_accounts", "type": "tool", "tool": "sales.read", "depends_on": [], "permissions": ["sales.read", "knowledge.read"]},
+    {"id": "analyze", "type": "agent", "skill": "manage-market-pipeline", "depends_on": ["load_accounts"], "permissions": ["artifact.write"]},
+    {"id": "confirm", "type": "approval", "policy": "owner_confirms_pipeline_changes", "depends_on": ["analyze"], "permissions": []},
+    {"id": "update", "type": "tool", "tool": "sales.write", "depends_on": ["confirm"], "permissions": ["sales.write", "knowledge.write"]},
+    {"id": "validate_updates", "type": "validator", "check": "customer_ids_evidence_and_next_actions", "depends_on": ["update"], "permissions": []}
+  ]
+}

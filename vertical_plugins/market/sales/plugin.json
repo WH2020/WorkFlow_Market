@@ -1,0 +1,15 @@
+{
+  "api_version": "1.0",
+  "id": "market.sales",
+  "version": "1.0.0",
+  "display_name": "销售推进",
+  "description": "基于结构化客户事实完成机会分析、资源协调和销售复盘。",
+  "category": "market",
+  "permissions": ["knowledge.read", "knowledge.write", "sales.read", "sales.write", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "shared.documents", "version": ">=1.0.0"}
+  ],
+  "skills": ["manage-market-pipeline"],
+  "workflows": ["workflows/pipeline-review.json"]
+}

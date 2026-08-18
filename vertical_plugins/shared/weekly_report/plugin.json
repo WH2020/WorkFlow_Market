@@ -1,0 +1,15 @@
+{
+  "api_version": "1.0",
+  "id": "shared.weekly-report",
+  "version": "1.0.0",
+  "display_name": "周报与汇报",
+  "description": "汇总本周事实、风险和下周动作，生成经人工确认的周报演示文稿。",
+  "category": "shared",
+  "permissions": ["knowledge.read", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "shared.documents", "version": ">=1.0.0"}
+  ],
+  "skills": ["build-director-decks"],
+  "workflows": ["workflows/weekly-deck.json"]
+}

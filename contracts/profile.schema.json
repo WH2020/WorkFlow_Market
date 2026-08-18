@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workflow-market.local/contracts/profile.schema.json",
+  "title": "Vertical Agent Profile",
+  "type": "object",
+  "required": ["id", "display_name", "description", "plugins", "default_service", "services"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "display_name": {"type": "string", "minLength": 1},
+    "description": {"type": "string", "minLength": 1},
+    "plugins": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+    "default_service": {"type": "string"},
+    "services": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "display_name", "description", "workflow", "skill"],
+        "properties": {
+          "id": {"type": "string"},
+          "display_name": {"type": "string"},
+          "description": {"type": "string"},
+          "workflow": {"type": "string"},
+          "skill": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

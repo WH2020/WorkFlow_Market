@@ -1,0 +1,28 @@
+{
+  "id": "shared.research.frontier",
+  "plugin": "shared.research",
+  "display_name": "行业专题研究",
+  "entry_nodes": ["scope"],
+  "output_nodes": ["persist_knowledge"],
+  "nodes": [
+    {"id": "scope", "type": "agent", "skill": "research-frontier-markets", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "fanout", "type": "parallel", "depends_on": ["scope"], "permissions": []},
+    {
+      "id": "public_research",
+      "type": "subagent",
+      "depends_on": ["fanout"],
+      "permissions": ["web.read"],
+      "boundary": {
+        "objective": "检索公开资料并返回来源、发布日期和关键证据，不生成最终结论",
+        "allowed_tools": ["web.search", "web.open"],
+        "max_turns": 8,
+        "write_scope": []
+      }
+    },
+    {"id": "internal_evidence", "type": "tool", "tool": "knowledge.search", "depends_on": ["fanout"], "permissions": ["knowledge.read"]},
+    {"id": "join_evidence", "type": "join", "depends_on": ["public_research", "internal_evidence"], "permissions": []},
+    {"id": "synthesize", "type": "agent", "skill": "research-frontier-markets", "depends_on": ["join_evidence"], "permissions": ["artifact.write"]},
+    {"id": "validate", "type": "validator", "check": "sources_dates_regions_and_fact_labels", "depends_on": ["synthesize"], "permissions": []},
+    {"id": "persist_knowledge", "type": "tool", "tool": "knowledge.write", "depends_on": ["validate"], "permissions": ["knowledge.write"]}
+  ]
+}

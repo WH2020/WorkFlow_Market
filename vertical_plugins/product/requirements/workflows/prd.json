@@ -1,0 +1,13 @@
+{
+  "id": "product.requirements.prd",
+  "plugin": "product.requirements",
+  "display_name": "需求澄清与 PRD",
+  "entry_nodes": ["grill"],
+  "output_nodes": ["approve_scope"],
+  "nodes": [
+    {"id": "grill", "type": "agent", "skill": "manage-product-requirements", "depends_on": [], "permissions": ["knowledge.read"]},
+    {"id": "draft_prd", "type": "agent", "skill": "manage-product-requirements", "depends_on": ["grill"], "permissions": ["artifact.write"]},
+    {"id": "validate_prd", "type": "validator", "check": "scope_states_constraints_traceability_and_acceptance", "depends_on": ["draft_prd"], "permissions": []},
+    {"id": "approve_scope", "type": "approval", "policy": "product_owner_approves_scope", "depends_on": ["validate_prd"], "permissions": []}
+  ]
+}

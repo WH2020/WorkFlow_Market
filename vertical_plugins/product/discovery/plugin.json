@@ -1,0 +1,15 @@
+{
+  "api_version": "1.0",
+  "id": "product.discovery",
+  "version": "1.0.0",
+  "display_name": "产品机会发现",
+  "description": "结合用户问题、市场证据和内部知识形成可验证的机会判断。",
+  "category": "product",
+  "permissions": ["knowledge.read", "knowledge.write", "web.read", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "shared.research", "version": ">=1.0.0"}
+  ],
+  "skills": ["product-discovery"],
+  "workflows": ["workflows/opportunity.json"]
+}

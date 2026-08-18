@@ -1,0 +1,12 @@
+{
+  "api_version": "1.0",
+  "id": "shared.knowledge",
+  "version": "1.0.0",
+  "display_name": "知识库",
+  "description": "提供统一的来源登记、检索和带依据写入能力。",
+  "category": "shared",
+  "permissions": ["knowledge.read", "knowledge.write"],
+  "dependencies": [],
+  "skills": ["manage-agent-knowledge"],
+  "workflows": []
+}

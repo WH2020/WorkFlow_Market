@@ -1,66 +1,93 @@
-# 市场总监工作台
+# 垂直岗位智能体工作台
 
-面向市场总监的本地化工作流项目，配合 ChatGPT 桌面版个人账号使用。项目覆盖前沿行业资料研究、地方政府合作方案、销售微信复盘、客户与销售管线管理、资源调动、公司模板办公文档、CEO 周报 PPT 以及 QQ 邮箱发票报销整理。
+一个以 [Pi](https://github.com/earendil-works/pi) 为 Agent 运行时的轻本体插件框架。当前提供两个开箱即用的岗位组合：
 
-## 能做什么
+- `market-director`：行业研究、政府合作方案、日常文件、销售推进与复盘、周报 PPT。
+- `product-director`：产品发现、PRD、指标与实验、路线图、发布评审、周报 PPT。
 
-- **行业研究**：整理脑机、具身智能、数采及相邻领域资料，登记来源、发布日期、访问日期、适用地域和可信度。
-- **政府合作**：根据知识库和具体地区场景起草合作框架，区分已证实事实、分析判断和待确认事项。
-- **销售复盘**：读取 WeFlow 同步的文字、图片、语音和视频，提取客户进展、异议、承诺、风险、资源申请和下一步动作。
-- **管线与销售材料**：维护客户、活动、资源申请和销售材料资产，按机会阶段、买方角色和使用场景选择或生成材料。
-- **演示文稿**：使用可编辑模板生成政府方案、客户方案、行业研究、销售复盘和 CEO 周报 PPT。
-- **办公文档**：接收公司 Word、Excel、PowerPoint 规范模板，版本化保存并按模板生成可编辑文档。
-- **定时周报**：每周五 18:00（Asia/Shanghai）汇总，默认面向 CEO、7-10 页、默认 8 页，不自动向第三方发送。
-- **发票报销**：按指定期间从已授权 QQ 邮箱检索电子发票，去重、核对并生成 Excel 报销单与原始附件归档。
+用户选择的是“岗位”和“服务”，不需要理解底层插件。开发者可以独立升级插件，再通过 Profile 组合成新的岗位 Agent。
 
-## 快速开始
+> 新的 Pi Agent 不接入微信或 WeFlow。仓库中原有 WeFlow 代码只为旧版 Codex 工作台兼容保留，不会被 Pi 包及两个新 Profile 加载。
 
-1. 用 ChatGPT 桌面版打开本项目目录：`D:\PersonalWorkSpace\WorkFlow4Market`。
-2. 安装个人插件 `market-director-copilot`，详见 [docs/使用说明.md](docs/使用说明.md)。
-3. 初始化只保存在本机的知识库和销售台账。脚本不会覆盖已有数据：
+## 架构
 
-   ```powershell
-   python plugin\market-director-copilot\scripts\init_local_data.py --project .
-   ```
+```mermaid
+flowchart LR
+    U[用户选择岗位与服务] --> PI[Pi 会话与模型]
+    PI --> A[主 Agent：识别意图与路由]
+    A --> D[DAG 工作流]
+    D --> N1[Agent / Tool 节点]
+    D --> N2[有边界的 Subagent]
+    D --> N3[审批 / 校验节点]
+    N1 --> P[领域插件]
+    N2 --> P
+    N3 --> K[知识库 / 台账 / 文件产物]
+    P --> K
+```
 
-4. 安装 Python 依赖并使用项目虚拟环境：
+轻本体只负责插件加载、依赖与权限校验、Profile 组合和 DAG 规划。领域规则放在插件与 Skill 中。主 Agent 负责判断“做什么”，DAG 给出“按什么顺序做”的可审计计划，Subagent 只承担边界清楚的独立研究或复核。首版的 Approval 是计划中的人工关口，还不是能阻断任意 Pi 工具调用的安全状态机。
 
-   ```powershell
-   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-   ```
+详见 [轻本体插件架构](docs/轻本体插件架构.md) 和 [插件开发指南](docs/插件开发指南.md)。
 
-5. 如需微信复盘，启动 WeFlow 的 HTTP API，在 `设置` → `API 服务` 生成并启用 Access Token，然后只在本机用户环境变量中保存：
+## Pi 快速开始
 
-   ```powershell
-   [Environment]::SetEnvironmentVariable("WEFLOW_ACCESS_TOKEN", "你的Token", "User")
-   ```
+要求 Pi `0.84.2` 或更高版本。建议把仓库作为实际工作 Project 使用，以便知识库、台账、模板和输出目录都位于当前工作目录：
 
-6. 在 `data/sales/salespeople.json` 填入已获授权的会话 ID，并将对应销售的 `active` 改为 `true`。
+```powershell
+git clone https://github.com/WH2020/WorkFlow_Market.git
+cd WorkFlow_Market
+python -m agent_platform validate
+python plugin\market-director-copilot\scripts\init_local_data.py --project .
+pi install -l .
+pi
+```
+
+Pi 扩展会按当前 Profile 动态加载 Skills；产品总监不会加载市场/销售 Skill，市场总监也不会加载产品 Skill，未进入任何 Profile 的旧版邮箱与聊天 Skill 不会加载。
+
+进入 Pi 后：
+
+```text
+/director-profile
+/director-profile product-director
+/director-services
+/director-run product-prd 为设备端告警功能形成 PRD
+```
+
+也可以直接用自然语言描述任务。扩展会把当前 Profile、可用服务和路由边界加入主 Agent 上下文。完整说明见 [Pi 使用说明](docs/PI使用说明.md)。
+
+## 校验插件与工作流
+
+平台校验器仅依赖 Python 标准库：
+
+```powershell
+python -m agent_platform validate
+python -m agent_platform resolve-profile market-director
+python -m agent_platform resolve-profile product-director
+python -m agent_platform list-services --profile product-director
+```
+
+校验会阻止缺失或循环依赖、重复插件、DAG 环路、未知节点、节点权限越界、未约束 Subagent，以及新 Profile 中的微信/WeFlow 引用。
+
+## 知识库
+
+两个 Profile 都依赖 `shared.knowledge`。它把现有 `data/knowledge/source-register.csv` 作为来源登记入口，并要求所有结论标记为“已证实事实、分析判断、待验证假设、未知信息”。原始文件不被静默改写；正式业务数据仍只保存在本地，公开仓库只提交 `.example` 模板。
 
 ## 项目结构
 
 ```text
-config/                         全局配置
-data/knowledge/                 研究来源登记
-data/sales/                     客户、活动、销售、资源申请和销售材料资产台账
-data/weekly/                    周报结构化输入示例
-data/weflow/                    WeFlow 运行时数据（原始媒体和转写不入 Git）
-library/templates/              内置 PPT 与本地公司办公模板库
-plugin/market-director-copilot/ ChatGPT 个人插件源码、Skill、脚本和插件资产
-outputs/                        方案、复盘和演示文稿输出
-docs/                           使用说明和操作约定
+agent_platform/                   轻本体加载、校验、组合与 DAG 规划
+contracts/                        插件、Profile、Workflow JSON 契约
+profiles/                         市场总监与产品总监开箱组合
+vertical_plugins/                 shared / market / product 插件
+pi/                               Pi 扩展与产品总监/共享 Skills
+plugin/market-director-copilot/   既有 Codex 兼容插件
+data/                             本地知识与业务台账模板
+library/templates/                演示与办公模板
+docs/                             架构、开发和操作说明
 ```
 
-## 安全边界
+## 当前范围
 
-- Token 不写入仓库，不提交到 Git，不发送到聊天中。
-- 邮箱密码、验证码和授权码不进入聊天或仓库；报销原件和工作簿不提交 Git。
-- 公司上传模板、品牌资产和 `outputs/office/` 办公输出默认只保存在本地，不提交 Git。
-- 实际客户台账、销售材料资产、会话 ID、知识来源登记和 WeFlow 规范化记录只保存在本地；仓库仅提交 `.example` 空白模板。
-- `data/weekly/` 的实际周报输入和 `outputs/` 的全部生成结果也只保存在本地；不要直接填写仓库内的 `.example` 示例。
-- WeFlow 媒体下载仅接受本机 `127.0.0.1`/`localhost` 地址。
-- 原始微信记录可以处理，但不会自动发送给第三方；对外发送文件前必须人工确认。
-- 对外方案不得虚构公司能力、案例、投资额、收入、就业或政府承诺。
-- 外部研究优先使用公开、被动来源；不使用真实个人账号触达研究对象，不伪造身份或绕过访问控制。预计或意外发生身份暴露时停止并通知任务负责人。
+第一阶段已经形成可安装的 Pi 包、按 Profile 隔离的 Skills、可组合 Profile、插件契约、DAG 定义与确定性校验/规划骨架。尚未包含独立桌面图形界面、会强制阻断越过 Approval 的运行时状态机、逻辑工具适配器、生产级任务队列、数据库事务和分布式 Subagent 调度；因此当前定位是“可安装的规划原型”，不是无人值守的工作流执行器。
 
-完整操作步骤、命令和排障方法见 [docs/使用说明.md](docs/使用说明.md)。
+现有 Codex 市场总监插件仍可按 [旧版使用说明](docs/使用说明.md) 使用；它与新的 Pi Agent 是适配层关系，不是新架构的核心依赖。
