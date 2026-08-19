@@ -29,6 +29,22 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('const PROFILE_ID: &str = "sales-director"', desktop_source)
         self.assertNotIn("OpenBrowser", desktop_source)
 
+    def test_windows_desktop_allocates_a_console_and_keeps_the_ai_core_visible(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        desktop_source = (root / "desktop" / "src-tauri" / "src" / "main.rs").read_text(
+            encoding="utf-8"
+        )
+        launcher = (root / "scripts" / "start-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn('Command::new("cmd.exe")', desktop_source)
+        self.assertIn('"start"', desktop_source)
+        self.assertIn('"/WAIT"', desktop_source)
+        self.assertIn('"-NoExit"', desktop_source)
+        self.assertIn('"-KeepOpen"', desktop_source)
+        self.assertIn(".creation_flags(CREATE_NO_WINDOW)", desktop_source)
+        self.assertIn("[switch]$KeepOpen", launcher)
+        self.assertIn("if ($KeepOpen)", launcher)
+        self.assertIn("exit $AgentExitCode", launcher)
+
     def _project_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, Path]:
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)

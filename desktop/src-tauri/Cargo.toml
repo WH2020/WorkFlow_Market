@@ -1,6 +1,6 @@
 [package]
 name = "agent4market-desktop"
-version = "0.8.0"
+version = "0.8.1"
 description = "Single-role Sales Director AI Assistant desktop shell"
 authors = ["WorkFlow_Market contributors"]
 edition = "2021"
@@ -16,3 +16,6 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-single-instance = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }

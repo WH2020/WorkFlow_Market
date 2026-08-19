@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [switch]$KeepOpen,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PiArgs
 )
@@ -17,4 +18,11 @@ if (-not $PythonCommand) {
     throw "Python 3.11+ was not found. Run setup-windows.ps1 first."
 }
 & $PythonCommand.Source @PythonPrefix -m agent_platform launch -- @PiArgs
-exit $LASTEXITCODE
+$AgentExitCode = $LASTEXITCODE
+if ($KeepOpen) {
+    if ($AgentExitCode -ne 0) {
+        Write-Host "`nAI core exited with code $AgentExitCode. Review the message above, then close this window and restart Agent4Market." -ForegroundColor Red
+    }
+    return
+}
+exit $AgentExitCode

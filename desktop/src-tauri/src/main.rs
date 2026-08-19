@@ -13,13 +13,13 @@ use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
 const PROFILE_ID: &str = "sales-director";
 const WORKBENCH_PORT: u16 = 8765;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-#[cfg(windows)]
-const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
 #[derive(Default)]
 struct RuntimeChildren(Mutex<Vec<Child>>);
@@ -69,6 +69,35 @@ fn launcher_log(root: &Path) -> Result<File, String> {
         .append(true)
         .open(path)
         .map_err(|error| error.to_string())
+}
+
+fn log_launcher_event(root: &Path, event: &str) {
+    if let Ok(mut output) = launcher_log(root) {
+        let _ = writeln!(output, "[desktop pid={}] {event}", std::process::id());
+    }
+}
+
+#[cfg(windows)]
+fn show_startup_error(message: &str) {
+    let title: Vec<u16> = "销售总监 AI 助手启动失败\0".encode_utf16().collect();
+    let body: Vec<u16> = format!(
+        "销售总监 AI 助手未能启动。\n\n{message}\n\n请关闭旧版本后重试；详细记录位于安装目录的 .pi\\director-runtime\\desktop-launcher.log。\0"
+    )
+    .encode_utf16()
+    .collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn show_startup_error(message: &str) {
+    eprintln!("销售总监 AI 助手启动失败：{message}");
 }
 
 fn python_command() -> Result<(String, Vec<String>), String> {
@@ -194,8 +223,18 @@ fn pi_version_ok(root: &Path) -> bool {
 
 #[cfg(windows)]
 fn start_agent(root: &Path) -> Result<Child, String> {
-    Command::new("powershell.exe")
+    // The Tauri process uses the Windows GUI subsystem and has no console handles.
+    // Let cmd's START builtin allocate PowerShell's console, while /WAIT keeps a
+    // parent process that the desktop app can terminate together with its tree.
+    Command::new("cmd.exe")
         .args([
+            "/D",
+            "/S",
+            "/C",
+            "start",
+            "Agent4Market AI Core",
+            "/WAIT",
+            "powershell.exe",
             "-NoLogo",
             "-NoProfile",
             "-NoExit",
@@ -203,12 +242,13 @@ fn start_agent(root: &Path) -> Result<Child, String> {
             "Bypass",
             "-File",
             &root.join("scripts/start-windows.ps1").to_string_lossy(),
+            "-KeepOpen",
             "--approve",
         ])
         .current_dir(root)
         .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID)
         .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
-        .creation_flags(CREATE_NEW_CONSOLE)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|value| format!("Pi 销售总监运行时启动失败：{value}"))
 }
@@ -284,29 +324,16 @@ fn main() {
         ))
         .setup(|app| {
             let root = project_root().map_err(std::io::Error::other)?;
+            log_launcher_event(&root, "setup started");
             env::set_current_dir(&root)?;
             let mut server = start_workbench(&root).map_err(std::io::Error::other)?;
             if !wait_for_workbench(&mut server) {
                 stop_child(&mut server);
                 return Err(std::io::Error::other("销售总监工作台未能启动").into());
             }
-            let agent = match start_agent(&root) {
-                Ok(child) => child,
-                Err(error) => {
-                    stop_child(&mut server);
-                    return Err(std::io::Error::other(error).into());
-                }
-            };
-            {
-                let state = app.state::<RuntimeChildren>();
-                let mut children = state
-                    .0
-                    .lock()
-                    .map_err(|_| std::io::Error::other("运行时锁已损坏"))?;
-                children.push(server);
-                children.push(agent);
-            }
-            let window_result = WebviewWindowBuilder::new(
+            log_launcher_event(&root, "workbench ready");
+            log_launcher_event(&root, "building main window");
+            let window = match WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External("http://127.0.0.1:8765/".parse().expect("static URL")),
@@ -320,15 +347,49 @@ fn main() {
                     && url.host_str() == Some("127.0.0.1")
                     && url.port() == Some(WORKBENCH_PORT)
             })
-            .build();
-            if let Err(error) = window_result {
-                cleanup(&app.state::<RuntimeChildren>());
-                return Err(error.into());
+            .build()
+            {
+                Ok(window) => window,
+                Err(error) => {
+                    stop_child(&mut server);
+                    return Err(error.into());
+                }
+            };
+            log_launcher_event(&root, "main window ready");
+            log_launcher_event(&root, "starting AI core");
+            let mut agent = match start_agent(&root) {
+                Ok(child) => child,
+                Err(error) => {
+                    let _ = window.close();
+                    stop_child(&mut server);
+                    return Err(std::io::Error::other(error).into());
+                }
+            };
+            log_launcher_event(&root, "AI core launcher started");
+            let state = app.state::<RuntimeChildren>();
+            match state.0.lock() {
+                Ok(mut children) => {
+                    children.push(server);
+                    children.push(agent);
+                }
+                Err(_) => {
+                    let _ = window.close();
+                    stop_child(&mut agent);
+                    stop_child(&mut server);
+                    return Err(std::io::Error::other("运行时锁已损坏").into());
+                }
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("销售总监桌面应用初始化失败");
+        .build(tauri::generate_context!());
+
+    let application = match application {
+        Ok(application) => application,
+        Err(error) => {
+            show_startup_error(&error.to_string());
+            return;
+        }
+    };
 
     application.run(|app, event| {
         if matches!(event, RunEvent::Exit) {
