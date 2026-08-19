@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .core import ManifestError, Platform, WorkflowError
+from .model_provider import ModelProviderError, model_runtime_configuration
 
 
 MIN_NODE = (22, 19, 0)
@@ -257,7 +258,27 @@ def launch_pi(
     ppt_ready = bool(report["ppt"]["ready"])
     if ppt_ready:
         environment.update(report["ppt"]["config"])
-    completed = subprocess.run([str(pi_path), *arguments], cwd=root, env=environment, check=False)
+    launch_arguments = list(arguments)
+    try:
+        model_runtime = model_runtime_configuration(root)
+    except (ModelProviderError, OSError):
+        # Keep the workbench reachable so the user can repair an invalid local model setting.
+        model_runtime = None
+    if model_runtime is not None:
+        selected_model, model_environment = model_runtime
+        environment.update(model_environment)
+        has_explicit_model = any(
+            argument == "--model" or argument.startswith("--model=") for argument in launch_arguments
+        )
+        utility_only = any(
+            argument in {"--version", "--help", "-h", "--list-models"}
+            for argument in launch_arguments
+        ) or (launch_arguments[:1] and launch_arguments[0] in {
+            "install", "remove", "uninstall", "update", "list", "config", "auth"
+        })
+        if not has_explicit_model and not utility_only:
+            launch_arguments = ["--model", selected_model, *launch_arguments]
+    completed = subprocess.run([str(pi_path), *launch_arguments], cwd=root, env=environment, check=False)
     return completed.returncode, ppt_ready
 
 

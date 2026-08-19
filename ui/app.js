@@ -4,6 +4,7 @@
   let selectedProfile = null;
   let selectedService = null;
   let guidedRenderedService = null;
+  let modelSettingsInitialized = false;
   const guidedDrafts = {};
   const guidedNotes = {};
 
@@ -133,6 +134,42 @@
       button.onclick = () => { selectedService = service.id; renderWorkflow(); renderServices(); renderTaskForm(); };
       return button;
     }));
+  }
+
+  function populateModelOptions(models, selectedModel = "") {
+    const select = $("model-select");
+    const options = [];
+    if (!Array.isArray(models) || models.length === 0) {
+      const empty = document.createElement("option"); empty.value = ""; empty.textContent = "请先获取模型"; options.push(empty);
+      select.disabled = true; $("save-model-settings").disabled = true;
+    } else {
+      models.forEach((modelItem) => {
+        const option = document.createElement("option"); option.value = modelItem.id;
+        option.textContent = modelItem.owned_by ? `${modelItem.id} · ${modelItem.owned_by}` : modelItem.id;
+        options.push(option);
+      });
+      select.disabled = false; $("save-model-settings").disabled = false;
+    }
+    select.replaceChildren(...options);
+    if (selectedModel && options.some((option) => option.value === selectedModel)) select.value = selectedModel;
+  }
+
+  function renderModelSettings(force = false) {
+    const settings = model?.model || { configured: false, status: "unconfigured" };
+    const panel = $("model-settings-panel");
+    panel.classList.toggle("configured", settings.configured && settings.status === "configured");
+    panel.classList.toggle("error", settings.status === "error" || settings.status === "missing_key");
+    if (settings.status === "error") $("model-current").textContent = `配置异常：${settings.error}`;
+    else if (settings.status === "missing_key") $("model-current").textContent = `密钥不可用：${settings.provider_id}/${settings.selected_model}，请重新填写并保存`;
+    else if (settings.configured) $("model-current").textContent = `${settings.provider_id}/${settings.selected_model} · ${settings.base_url}`;
+    else $("model-current").textContent = "沿用 Pi 当前默认模型；尚未配置 NewAPI 网关";
+    if (modelSettingsInitialized && !force) return;
+    modelSettingsInitialized = true;
+    $("model-base-url").value = settings.base_url || "";
+    $("model-private-network").checked = Boolean(settings.allow_private_network);
+    $("model-api-key").value = "";
+    $("model-api-key").placeholder = settings.has_api_key ? "已保存；留空则继续使用" : "请输入网关 API Key";
+    populateModelOptions(settings.models || [], settings.selected_model || "");
   }
 
   function guidedControl(field, draft) {
@@ -438,7 +475,7 @@
     model.outputs.forEach((item) => box.append(summaryRow("output-row", item.name, item.modified_at)));
   }
 
-  function render() { renderServices(); renderTaskForm(); renderTasks(); renderData(); renderOutputs(); }
+  function render() { renderModelSettings(); renderServices(); renderTaskForm(); renderTasks(); renderData(); renderOutputs(); }
 
   async function createTask(request) {
     return api("/api/task-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, request }) });
@@ -540,6 +577,71 @@
       $("ppt-topic").focus();
     });
   });
+
+  function modelPayload() {
+    return {
+      base_url: $("model-base-url").value.trim(),
+      api_key: $("model-api-key").value.trim(),
+      allow_private_network: $("model-private-network").checked,
+    };
+  }
+
+  $("discover-models").onclick = async () => {
+    const button = $("discover-models");
+    button.disabled = true;
+    $("model-discovery-status").textContent = "正在连接网关并读取模型…";
+    try {
+      const response = await api("/api/model-discovery", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(modelPayload()),
+      });
+      $("model-base-url").value = response.base_url;
+      populateModelOptions(response.models, model?.model?.selected_model || "");
+      $("model-discovery-status").textContent = response.message;
+    } catch (error) {
+      populateModelOptions([]);
+      $("model-discovery-status").textContent = error.message;
+    } finally { button.disabled = false; }
+  };
+
+  $("save-model-settings").onclick = async () => {
+    const selectedModel = $("model-select").value;
+    if (!selectedModel) { $("model-discovery-status").textContent = "请先获取并选择一个模型。"; return; }
+    const button = $("save-model-settings");
+    button.disabled = true;
+    $("model-discovery-status").textContent = "正在验证并保存模型配置…";
+    try {
+      const response = await api("/api/model-settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...modelPayload(), selected_model: selectedModel }),
+      });
+      model.model = response;
+      renderModelSettings(true);
+      $("model-settings-panel").open = true;
+      $("model-discovery-status").textContent = response.message;
+      note("模型已保存；关闭并重新打开 Agent4Market 后，后续任务将使用新模型。");
+    } catch (error) {
+      $("model-discovery-status").textContent = error.message;
+      button.disabled = false;
+    }
+  };
+
+  $("reset-model-settings").onclick = async () => {
+    if (!confirm("恢复 Pi 默认模型？已保存的 NewAPI 密钥会从本机删除，重启应用后生效。")) return;
+    const button = $("reset-model-settings");
+    button.disabled = true;
+    try {
+      const response = await api("/api/model-settings/reset", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      model.model = response;
+      renderModelSettings(true);
+      $("model-settings-panel").open = true;
+      $("model-discovery-status").textContent = response.message;
+      note("已恢复默认模型；关闭并重新打开 Agent4Market 后生效。");
+    } catch (error) {
+      $("model-discovery-status").textContent = error.message;
+    } finally { button.disabled = false; }
+  };
 
   $("create-presentation").onclick = async () => {
     try {

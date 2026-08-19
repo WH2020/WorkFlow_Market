@@ -177,6 +177,62 @@ class EnvironmentTests(unittest.TestCase):
         self.assertFalse(ppt_ready)
         self.assertNotIn("WORKFLOW_CJK_FONT", run.call_args.kwargs["env"])
 
+    def test_launch_injects_selected_newapi_model_and_secret_only_into_child(self) -> None:
+        report = {"core": {"ready": True}, "ppt": {"ready": False, "config": {}}}
+        source_environment = {"PATH": "/usr/bin"}
+        with (
+            patch("agent_platform.environment.doctor_report", return_value=report),
+            patch("agent_platform.environment._command_path", return_value=Path("/trusted/pi")),
+            patch(
+                "agent_platform.environment.model_runtime_configuration",
+                return_value=(
+                    "agent4market-newapi/gpt-4.1",
+                    {"AGENT4MARKET_NEWAPI_API_KEY": "model-secret"},
+                ),
+            ),
+            patch("agent_platform.environment.subprocess.run", return_value=Mock(returncode=0)) as run,
+        ):
+            return_code, _ppt_ready = launch_pi(Path.cwd(), ["--approve"], environ=source_environment)
+        self.assertEqual(0, return_code)
+        command = run.call_args.args[0]
+        self.assertEqual(
+            [str(Path("/trusted/pi")), "--model", "agent4market-newapi/gpt-4.1", "--approve"], command
+        )
+        self.assertNotIn("AGENT4MARKET_NEWAPI_API_KEY", source_environment)
+        self.assertEqual(
+            "model-secret", run.call_args.kwargs["env"]["AGENT4MARKET_NEWAPI_API_KEY"]
+        )
+
+    def test_explicit_model_argument_overrides_saved_selection(self) -> None:
+        report = {"core": {"ready": True}, "ppt": {"ready": False, "config": {}}}
+        with (
+            patch("agent_platform.environment.doctor_report", return_value=report),
+            patch("agent_platform.environment._command_path", return_value=Path("/trusted/pi")),
+            patch(
+                "agent_platform.environment.model_runtime_configuration",
+                return_value=("agent4market-newapi/gpt-4.1", {"AGENT4MARKET_NEWAPI_API_KEY": "secret"}),
+            ),
+            patch("agent_platform.environment.subprocess.run", return_value=Mock(returncode=0)) as run,
+        ):
+            launch_pi(Path.cwd(), ["--model", "openai/gpt-5", "--version"], environ={"PATH": "/usr/bin"})
+        self.assertEqual(
+            [str(Path("/trusted/pi")), "--model", "openai/gpt-5", "--version"], run.call_args.args[0]
+        )
+
+    def test_version_check_does_not_require_the_selected_model_catalog(self) -> None:
+        report = {"core": {"ready": True}, "ppt": {"ready": False, "config": {}}}
+        with (
+            patch("agent_platform.environment.doctor_report", return_value=report),
+            patch("agent_platform.environment._command_path", return_value=Path("/trusted/pi")),
+            patch(
+                "agent_platform.environment.model_runtime_configuration",
+                return_value=("agent4market-newapi/gpt-4.1", {"AGENT4MARKET_NEWAPI_API_KEY": "secret"}),
+            ),
+            patch("agent_platform.environment.subprocess.run", return_value=Mock(returncode=0)) as run,
+        ):
+            launch_pi(Path.cwd(), ["--version"], environ={"PATH": "/usr/bin"})
+        self.assertEqual([str(Path("/trusted/pi")), "--version"], run.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()

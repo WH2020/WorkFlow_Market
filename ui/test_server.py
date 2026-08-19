@@ -68,6 +68,10 @@ class ControlCentreTests(unittest.TestCase):
         javascript = (ui_root / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="guided-fields"', html)
         self.assertIn('id="quick-prompts"', html)
+        self.assertIn('id="model-settings-panel"', html)
+        self.assertIn('id="discover-models"', html)
+        self.assertIn('id="model-select"', html)
+        self.assertIn('id="reset-model-settings"', html)
         self.assertIn('id="weekly-task-form"', html)
         self.assertIn('id="create-weekly"', html)
         self.assertIn("高级设置（页数、风格和文件名）", html)
@@ -81,6 +85,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('"office-document":', javascript)
         self.assertIn("function weeklyBrief()", javascript)
         self.assertIn("function guidedRequest()", javascript)
+        self.assertIn("function renderModelSettings", javascript)
+        self.assertIn('api("/api/model-discovery"', javascript)
 
     def test_exclusive_task_rejects_a_concurrent_writer(self):
         target = server.TASKS / "task-a.json"

@@ -10,6 +10,20 @@
   <header><div><p class="eyebrow">SALES DIRECTOR · LOCAL · APPROVAL FIRST</p><h1>销售总监 AI 助手</h1></div><span class="local">仅本机运行</span></header>
   <main>
     <section class="hero"><div><h2>客户推进、资源协调和销售复盘，都在一个工作台完成</h2><p>选择销售服务并提交任务；关键数据写入、方案和 PPT 生成仍由你确认。</p></div><div id="notice" aria-live="polite"></div></section>
+    <details id="model-settings-panel" class="panel model-panel">
+      <summary><div><span class="model-dot" aria-hidden="true"></span><div><strong>当前模型</strong><p id="model-current">正在读取模型配置…</p></div></div><span class="model-settings-action">接入或切换模型</span></summary>
+      <div class="model-form">
+        <div class="model-explainer"><strong>连接 NewAPI / OpenAI 兼容网关</strong><p>地址和模型选择保存在本机；API Key 使用系统保护存储，不进入 Git、任务记录或模型列表。</p></div>
+        <div class="model-grid">
+          <label>网关地址<input id="model-base-url" maxlength="500" placeholder="https://ai.example.com（不要填写 /v1）"></label>
+          <label>API Key<input id="model-api-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="留空则继续使用已保存的密钥"></label>
+          <label class="model-private"><input id="model-private-network" type="checkbox">允许本机或局域网网关</label>
+          <div class="model-discover"><button id="discover-models" type="button" class="secondary">获取可用模型</button><span id="model-discovery-status" class="hint"></span></div>
+          <label class="span-2">选择后续任务使用的模型<select id="model-select" disabled><option value="">请先获取模型</option></select></label>
+        </div>
+        <div class="form-actions"><button id="save-model-settings" type="button" class="primary" disabled>保存模型选择</button><button id="reset-model-settings" type="button" class="secondary">恢复默认模型</button><span class="hint">保存后关闭并重新打开应用生效；正在运行的任务不会被中途切换模型。</span></div>
+      </div>
+    </details>
     <section class="panel"><h2>1. 选择要处理的销售工作</h2><div id="services" class="service-grid"></div></section>
     <section id="generic-task-form" class="panel task-form">
       <div class="form-heading"><div><p class="section-kicker">GUIDED TASK</p><h2 id="task-form-title">2. 创建任务</h2></div><p id="task-form-intro" class="hint"></p></div>

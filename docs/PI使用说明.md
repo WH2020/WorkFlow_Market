@@ -26,6 +26,18 @@ bash scripts/start-macos.sh
 
 Windows 桌面发行版固定加载 `sales-director`，保留销售、研究、政府合作、文件和 PPT Skills，不加载产品研发 Skill，也不允许切换到其他总监角色。未进入 Profile 的旧版邮箱与聊天 Skill不会加载。第三方 Pi Package 具备本机执行权限，安装前应先审阅来源。
 
+### 接入和选择模型
+
+1. 打开桌面工作台顶部的“当前模型”。
+2. 填写 NewAPI 网关根地址，例如 `https://ai.example.com`，不要附加 `/v1`、查询参数或账号密码。
+3. 填写 API Key。使用 `127.0.0.1` 或局域网自建服务时，确认来源可信后勾选“允许本机或局域网网关”；公网 HTTP 会被拒绝。
+4. 点击“获取可用模型”。工作台只调用该网关的 `/v1/models`，不接受重定向，并限制响应时间、类型和大小。
+5. 从动态列表中选择模型，点击“保存模型选择”，然后关闭并重新打开 `Agent4Market`。
+
+保存动作会再次验证模型仍在最新目录中，并把模型 ID、端点类型和保守能力默认值写入 Pi 可在启动前读取的 `models.json`；只有目录写入成功才会把它设为选中模型。Windows 密钥由当前 Windows 用户的 DPAPI 加密，macOS 密钥写入系统钥匙串；`models.json`、任务和 Git 中都不保存明文密钥。Pi 子进程启动时才临时获得密钥环境变量，并通过明确的 `--model agent4market-newapi/<model-id>` 使用所选模型。更换网关地址时必须重新输入密钥。
+
+不配置此项时，应用沿用 Pi 当前默认模型。首版界面只管理一个 NewAPI/OpenAI 兼容网关；动态发现、端点判断和本地目录设计借鉴了 MIT 许可项目 [pi-provider-newapi](https://github.com/ttimasdf/pi-provider-newapi)，但没有捆绑其扩展运行时。当前不会自动读取价格比例；未明确声明能力的模型按文本、非推理、128K 上下文和 32K 最大输出的保守默认值注册，实际限额仍以网关和模型为准。
+
 行业研究和政府合作方案需要公开检索。在本机环境变量中配置 `BRAVE_SEARCH_API_KEY` 后再启动 Pi；密钥不要放进 `.env`、JSON、截图或 Git。适配器先调用 Brave 正式 Web Search API 发现来源，再由受控 `web.open` 读取选中的正文；读取连接固定到已核验的公网地址，DNS 与连接空闲各限 10 秒，网页下载及在线 PDF 提取合计限 30 秒，并拒绝重定向。未配置、配额不足、私网目标或网络异常时会停在当前 DAG 节点。[官方认证说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
 ### PDF 与 PPT 运行时

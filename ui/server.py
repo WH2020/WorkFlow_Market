@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -26,6 +27,20 @@ from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agent_platform.model_provider import (  # noqa: E402
+    ModelProviderError,
+    clear_model_provider,
+    configure_model_provider,
+    discover_models,
+    load_model_secret,
+    model_settings_summary,
+    normalize_base_url,
+)
+
+
 UI_ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".pi" / "director-runtime"
 TASKS = RUNTIME / "tasks"
@@ -389,7 +404,11 @@ class ControlHandler(SimpleHTTPRequestHandler):
         route = urlparse(self.path).path
         if route == "/api/bootstrap":
             self.send_json(HTTPStatus.OK, {"profiles": profiles(), "workflows": workflows(), "tasks": task_summaries(),
-                                           "data": data_summary(), "outputs": output_summary(), "request_token": SERVER_TOKEN})
+                                           "data": data_summary(), "outputs": output_summary(),
+                                           "model": model_settings_summary(ROOT), "request_token": SERVER_TOKEN})
+            return
+        if route == "/api/model-settings":
+            self.send_json(HTTPStatus.OK, model_settings_summary(ROOT))
             return
         if route == "/api/tasks":
             self.send_json(HTTPStatus.OK, task_summaries())
@@ -416,6 +435,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
             route = urlparse(self.path).path
             if route == "/api/task-requests":
                 self.create_request(payload)
+            elif route == "/api/model-discovery":
+                self.discover_model_options(payload)
+            elif route == "/api/model-settings":
+                self.configure_model(payload)
+            elif route == "/api/model-settings/reset":
+                self.reset_model()
             elif route.startswith("/api/tasks/") and route.endswith("/decision"):
                 self.decide(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/presentation-revision"):
@@ -424,6 +449,47 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
         except (ValueError, KeyError, json.JSONDecodeError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+
+    def discover_model_options(self, payload: dict[str, Any]) -> None:
+        base_url = str(payload.get("base_url", ""))
+        supplied_key = str(payload.get("api_key", "")).strip()
+        allow_private = payload.get("allow_private_network") is True
+        normalized = normalize_base_url(base_url, allow_private_network=allow_private)
+        api_key = supplied_key or load_model_secret(ROOT, normalized)
+        if not api_key:
+            raise ModelProviderError("请填写 API Key；已保存的密钥只可用于同一个网关地址")
+        normalized, models = discover_models(
+            normalized, api_key, allow_private_network=allow_private
+        )
+        self.send_json(HTTPStatus.OK, {
+            "base_url": normalized, "models": models,
+            "message": f"已从网关读取 {len(models)} 个模型，API Key 未写入页面或模型目录。",
+        })
+
+    def configure_model(self, payload: dict[str, Any]) -> None:
+        selected_model = str(payload.get("selected_model", "")).strip()
+        if not selected_model or len(selected_model) > 200:
+            raise ModelProviderError("请先获取并选择一个模型")
+        result = configure_model_provider(
+            ROOT,
+            base_url=str(payload.get("base_url", "")),
+            api_key=str(payload.get("api_key", "")).strip() or None,
+            selected_model=selected_model,
+            allow_private_network=payload.get("allow_private_network") is True,
+        )
+        self.send_json(HTTPStatus.OK, {
+            **result,
+            "restart_required": True,
+            "message": "模型配置已保存。请关闭并重新打开 Agent4Market，使新模型接管后续任务。",
+        })
+
+    def reset_model(self) -> None:
+        result = clear_model_provider(ROOT)
+        self.send_json(HTTPStatus.OK, {
+            **result,
+            "restart_required": True,
+            "message": "已恢复为 Pi 默认模型。请关闭并重新打开 Agent4Market 后生效。",
+        })
 
     def create_request(self, payload: dict[str, Any]) -> None:
         profile_id = safe_id(str(payload.get("profile_id", "")))
