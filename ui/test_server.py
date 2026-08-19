@@ -116,6 +116,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('addRestartAction(actions, task, "重新开始")', javascript)
         self.assertIn('addAction(actions, task, "resume", "继续任务")', javascript)
         self.assertIn("function renderTaskProgress", javascript)
+        self.assertIn("const taskProgressScroll = {}", javascript)
+        self.assertIn("followLatest: distanceFromBottom <= 24", javascript)
+        self.assertIn("previousScroll?.followLatest === false", javascript)
         self.assertIn('redirect.textContent = "调整当前方向"', javascript)
         self.assertIn("/messages`,", javascript)
 

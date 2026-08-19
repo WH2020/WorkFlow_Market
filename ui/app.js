@@ -14,6 +14,7 @@
   const guidedDrafts = {};
   const guidedNotes = {};
   const taskMessageDrafts = {};
+  const taskProgressScroll = {};
   const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
 
   const viewTitles = {
@@ -558,6 +559,15 @@
 
     const timeline = document.createElement("div");
     timeline.className = "task-progress-timeline";
+    timeline.dataset.taskId = task.task_id;
+    const previousScroll = taskProgressScroll[task.task_id];
+    timeline.addEventListener("scroll", () => {
+      const distanceFromBottom = timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop;
+      taskProgressScroll[task.task_id] = {
+        top: timeline.scrollTop,
+        followLatest: distanceFromBottom <= 24,
+      };
+    }, { passive: true });
     const events = Array.isArray(task.progress) ? task.progress.slice(-12) : [];
     if (!events.length) {
       const empty = document.createElement("p");
@@ -648,6 +658,12 @@
       section.append(composer);
     }
     article.insertBefore(section, article.querySelector(".task-actions"));
+    queueMicrotask(() => {
+      const maximum = Math.max(0, timeline.scrollHeight - timeline.clientHeight);
+      timeline.scrollTop = previousScroll?.followLatest === false
+        ? Math.min(Math.max(0, Number(previousScroll.top) || 0), maximum)
+        : maximum;
+    });
   }
 
   function renderTasks() {
