@@ -11,26 +11,48 @@
   <main>
     <section class="hero"><div><h2>客户推进、资源协调和销售复盘，都在一个工作台完成</h2><p>选择销售服务并提交任务；关键数据写入、方案和 PPT 生成仍由你确认。</p></div><div id="notice" aria-live="polite"></div></section>
     <section class="panel"><h2>1. 选择要处理的销售工作</h2><div id="services" class="service-grid"></div></section>
-    <section id="generic-task-form" class="panel task-form"><h2>2. 创建任务</h2><label>任务说明<textarea id="request" maxlength="4000" placeholder="例如：复盘本周重点客户进展，标出停滞机会、所需资源和下周必须完成的动作。"></textarea></label><button id="create" class="primary">提交给销售总监 AI 助手</button><p class="hint">任务会进入受控工作流；客户台账更新、正式文件和 PPT 仍需你审批。</p></section>
+    <section id="generic-task-form" class="panel task-form">
+      <div class="form-heading"><div><p class="section-kicker">GUIDED TASK</p><h2 id="task-form-title">2. 创建任务</h2></div><p id="task-form-intro" class="hint"></p></div>
+      <div><strong class="field-heading">常用任务，一键带入</strong><div id="quick-prompts" class="quick-prompts"></div></div>
+      <div id="guided-fields" class="guided-grid"></div>
+      <details class="advanced-settings"><summary>补充说明（可选）</summary><label>还有哪些背景、限制或特殊要求？<textarea id="request-notes" maxlength="1200" placeholder="例如：只看华东区域；方案要供下周客户会议使用。"></textarea></label></details>
+      <div class="form-actions"><button id="create" class="primary">开始处理</button><span class="hint">助手会按当前服务自动组织任务；涉及台账写入和正式文件时仍由你审批。</span></div>
+    </section>
     <section id="presentation-task-form" class="panel task-form presentation-form" hidden>
-      <div class="form-heading"><div><p class="section-kicker">SALES PRESENTATION BRIEF</p><h2>2. 创建销售 PPT 项目</h2></div><p class="hint">先说清楚客户、受众和预期行动，再进入资料和大纲阶段。</p></div>
-      <div class="brief-grid">
-        <label class="span-2">主题与任务说明<textarea id="ppt-topic" maxlength="240" placeholder="例如：面向 CEO 汇报本周行业、政府合作和销售进展，突出需要协调的资源。"></textarea></label>
-          <label>汇报场景<select id="ppt-scene"><option value="weekly">周报与销售管理汇报</option><option value="industry">客户与行业研究</option><option value="government">政府合作方案</option><option value="custom">客户方案与自定义演示</option></select></label>
-          <label>处理模式<select id="ppt-mode"><option value="standard">标准（推荐）</option><option value="quick">快速</option><option value="strict">严格</option></select></label>
-        <label>受众<input id="ppt-audience" maxlength="120" placeholder="例如：CEO、地方政府领导"></label>
-        <label>使用目的<input id="ppt-purpose" maxlength="180" placeholder="例如：同步进展并申请资源"></label>
-        <label>使用场合<input id="ppt-occasion" maxlength="120" placeholder="例如：周例会、项目汇报会"></label>
-        <label>演示语言<select id="ppt-language"><option value="zh-CN">中文</option><option value="en">英文</option></select></label>
-        <label>演讲时长（分钟）<input id="ppt-duration" type="number" min="3" max="120" value="15"></label>
-        <label>目标页数<input id="ppt-pages" type="number" min="4" max="10" value="8"></label>
-        <label>设计风格<select id="ppt-style"><option value="management-report">销售管理汇报</option><option value="government-program">政府合作方案</option><option value="technology-research">客户与行业研究</option></select></label>
-        <div class="source-policy"><strong>首版资料范围</strong><span>公开网页 + 当前角色知识库</span><small>流程会先公开检索，再读取内部知识；本地 PDF 请先用“PDF 资料入库”。不要把秘密信息写进公开检索主题。</small></div>
-        <label>保密等级<select id="ppt-confidentiality"><option value="internal">内部使用</option><option value="restricted">限制传播</option><option value="public">可公开</option></select></label>
-        <label>输出文件名<input id="ppt-output" maxlength="125" value="director-presentation.pptx" aria-describedby="ppt-output-hint"><small id="ppt-output-hint">仅限字母、数字、点、连字符和下划线，以 .pptx 结尾。</small></label>
-        <label class="span-2">希望听众做出的决定或行动<textarea id="ppt-decision" maxlength="500" placeholder="例如：确认下周重点客户资源配置；没有明确决策时可写“信息同步”。"></textarea></label>
+      <div class="form-heading"><div><p class="section-kicker">SALES PRESENTATION</p><h2>2. 创建销售 PPT</h2></div><p class="hint">只有主题必填，其余内容可使用默认值。</p></div>
+      <div class="quick-prompts" id="ppt-quick-prompts">
+        <button type="button" class="prompt-chip" data-ppt-preset="customer">客户方案汇报</button>
+        <button type="button" class="prompt-chip" data-ppt-preset="review">销售复盘汇报</button>
+        <button type="button" class="prompt-chip" data-ppt-preset="government">政府合作汇报</button>
       </div>
-      <div class="form-actions"><button id="create-presentation" class="primary">创建 PPT 项目</button><span class="hint">工作流会先形成证据包和数字便利贴；正式文件仍需绑定完整载荷后批准。</span></div>
+      <div class="brief-grid brief-grid-primary">
+        <label class="span-2">要做什么 PPT？<textarea id="ppt-topic" maxlength="240" placeholder="例如：为 A 客户制作具身智能数据采集方案汇报，突出落地路径和合作价值。"></textarea></label>
+        <label>给谁看？<input id="ppt-audience" maxlength="120" value="客户决策人和销售管理层"></label>
+        <label>希望对方看完做什么？<input id="ppt-decision" maxlength="500" placeholder="默认：确认下一步行动与所需资源"></label>
+      </div>
+      <details class="advanced-settings"><summary>高级设置（页数、风格和文件名）</summary>
+        <div class="brief-grid advanced-grid">
+          <label>汇报场景<select id="ppt-scene"><option value="custom">客户方案与自定义演示</option><option value="industry">客户与行业研究</option><option value="government">政府合作方案</option><option value="weekly">周报与销售管理汇报</option></select></label>
+          <label>处理模式<select id="ppt-mode"><option value="standard">标准（推荐）</option><option value="quick">快速</option><option value="strict">严格</option></select></label>
+          <label>演示语言<select id="ppt-language"><option value="zh-CN">中文</option><option value="en">英文</option></select></label>
+          <label>演讲时长（分钟）<input id="ppt-duration" type="number" min="3" max="120" value="15"></label>
+          <label>目标页数<input id="ppt-pages" type="number" min="4" max="10" value="6"></label>
+          <label>设计风格<select id="ppt-style"><option value="management-report">销售管理汇报</option><option value="government-program">政府合作方案</option><option value="technology-research">客户与行业研究</option></select></label>
+          <label>保密等级<select id="ppt-confidentiality"><option value="internal">内部使用</option><option value="restricted">限制传播</option><option value="public">可公开</option></select></label>
+          <label>输出文件名（可选）<input id="ppt-output" maxlength="125" placeholder="不填则自动命名"><small>仅限字母、数字、点、连字符和下划线，以 .pptx 结尾。</small></label>
+          <div class="source-policy span-2"><strong>资料范围</strong><span>公开网页 + 当前销售知识库</span><small>本地 PDF 请先用“PDF 资料入库”；不要把秘密信息写进公开检索主题。</small></div>
+        </div>
+      </details>
+      <div class="form-actions"><button id="create-presentation" class="primary">开始制作 PPT</button><span class="hint">助手会自动补齐场景、结构和默认设计；大纲与正式文件仍由你确认。</span></div>
+    </section>
+    <section id="weekly-task-form" class="panel task-form weekly-form" hidden>
+      <div class="form-heading"><div><p class="section-kicker">ONE-CLICK WEEKLY REPORT</p><h2>2. 生成周五销售汇报</h2></div><span id="weekly-period" class="period-badge"></span></div>
+      <div class="weekly-summary">
+        <strong>助手将自动汇总本周已有记录</strong>
+        <ul><li>重点客户进展与停滞机会</li><li>资源需求、风险和待确认事项</li><li>本周完成情况与下周行动</li></ul>
+      </div>
+      <label>本周特别想强调什么？（可选）<textarea id="weekly-focus" maxlength="120" placeholder="例如：重点突出 A 客户停滞原因，以及需要技术团队支持的事项。"></textarea></label>
+      <div class="form-actions"><button id="create-weekly" class="primary">一键生成本周汇报</button><span class="hint">无需重复填写页数、风格和受众；正式 PPT 生成前仍会让你确认。</span></div>
     </section>
     <section class="split"><div class="panel"><h2>当前任务</h2><div id="tasks" class="empty">正在读取任务状态…</div></div><div class="panel"><h2>知识与销售台账</h2><div id="data-summary" class="summary"></div></div></section>
     <section class="split"><div class="panel"><h2>工作流阶段</h2><div id="workflow" class="empty">选择服务或任务后显示。</div></div><div class="panel"><h2>最近产物</h2><div id="outputs" class="empty">暂无可显示的产物。</div></div></section>

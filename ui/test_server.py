@@ -62,6 +62,26 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("market.government.proposal", workflow_ids)
         self.assertFalse(any(workflow_id.startswith("product.") for workflow_id in workflow_ids))
 
+    def test_sales_workbench_uses_guided_forms_and_one_click_weekly_report(self):
+        ui_root = Path(server.__file__).parent
+        html = (ui_root / "index.html").read_text(encoding="utf-8")
+        javascript = (ui_root / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="guided-fields"', html)
+        self.assertIn('id="quick-prompts"', html)
+        self.assertIn('id="weekly-task-form"', html)
+        self.assertIn('id="create-weekly"', html)
+        self.assertIn("高级设置（页数、风格和文件名）", html)
+        self.assertNotIn('id="request"', html)
+        self.assertNotIn('id="ppt-purpose"', html)
+        self.assertNotIn('id="ppt-occasion"', html)
+        self.assertIn('"sales-review":', javascript)
+        self.assertIn('"industry-research":', javascript)
+        self.assertIn('"pdf-import":', javascript)
+        self.assertIn('"government-proposal":', javascript)
+        self.assertIn('"office-document":', javascript)
+        self.assertIn("function weeklyBrief()", javascript)
+        self.assertIn("function guidedRequest()", javascript)
+
     def test_exclusive_task_rejects_a_concurrent_writer(self):
         target = server.TASKS / "task-a.json"
         with server.exclusive_task(target):

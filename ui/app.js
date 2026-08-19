@@ -3,6 +3,87 @@
   let requestToken = null;
   let selectedProfile = null;
   let selectedService = null;
+  let guidedRenderedService = null;
+  const guidedDrafts = {};
+  const guidedNotes = {};
+
+  const guidedServices = {
+    "sales-review": {
+      title: "客户推进与销售复盘",
+      intro: "确定复盘对象和关注重点，助手会自动检查阶段、关键人、风险、资源和下一步动作。",
+      instruction: "结合销售台账复盘客户进展，给出风险排序、资源需求、责任人和下一步动作；拟更新台账时先展示并等待审批。",
+      fields: [
+        { id: "scope", label: "复盘哪些客户或机会？", type: "text", required: true, placeholder: "例如：A 客户、华东区重点机会，或本周全部重点客户" },
+        { id: "focus", label: "这次重点看什么？", type: "select", default: "阶段、风险与下一步动作", options: ["阶段、风险与下一步动作", "停滞原因与解阻动作", "资源缺口与协调事项", "销售过程与赢单复盘"] },
+        { id: "changes", label: "最近有什么新变化？（可选）", type: "textarea", placeholder: "例如：客户预算确认；技术负责人要求补充试点方案。" },
+      ],
+      presets: [
+        { label: "本周重点客户", values: { scope: "本周全部重点客户", focus: "阶段、风险与下一步动作" } },
+        { label: "找出停滞机会", values: { scope: "近两周没有实质推进的销售机会", focus: "停滞原因与解阻动作" } },
+        { label: "汇总资源申请", values: { scope: "当前需要跨部门支持的销售机会", focus: "资源缺口与协调事项" } },
+      ],
+    },
+    "industry-research": {
+      title: "客户与行业研究",
+      intro: "告诉助手研究对象和用途，它会自动检索公开资料、核验证据并联系当前知识库形成结论。",
+      instruction: "先检索和核验来源，再结合销售场景形成结论、机会、风险和建议动作；不确定信息明确标注待验证。",
+      fields: [
+        { id: "topic", label: "研究谁或什么方向？", type: "text", required: true, placeholder: "例如：某客户所在行业、脑机接口、具身智能或数据采集" },
+        { id: "purpose", label: "研究结果用来做什么？", type: "select", default: "支持客户沟通与机会判断", options: ["支持客户沟通与机会判断", "形成内部行业简报", "准备销售方案或 PPT", "识别竞品、合作方与风险"] },
+        { id: "period", label: "优先关注的时间范围", type: "select", default: "近 12 个月，并补充关键历史背景", options: ["近 3 个月", "近 12 个月，并补充关键历史背景", "近 3 年趋势", "不限定，按相关性筛选"] },
+      ],
+      presets: [
+        { label: "客户行业速览", values: { topic: "目标客户所在行业的近期变化与业务机会", purpose: "支持客户沟通与机会判断", period: "近 12 个月，并补充关键历史背景" } },
+        { label: "竞品与合作方", values: { topic: "目标方向的主要竞品、合作方与差异化机会", purpose: "识别竞品、合作方与风险", period: "近 12 个月，并补充关键历史背景" } },
+        { label: "前沿技术机会", values: { topic: "脑机、具身智能与数据采集方向的商业化进展", purpose: "形成内部行业简报", period: "近 12 个月，并补充关键历史背景" } },
+      ],
+    },
+    "pdf-import": {
+      title: "PDF 资料入库",
+      intro: "填写已放入 inputs 或 data/inbox 的 PDF 路径，助手会按页提取、标注来源并生成待审批的知识记录。",
+      instruction: "只读取指定的受控目录 PDF；保留页码与文件指纹，提取失败时停止，不把摘要当作已证实事实。",
+      fields: [
+        { id: "path", label: "PDF 相对路径", type: "text", required: true, placeholder: "例如：inputs/customer-report.pdf" },
+        { id: "goal", label: "入库后主要怎么用？", type: "select", default: "提取可引用证据并写入知识库", options: ["提取可引用证据并写入知识库", "分析客户材料并提炼销售机会", "提取政策要点和政府合作依据", "形成文档摘要与待验证问题"] },
+        { id: "focus", label: "重点关注（可选）", type: "text", placeholder: "例如：客户业务、预算、试点条件、政策支持或关键数据" },
+      ],
+      presets: [
+        { label: "证据入库", values: { goal: "提取可引用证据并写入知识库" } },
+        { label: "分析客户材料", values: { goal: "分析客户材料并提炼销售机会", focus: "客户需求、关键人、预算、时间表与下一步动作" } },
+        { label: "提取政策依据", values: { goal: "提取政策要点和政府合作依据", focus: "支持方向、申报条件、主管部门与有效期" } },
+      ],
+    },
+    "government-proposal": {
+      title: "政府合作方案",
+      intro: "先确定地区和合作方向，助手会结合公开政策、地方条件和内部资源形成可讨论的合作框架。",
+      instruction: "形成政府合作方案，覆盖合作价值、参与方、试点路径、资源清单、风险、里程碑和待确认事项；引用政策时保留来源。",
+      fields: [
+        { id: "region", label: "面向哪个地区或部门？", type: "text", required: true, placeholder: "例如：苏州市、某高新区或当地科技主管部门" },
+        { id: "direction", label: "合作方向或项目是什么？", type: "text", required: true, placeholder: "例如：具身智能数据采集基地、脑机接口应用示范" },
+        { id: "goal", label: "这版方案要推动什么？", type: "select", default: "形成首轮沟通与试点合作框架", options: ["形成首轮沟通与试点合作框架", "准备政府拜访与会议沟通", "明确可申请政策和资源", "形成正式项目建议书框架"] },
+      ],
+      presets: [
+        { label: "试点合作框架", values: { goal: "形成首轮沟通与试点合作框架" } },
+        { label: "政府拜访版本", values: { goal: "准备政府拜访与会议沟通" } },
+        { label: "政策资源地图", values: { goal: "明确可申请政策和资源" } },
+      ],
+    },
+    "office-document": {
+      title: "销售文件与方案",
+      intro: "选择文件类型并说明对象和素材，助手会直接按用途组织结构和初稿，不必从空白文档开始。",
+      instruction: "按使用对象和场合生成可审阅的销售文件，明确事实、假设、待确认项和下一步动作；正式文件生成前等待审批。",
+      fields: [
+        { id: "document", label: "要制作什么文件？", type: "select", default: "客户销售方案", options: ["客户销售方案", "内部资源协调单", "会议纪要与行动清单", "客户沟通邮件或函件", "项目阶段汇报"] },
+        { id: "audience", label: "给谁使用或阅读？", type: "text", required: true, placeholder: "例如：客户 CTO、公司技术团队、总经理办公会" },
+        { id: "materials", label: "依据哪些现有信息？", type: "textarea", required: true, placeholder: "粘贴关键事实，或写明要结合的客户、任务、知识库资料和已有文件。" },
+      ],
+      presets: [
+        { label: "客户方案", values: { document: "客户销售方案", audience: "客户业务负责人、技术负责人和决策人" } },
+        { label: "资源协调单", values: { document: "内部资源协调单", audience: "销售、产品、技术与交付负责人" } },
+        { label: "纪要与行动项", values: { document: "会议纪要与行动清单", audience: "参会人员与相关责任人" } },
+      ],
+    },
+  };
 
   const $ = (id) => document.getElementById(id);
   const label = {
@@ -31,12 +112,8 @@
 
   function currentProfile() { return model.profiles.find((profile) => profile.id === selectedProfile); }
   function currentService() { return currentProfile()?.services.find((service) => service.id === selectedService); }
-  function isPresentationService(service = currentService()) {
-    return Boolean(service && (
-      service.id === "presentation-studio" || service.id === "weekly-deck" ||
-      service.workflow === "shared.presentation.studio" || service.workflow === "shared.reporting.weekly-deck"
-    ));
-  }
+  function isPresentationStudio(service = currentService()) { return service?.id === "presentation-studio" || service?.workflow === "shared.presentation.studio"; }
+  function isWeeklyService(service = currentService()) { return service?.id === "weekly-deck" || service?.workflow?.startsWith("shared.reporting.weekly-deck"); }
 
   function choice(title, description, selected) {
     const button = document.createElement("button");
@@ -58,11 +135,69 @@
     }));
   }
 
+  function guidedControl(field, draft) {
+    const control = document.createElement(field.type === "select" ? "select" : field.type === "textarea" ? "textarea" : "input");
+    control.id = `guided-${field.id}`;
+    control.dataset.fieldId = field.id;
+    if (control.tagName === "INPUT") control.type = "text";
+    if (field.type !== "select") control.maxLength = field.maxLength || (field.type === "textarea" ? 800 : 240);
+    if (field.placeholder) control.placeholder = field.placeholder;
+    if (field.type === "select") field.options.forEach((value) => {
+      const option = document.createElement("option"); option.value = value; option.textContent = value; control.append(option);
+    });
+    if (draft[field.id] === undefined) draft[field.id] = field.default || "";
+    control.value = draft[field.id];
+    control.addEventListener("input", () => { draft[field.id] = control.value; });
+    return control;
+  }
+
+  function renderGuidedForm(force = false) {
+    const config = guidedServices[selectedService];
+    if (!config || (!force && guidedRenderedService === selectedService)) return;
+    guidedRenderedService = selectedService;
+    const draft = guidedDrafts[selectedService] ||= {};
+    $("task-form-title").textContent = `2. ${config.title}`;
+    $("task-form-intro").textContent = config.intro;
+    $("request-notes").value = guidedNotes[selectedService] || "";
+    const fields = config.fields.map((field) => {
+      const labelElement = document.createElement("label");
+      labelElement.textContent = `${field.label}${field.required ? " *" : ""}`;
+      labelElement.append(guidedControl(field, draft));
+      return labelElement;
+    });
+    $("guided-fields").replaceChildren(...fields);
+    const prompts = config.presets.map((preset) => {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "prompt-chip"; button.textContent = preset.label;
+      button.onclick = () => { Object.assign(draft, preset.values); renderGuidedForm(true); };
+      return button;
+    });
+    $("quick-prompts").replaceChildren(...prompts);
+  }
+
+  function formatDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function currentWeek() {
+    const today = new Date();
+    const weekday = today.getDay() || 7;
+    const monday = new Date(today); monday.setHours(0, 0, 0, 0); monday.setDate(today.getDate() - weekday + 1);
+    const friday = new Date(monday); friday.setDate(monday.getDate() + 4);
+    return { start: formatDate(monday), end: formatDate(friday) };
+  }
+
   function renderTaskForm() {
-    const presentation = isPresentationService();
-    $("generic-task-form").hidden = presentation;
+    const presentation = isPresentationStudio();
+    const weekly = isWeeklyService();
+    $("generic-task-form").hidden = presentation || weekly;
     $("presentation-task-form").hidden = !presentation;
-  if (presentation && selectedService === "weekly-deck") { $("ppt-scene").value = "weekly"; $("ppt-mode").value = "quick"; }
+    $("weekly-task-form").hidden = !weekly;
+    if (!presentation && !weekly) renderGuidedForm();
+    if (weekly) { const period = currentWeek(); $("weekly-period").textContent = `${period.start} 至 ${period.end}`; }
   }
 
   function renderWorkflow(task) {
@@ -309,25 +444,66 @@
     return api("/api/task-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, request }) });
   }
 
+  function guidedRequest() {
+    const config = guidedServices[selectedService];
+    if (!config) throw new Error("当前服务尚未配置引导表单。");
+    const draft = guidedDrafts[selectedService] || {};
+    config.fields.forEach((field) => {
+      if (field.required && !String(draft[field.id] || "").trim()) throw new Error(`请填写“${field.label}”。`);
+    });
+    const lines = [`【${config.title}】`];
+    config.fields.forEach((field) => {
+      const value = String(draft[field.id] || "").trim();
+      if (value) lines.push(`${field.label.replace(/（.*?）/gu, "")}：${value}`);
+    });
+    const notes = String(guidedNotes[selectedService] || "").trim();
+    if (notes) lines.push(`补充说明：${notes}`);
+    lines.push(`请执行：${config.instruction}`);
+    return lines.join("\n");
+  }
+
+  function autoOutputName(prefix, includeTime = true) {
+    const now = new Date();
+    const date = formatDate(now).replaceAll("-", "");
+    const time = `${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
+    return `${prefix}-${date}${includeTime ? `-${time}` : ""}.pptx`;
+  }
+
   function presentationBrief() {
     const topic = $("ppt-topic").value.trim();
     const duration = Number($("ppt-duration").value);
     const pages = Number($("ppt-pages").value);
-    const outputName = $("ppt-output").value.trim();
-    const expectedDecision = $("ppt-decision").value.trim() || "信息同步";
-    if (!topic) throw new Error("请先填写 PPT 主题与任务说明。");
+    const outputName = $("ppt-output").value.trim() || autoOutputName("sales-deck");
+    const expectedDecision = $("ppt-decision").value.trim() || "确认下一步行动与所需资源";
+    const scene = $("ppt-scene").value;
+    const occasions = { weekly: "周五销售例会", industry: "客户与行业专题汇报", government: "政府合作沟通会", custom: "销售或客户方案汇报" };
+    if (!topic) throw new Error("请先填写要制作的 PPT 主题。");
     if (topic.length > 240) throw new Error("PPT 主题不能超过 240 字。");
     if (expectedDecision.length > 500) throw new Error("期望决策不能超过 500 字。");
     if (!Number.isInteger(duration) || duration < 3 || duration > 120) throw new Error("演讲时长必须是 3–120 分钟的整数。");
     if (!Number.isInteger(pages) || pages < 4 || pages > 10) throw new Error("MVP 页数必须是 4–10 页。");
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx$/u.test(outputName)) throw new Error("输出文件名格式无效，请使用安全 ASCII 文件名并以 .pptx 结尾。");
     return {
-      schema_version: "1.0", scene: $("ppt-scene").value, mode: $("ppt-mode").value, topic,
-      audience: $("ppt-audience").value.trim() || "待澄清", purpose: $("ppt-purpose").value.trim() || "待澄清",
-      occasion: $("ppt-occasion").value.trim() || "待澄清", language: $("ppt-language").value,
+      schema_version: "1.0", scene, mode: $("ppt-mode").value, topic,
+      audience: $("ppt-audience").value.trim() || "客户决策人和销售管理层",
+      purpose: `推动${expectedDecision}`.slice(0, 180), occasion: occasions[scene], language: $("ppt-language").value,
       duration_minutes: duration, target_slides: pages, design_system: { token_id: $("ppt-style").value },
       source_scope: "public-web-and-profile-knowledge", confidentiality: $("ppt-confidentiality").value,
       expected_decision: expectedDecision, output_name: outputName,
+    };
+  }
+
+  function weeklyBrief() {
+    const period = currentWeek();
+    const focus = $("weekly-focus").value.trim();
+    const focusText = focus ? ` 特别关注：${focus}` : "";
+    return {
+      schema_version: "1.0", scene: "weekly", mode: "quick",
+      topic: `${period.start} 至 ${period.end} 销售周报：自动汇总重点客户进展、资源需求、风险和下周行动。${focusText}`,
+      audience: "销售管理层", purpose: "复盘本周销售推进并确认下周资源配置", occasion: "周五销售例会", language: "zh-CN",
+      duration_minutes: 15, target_slides: 6, design_system: { token_id: "management-report" },
+      source_scope: "public-web-and-profile-knowledge", confidentiality: "internal",
+      expected_decision: "确认重点客户优先级、资源配置和下周行动", output_name: autoOutputName("sales-weekly", false),
     };
   }
 
@@ -340,10 +516,30 @@
   }
 
   $("create").onclick = async () => {
-    const request = $("request").value.trim();
-    if (!request) { note("请先写下任务说明。", true); return; }
-    try { const response = await createTask(request); $("request").value = ""; note(`任务已登记（${response.request_id}），等待 Pi 工作流接手。`); } catch (error) { note(error.message, true); }
+    try {
+      const response = await createTask(guidedRequest());
+      guidedDrafts[selectedService] = {};
+      guidedNotes[selectedService] = "";
+      renderGuidedForm(true);
+      note(`任务已登记（${response.request_id}），等待 Pi 工作流接手。`);
+    } catch (error) { note(error.message, true); }
   };
+
+  $("request-notes").addEventListener("input", () => { guidedNotes[selectedService] = $("request-notes").value; });
+
+  const presentationPresets = {
+    customer: { audience: "客户业务负责人、技术负责人和决策人", decision: "确认方案范围、验证计划和下一步商务安排", scene: "custom", style: "management-report" },
+    review: { audience: "销售管理层", decision: "确认重点客户优先级、资源配置和下一步行动", scene: "weekly", style: "management-report" },
+    government: { audience: "地方政府相关部门与项目决策人", decision: "确认合作方向、试点范围和推进机制", scene: "government", style: "government-program" },
+  };
+  document.querySelectorAll("[data-ppt-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const preset = presentationPresets[button.dataset.pptPreset];
+      $("ppt-audience").value = preset.audience; $("ppt-decision").value = preset.decision;
+      $("ppt-scene").value = preset.scene; $("ppt-style").value = preset.style;
+      $("ppt-topic").focus();
+    });
+  });
 
   $("create-presentation").onclick = async () => {
     try {
@@ -351,6 +547,14 @@
       const response = await createTask(`[PRESENTATION_BRIEF]\n${JSON.stringify(brief, null, 2)}\n[/PRESENTATION_BRIEF]`);
       $("ppt-topic").value = "";
       note(`PPT 项目已登记（${response.request_id}），将先进入需求与证据阶段。`);
+    } catch (error) { note(error.message, true); }
+  };
+
+  $("create-weekly").onclick = async () => {
+    try {
+      const response = await createTask(`[PRESENTATION_BRIEF]\n${JSON.stringify(weeklyBrief(), null, 2)}\n[/PRESENTATION_BRIEF]`);
+      $("weekly-focus").value = "";
+      note(`本周销售汇报已登记（${response.request_id}），助手将自动汇总本周记录。`);
     } catch (error) { note(error.message, true); }
   };
 
