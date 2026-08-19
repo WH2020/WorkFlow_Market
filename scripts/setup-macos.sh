@@ -46,7 +46,7 @@ if [ -z "$PI_COMMAND" ]; then
 fi
 python3 plugin/market-director-copilot/scripts/init_local_data.py --project .
 python3 -m agent_platform validate
-"$PI_COMMAND" install -l .
+"$PI_COMMAND" install -l . --approve
 python3 -m agent_platform doctor
 
 if python3 -m agent_platform doctor --require-ppt >/dev/null 2>&1; then

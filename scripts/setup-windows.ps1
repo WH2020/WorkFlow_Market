@@ -66,11 +66,17 @@ if (-not $PiCommand) {
 }
 Invoke-ProjectPython @("plugin/market-director-copilot/scripts/init_local_data.py", "--project", ".")
 Invoke-ProjectPython @("-m", "agent_platform", "validate")
-Invoke-Checked -FilePath $PiPath -Arguments @("install", "-l", ".")
+Invoke-Checked -FilePath $PiPath -Arguments @("install", "-l", ".", "--approve")
 Invoke-ProjectPython @("-m", "agent_platform", "doctor")
 
-& $PythonCommand.Source @PythonPrefix -m agent_platform doctor --require-ppt *> $null
-$PptReady = $LASTEXITCODE -eq 0
+$PreviousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & $PythonCommand.Source @PythonPrefix -m agent_platform doctor --require-ppt *> $null
+    $PptReady = $LASTEXITCODE -eq 0
+} finally {
+    $ErrorActionPreference = $PreviousErrorActionPreference
+}
 if ($PptReady) {
     Write-Host "PPT runtime detected. The start script will inject it only into the Pi process." -ForegroundColor Green
 } elseif ($RequirePpt) {
