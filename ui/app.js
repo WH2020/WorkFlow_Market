@@ -12,6 +12,7 @@
   let schedulePanelInitialized = false;
   const guidedDrafts = {};
   const guidedNotes = {};
+  const taskMessageDrafts = {};
 
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
@@ -478,6 +479,122 @@
     article.insertBefore(wrapper, article.querySelector(".task-actions"));
   }
 
+  function progressTime(value) {
+    const date = new Date(value || "");
+    return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+
+  function renderTaskProgress(article, task, historical) {
+    const section = document.createElement("section");
+    section.className = "task-progress-panel";
+    const header = document.createElement("div");
+    header.className = "task-progress-header";
+    const heading = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = "AI 处理过程";
+    const description = document.createElement("small");
+    description.textContent = "显示阶段动作、判断依据和下一步，不展示隐藏的逐字思维链。";
+    heading.append(title, description);
+    const queue = document.createElement("span");
+    queue.className = "message-queue-badge";
+    queue.textContent = task.queued_message_count ? `${task.queued_message_count} 条消息排队中` : "消息队列空闲";
+    header.append(heading, queue);
+    section.append(header);
+
+    const timeline = document.createElement("div");
+    timeline.className = "task-progress-timeline";
+    const events = Array.isArray(task.progress) ? task.progress.slice(-12) : [];
+    if (!events.length) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      empty.textContent = "任务接手后，阶段进度会显示在这里。";
+      timeline.append(empty);
+    }
+    events.forEach((event) => {
+      const item = document.createElement("article");
+      item.className = `progress-event ${event.kind || "system"} ${event.status || "done"}`;
+      const marker = document.createElement("i");
+      const copy = document.createElement("div");
+      const eventHeader = document.createElement("div");
+      eventHeader.className = "progress-event-header";
+      const eventTitle = document.createElement("strong");
+      eventTitle.textContent = event.title || "处理进度";
+      const at = document.createElement("time");
+      at.textContent = progressTime(event.at);
+      eventHeader.append(eventTitle, at);
+      const summary = document.createElement("p");
+      summary.textContent = event.summary || "";
+      copy.append(eventHeader, summary);
+      if (event.basis) {
+        const basis = document.createElement("small");
+        basis.className = "progress-basis";
+        basis.textContent = `依据：${event.basis}`;
+        copy.append(basis);
+      }
+      if (event.next_step) {
+        const next = document.createElement("small");
+        next.className = "progress-next";
+        next.textContent = `下一步：${event.next_step}`;
+        copy.append(next);
+      }
+      if (event.status === "queued") {
+        const queued = document.createElement("small");
+        queued.className = "progress-queued";
+        queued.textContent = "已排队，等待当前工具调用结束";
+        copy.append(queued);
+      }
+      item.append(marker, copy);
+      timeline.append(item);
+    });
+    section.append(timeline);
+
+    const effectiveStatus = displayStatus(task);
+    if (!historical && !["interrupted", "resuming", "cancelling", "restarting"].includes(effectiveStatus)) {
+      const composer = document.createElement("div");
+      composer.className = "task-message-composer";
+      const textarea = document.createElement("textarea");
+      textarea.maxLength = 1200;
+      textarea.placeholder = "继续补充客户信息，或告诉助手需要调整的方向…";
+      textarea.value = taskMessageDrafts[task.task_id] || "";
+      textarea.addEventListener("input", () => { taskMessageDrafts[task.task_id] = textarea.value; });
+      const actions = document.createElement("div");
+      actions.className = "task-message-actions";
+      const submit = async (mode, button) => {
+        const content = textarea.value.trim();
+        if (!content) { note("请先输入要补充或调整的内容。", true); textarea.focus(); return; }
+        button.disabled = true;
+        try {
+          const response = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/messages`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode, content }),
+          });
+          taskMessageDrafts[task.task_id] = "";
+          note(response.message);
+          await load();
+        } catch (error) { note(error.message, true); }
+        finally { button.disabled = false; }
+      };
+      const supplement = document.createElement("button");
+      supplement.className = "secondary";
+      supplement.textContent = "排队补充";
+      supplement.title = "保留当前方向，把信息加入下一处理步骤";
+      supplement.onclick = () => submit("supplement", supplement);
+      const redirect = document.createElement("button");
+      redirect.className = "primary";
+      redirect.textContent = "调整当前方向";
+      redirect.title = "当前工具调用结束后，优先重新评估后续步骤";
+      redirect.onclick = () => submit("redirect", redirect);
+      actions.append(supplement, redirect);
+      composer.append(textarea, actions);
+      if (task.status === "waiting_approval") {
+        const warning = document.createElement("small");
+        warning.textContent = "当前正等待审批：消息可以补充上下文，但不会替代批准、驳回或 PPT 大纲修订。";
+        composer.append(warning);
+      }
+      section.append(composer);
+    }
+    article.insertBefore(section, article.querySelector(".task-actions"));
+  }
+
   function renderTasks() {
     const activeTasks = model.tasks.filter((task) => !isHistoricalTask(task));
     const historyTasks = model.tasks.filter(isHistoricalTask);
@@ -502,6 +619,7 @@
       template.querySelector(".task-request").textContent = task.request || "";
       const actions = template.querySelector(".task-actions");
       const article = template.querySelector("article");
+      renderTaskProgress(article, task, historical);
       const presentationRendered = renderPresentationReview(article, task);
       renderRawWriteIntent(article, task, presentationRendered);
       if (task.status === "waiting_approval") addAction(actions, task, "approve", task.pending_write ? "批准并生成" : "确认并继续");
@@ -1089,5 +1207,5 @@
   };
 
   load().catch((error) => note(`无法读取工作台：${error.message}`, true));
-  setInterval(() => load().catch(() => {}), 5000);
+  setInterval(() => load().catch(() => {}), 3000);
 })();

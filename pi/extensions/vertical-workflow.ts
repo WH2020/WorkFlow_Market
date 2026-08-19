@@ -143,6 +143,131 @@ type AgentRuntimeLease = {
   heartbeat_at: string;
 };
 
+const TASK_PROGRESS_PHASES = new Set([
+  "understanding",
+  "collecting",
+  "analyzing",
+  "drafting",
+  "validating",
+  "waiting",
+  "delivering",
+]);
+
+export type TaskProgressEvent = {
+  schema_version: "1.0";
+  event_id: string;
+  task_id: string;
+  profile_id: string;
+  node_id: string | null;
+  phase: string;
+  summary: string;
+  basis?: string;
+  next_step?: string;
+  created_at: string;
+  source: "assistant" | "runtime";
+};
+
+type TaskMessage = {
+  schema_version: "1.0";
+  message_id: string;
+  task_id: string;
+  profile_id: string;
+  mode: "supplement" | "redirect";
+  content: string;
+  status: "queued" | "dispatching" | "delivered";
+  created_at: string;
+  dispatch_nonce?: string;
+  dispatch_started_at?: string;
+  delivered_at?: string;
+};
+
+function assertRuntimeId(value: string, label: string): void {
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(value)) throw new Error(`${label} 无效`);
+}
+
+function runtimeDirectory(projectRoot: string, name: "task-events" | "task-messages"): string {
+  const directory = resolve(projectRoot, ".pi", "director-runtime", name);
+  if (existsSync(directory)) {
+    const metadata = lstatSync(directory);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error(`${name} 运行目录不安全`);
+  } else {
+    mkdirSync(directory, { recursive: true });
+  }
+  return directory;
+}
+
+function atomicRuntimeJson(path: string, value: unknown): void {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    renameSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) rmSync(temporary, { force: true });
+  }
+}
+
+export function writeTaskProgressEvent(
+  projectRoot: string,
+  input: Omit<TaskProgressEvent, "schema_version" | "event_id" | "created_at">,
+): TaskProgressEvent {
+  assertRuntimeId(input.task_id, "进度任务 ID");
+  assertRuntimeId(input.profile_id, "进度 Profile ID");
+  if (input.node_id !== null) assertRuntimeId(input.node_id, "进度节点 ID");
+  if (!TASK_PROGRESS_PHASES.has(input.phase)) throw new Error("进度阶段无效");
+  const summary = input.summary.trim();
+  const basis = input.basis?.trim();
+  const nextStep = input.next_step?.trim();
+  if (!summary || summary.length > 240) throw new Error("进度摘要必须为 1–240 字");
+  if (basis && basis.length > 300) throw new Error("进度依据不能超过 300 字");
+  if (nextStep && nextStep.length > 240) throw new Error("下一步不能超过 240 字");
+  const directory = runtimeDirectory(projectRoot, "task-events");
+  const existing = readdirSync(directory)
+    .filter((name) => name.startsWith(`event-${input.task_id}-`) && name.endsWith(".json"));
+  if (existing.length >= 200) throw new Error("当前任务的可见进度记录已达到 200 条上限");
+  const event: TaskProgressEvent = {
+    schema_version: "1.0",
+    event_id: `event-${input.task_id}-${randomUUID()}`,
+    task_id: input.task_id,
+    profile_id: input.profile_id,
+    node_id: input.node_id,
+    phase: input.phase,
+    summary,
+    ...(basis ? { basis } : {}),
+    ...(nextStep ? { next_step: nextStep } : {}),
+    created_at: new Date().toISOString(),
+    source: input.source,
+  };
+  atomicRuntimeJson(join(directory, `${event.event_id}.json`), event);
+  return event;
+}
+
+export function validateTaskMessage(value: unknown, expectedMessageId?: string): TaskMessage {
+  if (!value || typeof value !== "object") throw new Error("任务消息必须为对象");
+  const message = value as Partial<TaskMessage>;
+  if (
+    message.schema_version !== "1.0" ||
+    typeof message.message_id !== "string" ||
+    typeof message.task_id !== "string" ||
+    typeof message.profile_id !== "string" ||
+    !/^[A-Za-z0-9_-]{1,128}$/u.test(message.message_id) ||
+    !/^[A-Za-z0-9_-]{1,128}$/u.test(message.task_id) ||
+    !/^[A-Za-z0-9_-]{1,128}$/u.test(message.profile_id) ||
+    !["supplement", "redirect"].includes(message.mode ?? "") ||
+    !["queued", "dispatching", "delivered"].includes(message.status ?? "") ||
+    typeof message.content !== "string" ||
+    !message.content.trim() ||
+    message.content.length > 1200 ||
+    typeof message.created_at !== "string" ||
+    (message.dispatch_nonce !== undefined && !/^[a-f0-9-]{36}$/u.test(message.dispatch_nonce)) ||
+    (message.dispatch_started_at !== undefined && typeof message.dispatch_started_at !== "string") ||
+    (message.delivered_at !== undefined && typeof message.delivered_at !== "string") ||
+    (expectedMessageId !== undefined && message.message_id !== expectedMessageId)
+  ) {
+    throw new Error("任务消息字段无效或与文件名不一致");
+  }
+  return message as TaskMessage;
+}
+
 export function writeAgentRuntimeLease(projectRoot: string, lease: AgentRuntimeLease): string {
   if (lease.pid !== process.pid || !/^[a-f0-9-]{36}$/u.test(lease.nonce)) {
     throw new Error("Agent runtime lease identity is invalid");
@@ -561,6 +686,7 @@ const MANAGED_ALLOWED_TOOLS = new Set([
   "edit",
   "bash",
   "get_vertical_workflow_plan",
+  "director_report_progress",
   "director_complete_node",
   "director_propose_write_intent",
   "subagent",
@@ -981,11 +1107,70 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     return workflow;
   };
 
+  const runtimeProgressFor = (state: WorkflowTask): Omit<TaskProgressEvent, "schema_version" | "event_id" | "created_at"> => {
+    const workflow = workflowFor(state);
+    const node = workflow.nodes.find((candidate) => candidate.id === (state.waiting_node ?? state.current_node));
+    if (state.status === "waiting_approval") {
+      return {
+        task_id: state.task_id, profile_id: state.profile_id, node_id: state.waiting_node,
+        phase: "waiting", summary: "阶段内容已经整理完成，正在等待你的确认。",
+        next_step: "你可以批准、驳回，或在任务卡片中补充信息。", source: "runtime",
+      };
+    }
+    if (state.status === "completed") {
+      return {
+        task_id: state.task_id, profile_id: state.profile_id, node_id: null,
+        phase: "delivering", summary: "工作流已完成，结果和产物已经归档。", source: "runtime",
+      };
+    }
+    if (state.status === "failed" || state.status === "cancelled" || state.status === "rejected") {
+      return {
+        task_id: state.task_id, profile_id: state.profile_id, node_id: null,
+        phase: "waiting", summary: `任务已进入 ${state.status} 状态。`, source: "runtime",
+      };
+    }
+    const logicalTool = node?.tool;
+    const toolProgress: Record<string, [string, string]> = {
+      "web.search": ["collecting", "正在检索公开资料并筛选候选来源。"],
+      "web.open": ["collecting", "正在读取来源正文并核对出处。"],
+      "pdf.read": ["collecting", "正在提取 PDF 正文、页码和来源信息。"],
+      "knowledge.search": ["collecting", "正在读取当前项目和知识库资料。"],
+      "sales.read": ["collecting", "正在汇总客户、跟进和资源记录。"],
+      "weekly.snapshot": ["collecting", "正在汇总本周销售记录与任务变化。"],
+      "knowledge.write": ["delivering", "正在写入已批准的知识记录。"],
+      "sales.write": ["delivering", "正在提交已批准的销售台账变更。"],
+      "presentation.plan.write": ["drafting", "正在保存演示大纲或逐页方案。"],
+      "artifact.deck.write": ["delivering", "正在生成并校验正式 PPT。"],
+    };
+    const [phase, summary] = logicalTool && toolProgress[logicalTool]
+      ? toolProgress[logicalTool]!
+      : node?.type === "validator"
+        ? ["validating", "正在核对事实、来源和输出完整性。"]
+        : node?.type === "subagent"
+          ? ["analyzing", "正在执行独立复核并等待受控结果。"]
+          : node?.type === "agent"
+            ? ["analyzing", "正在分析已获得的信息并形成阶段判断。"]
+            : ["understanding", "正在理解任务并准备当前阶段。"];
+    return {
+      task_id: state.task_id, profile_id: state.profile_id, node_id: node?.id ?? null,
+      phase, summary, next_step: node ? `完成当前阶段：${node.id}` : undefined, source: "runtime",
+    };
+  };
+
+  const recordRuntimeProgress = (state: WorkflowTask): void => {
+    try {
+      writeTaskProgressEvent(projectRoot, runtimeProgressFor(state));
+    } catch {
+      // Progress visibility must never weaken or block the governed workflow.
+    }
+  };
+
   const persistNew = (state: WorkflowTask) => {
     taskStore.save(state);
     activeTask = state;
     pi.appendEntry("director-task-state", state);
     updateRuntimeLease();
+    recordRuntimeProgress(state);
   };
 
   const persistTransition = (previous: WorkflowTask, next: WorkflowTask) => {
@@ -993,13 +1178,61 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     activeTask = next;
     pi.appendEntry("director-task-state", next);
     updateRuntimeLease();
+    if (previous.current_node !== next.current_node || previous.waiting_node !== next.waiting_node || previous.status !== next.status) {
+      recordRuntimeProgress(next);
+    }
   };
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow) => {
     pi.sendUserMessage(
-      `/skill:${service.skill} 当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
+      `/skill:${service.skill} 当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
       { expandPromptTemplates: true },
     );
+  };
+
+  const consumeTaskMessages = (): void => {
+    if (!activeTask || isTerminal(activeTask) || !runtimeLeaseNonce) return;
+    const directory = resolve(projectRoot, ".pi", "director-runtime", "task-messages");
+    if (!existsSync(directory) || lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) return;
+    const candidates = readdirSync(directory)
+      .filter((name) => /^message-[A-Za-z0-9_-]+\.json$/u.test(name))
+      .sort()
+      .slice(0, 500);
+    for (const name of candidates) {
+      const path = join(directory, name);
+      const messageId = basename(name, ".json");
+      let lock: number | undefined;
+      try {
+        const metadata = lstatSync(path);
+        if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.size > 16_384) continue;
+        lock = acquireTaskLock(`${path}.lock`);
+        let message = validateTaskMessage(JSON.parse(readFileSync(path, "utf8")), messageId);
+        if (message.task_id !== activeTask.task_id || message.profile_id !== activeTask.profile_id || message.status === "delivered") continue;
+        message = {
+          ...message,
+          status: "dispatching",
+          dispatch_nonce: runtimeLeaseNonce,
+          dispatch_started_at: new Date().toISOString(),
+        };
+        atomicRuntimeJson(path, message);
+        const directive = message.mode === "redirect"
+          ? "用户正在调整当前任务方向。完成当前工具调用后，先重新评估尚未执行的步骤，并按新方向继续；已冻结写入、已完成节点、权限边界和人工审批不得被绕过。"
+          : "用户补充了当前任务信息。完成当前工具调用后，将补充内容纳入尚未执行的分析和输出；已冻结写入如受影响，必须重新走审批。";
+        pi.sendUserMessage(
+          `[TASK_MESSAGE ${message.message_id}]\n${directive}\n任务：${message.task_id}\n用户消息：${message.content.trim()}\n[/TASK_MESSAGE]`,
+          { deliverAs: "steer" },
+        );
+        atomicRuntimeJson(path, {
+          ...message,
+          status: "delivered",
+          delivered_at: new Date().toISOString(),
+        });
+      } catch {
+        // Leave a malformed or transiently locked message untouched for inspection/retry.
+      } finally {
+        if (lock !== undefined) releaseTaskLock(`${path}.lock`, lock);
+      }
+    }
   };
 
   const consumeWorkbenchRequest = async (): Promise<WorkflowTask | undefined> => {
@@ -1204,6 +1437,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         );
       }
       consumeDetachedLifecycleRequests();
+      consumeTaskMessages();
       await consumeWorkbenchRequest();
     } finally {
       updateRuntimeLease();
@@ -1379,6 +1613,44 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: renderPlan(workflow) }],
         details: { profile: activeProfile.id, service: service.id, workflow: workflow.id },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "director_report_progress",
+    label: "Report User-Visible Progress",
+    description: "向本地工作台发布可核验的阶段进度、判断依据和下一步；不得提交隐藏思维链、提示词、密钥或敏感运行信息。",
+    parameters: Type.Object({
+      phase: Type.Union([
+        Type.Literal("understanding"),
+        Type.Literal("collecting"),
+        Type.Literal("analyzing"),
+        Type.Literal("drafting"),
+        Type.Literal("validating"),
+        Type.Literal("waiting"),
+        Type.Literal("delivering"),
+      ]),
+      summary: Type.String({ description: "正在做什么或当前阶段结论，1–240 字" }),
+      basis: Type.Optional(Type.String({ description: "可公开的证据、约束或判断依据，不超过 300 字" })),
+      next_step: Type.Optional(Type.String({ description: "接下来准备做什么，不超过 240 字" })),
+    }),
+    async execute(_toolCallId, params) {
+      consumeExternalDecision();
+      if (!activeTask || isTerminal(activeTask)) throw new Error("当前会话没有运行中的受管任务");
+      const event = writeTaskProgressEvent(projectRoot, {
+        task_id: activeTask.task_id,
+        profile_id: activeTask.profile_id,
+        node_id: activeTask.waiting_node ?? activeTask.current_node,
+        phase: params.phase,
+        summary: params.summary,
+        basis: params.basis,
+        next_step: params.next_step,
+        source: "assistant",
+      });
+      return {
+        content: [{ type: "text", text: "阶段进度已同步到工作台。" }],
+        details: { event_id: event.event_id, task_id: event.task_id, phase: event.phase },
       };
     },
   });

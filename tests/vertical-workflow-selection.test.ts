@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import verticalWorkflow, {
   removeAgentRuntimeLease,
   selectWorkbenchRequest,
+  validateTaskMessage,
   validateRuntimeWorkflow,
   writeAgentRuntimeLease,
 } from "../pi/extensions/vertical-workflow.ts";
@@ -112,6 +113,7 @@ function harness(root: string) {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const tools = new Map<string, { execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown> }>();
   const messages: string[] = [];
+  const deliveries: Array<{ content: string; deliverAs?: string }> = [];
   const entries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
   const pi = {
     on(name: string, handler: (...args: unknown[]) => unknown) {
@@ -126,8 +128,9 @@ function harness(root: string) {
     appendEntry(customType: string, data: unknown) {
       entries.push({ type: "custom", customType, data });
     },
-    sendUserMessage(content: string) {
+    sendUserMessage(content: string, options?: { deliverAs?: string }) {
       messages.push(content);
+      deliveries.push({ content, deliverAs: options?.deliverAs });
     },
   } as unknown as ExtensionAPI;
   verticalWorkflow(pi);
@@ -141,7 +144,7 @@ function harness(root: string) {
       getSessionFile: () => join(root, "session.jsonl"),
     },
   };
-  return { handlers, commands, tools, messages, entries, context };
+  return { handlers, commands, tools, messages, deliveries, entries, context };
 }
 
 function writeRequest(root: string, profileId: string): void {
@@ -365,6 +368,7 @@ test("managed tasks block unknown tools and restrict ordinary writes to outputs"
       (guard({ toolName: "read", input: { path: ".env" } }, runtime.context) as { block?: boolean }).block,
       true,
     );
+    assert.equal(guard({ toolName: "director_report_progress", input: { phase: "analyzing", summary: "working" } }, runtime.context), undefined);
     await runtime.tools.get("director_complete_node")!.execute("complete-scope", { node_id: "scope" });
     assert.equal(
       (guard({ toolName: "read", input: { path: "README.md" } }, runtime.context) as { block?: boolean }).block,
@@ -567,6 +571,78 @@ test("the runtime poll safely rebinds an interrupted task to the current session
     else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
     if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
     else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task-bound workbench messages are delivered through Pi steering queue", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-task-message-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const workflow: RuntimeWorkflow = {
+    id: "market.sales.pipeline-review",
+    nodes: [
+      { id: "load_accounts", type: "tool", tool: "sales.read", depends_on: [] },
+      { id: "analyze", type: "agent", depends_on: ["load_accounts"] },
+    ],
+  };
+  try {
+    const task = createTask({
+      sessionKey: join(root, "session.jsonl"), profileId: "sales-director",
+      serviceId: "sales-review", workflow, request: "review", taskId: "task-message-a",
+    });
+    const taskDirectory = join(root, ".pi", "director-runtime", "tasks");
+    const messageDirectory = join(root, ".pi", "director-runtime", "task-messages");
+    mkdirSync(taskDirectory, { recursive: true });
+    mkdirSync(messageDirectory, { recursive: true });
+    writeFileSync(join(taskDirectory, `${task.task_id}.json`), JSON.stringify(task), "utf8");
+    const messageId = "message-1234567890abcdef";
+    const message = validateTaskMessage({
+      schema_version: "1.0", message_id: messageId, task_id: task.task_id,
+      profile_id: "sales-director", mode: "redirect", content: "先检查预算风险",
+      status: "queued", created_at: new Date().toISOString(),
+    }, messageId);
+    writeFileSync(join(messageDirectory, `${messageId}.json`), JSON.stringify(message), "utf8");
+    const runtime = harness(root);
+    runtime.entries.push({ type: "custom", customType: "director-task-state", data: task });
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const delivered = JSON.parse(readFileSync(join(messageDirectory, `${messageId}.json`), "utf8")) as { status: string };
+    assert.equal(delivered.status, "delivered");
+    assert.ok(runtime.deliveries.some((entry) => entry.deliverAs === "steer" && entry.content.includes("先检查预算风险")));
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the progress tool writes a bounded user-visible event", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-progress-event-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  try {
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await runtime.commands.get("director-run")!.handler("sales-review 复盘客户 A", runtime.context);
+    await runtime.tools.get("director_report_progress")!.execute("progress-1", {
+      phase: "analyzing", summary: "正在比较客户推进记录与资源缺口。",
+      basis: "最近一次跟进没有明确下一步负责人。", next_step: "形成风险清单。",
+    });
+    const events = readdirSync(join(root, ".pi", "director-runtime", "task-events"))
+      .filter((name) => name.startsWith("event-") && name.endsWith(".json"));
+    assert.ok(events.length >= 2);
+    const values = events.map((name) => JSON.parse(readFileSync(join(root, ".pi", "director-runtime", "task-events", name), "utf8")) as { source: string; basis?: string });
+    assert.ok(values.some((event) => event.source === "assistant" && event.basis === "最近一次跟进没有明确下一步负责人。"));
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
     rmSync(root, { recursive: true, force: true });
   }
 });

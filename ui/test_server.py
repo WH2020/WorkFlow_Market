@@ -13,8 +13,8 @@ from ui import server
 class ControlCentreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile = (
-            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID
+        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_task_events, self.old_task_messages, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile = (
+            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.TASK_EVENTS, server.TASK_MESSAGES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID
         )
         server.RUNTIME = Path(self.temporary.name)
         server.TASKS = server.RUNTIME / "tasks"
@@ -23,6 +23,8 @@ class ControlCentreTests(unittest.TestCase):
         server.PROJECTS = server.RUNTIME / "projects.json"
         server.SCHEDULES = server.RUNTIME / "schedules.json"
         server.AGENT_LEASES = server.RUNTIME / "agent-leases"
+        server.TASK_EVENTS = server.RUNTIME / "task-events"
+        server.TASK_MESSAGES = server.RUNTIME / "task-messages"
         server.DESKTOP_SETTINGS = server.RUNTIME / "desktop-settings.json"
         server.AI_CORE_LOG = server.RUNTIME / "ai-core.log"
         server.ACTIVE_PROFILE_ID = None
@@ -42,8 +44,8 @@ class ControlCentreTests(unittest.TestCase):
         return plan
 
     def tearDown(self):
-        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID = (
-            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile
+        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.TASK_EVENTS, server.TASK_MESSAGES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID = (
+            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_task_events, self.old_task_messages, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile
         )
         self.temporary.cleanup()
 
@@ -110,6 +112,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="task-history"', html)
         self.assertIn('addRestartAction(actions, task, "重新开始")', javascript)
         self.assertIn('addAction(actions, task, "resume", "继续任务")', javascript)
+        self.assertIn("function renderTaskProgress", javascript)
+        self.assertIn('redirect.textContent = "调整当前方向"', javascript)
+        self.assertIn("/messages`,", javascript)
 
     def test_project_space_is_created_and_task_summaries_default_to_general_project(self):
         project = server.create_project_record({"name": "江苏客户项目", "description": "试点机会"})
@@ -174,6 +179,47 @@ class ControlCentreTests(unittest.TestCase):
         self.assertNotIn("secret-token", "\n".join(lines))
         self.assertNotIn("secret-value", "\n".join(lines))
         self.assertIn("[已隐藏]", "\n".join(lines))
+
+    def test_task_messages_are_queued_and_visible_in_progress_timeline(self):
+        task = {
+            "schema_version": "1.0", "task_id": "task-live", "profile_id": "sales-director",
+            "service_id": "sales-review", "workflow_id": "market.sales.pipeline-review",
+            "request": "复盘客户 A", "status": "running", "session_key": "session-a", "version": 2,
+            "current_node": "analyze", "waiting_node": None, "completed_nodes": ["load_accounts"],
+            "artifacts": [], "created_at": server.now(), "updated_at": server.now(),
+            "audit": [{"at": server.now(), "action": "task_started", "actor": "user"}],
+        }
+        server.atomic_json(server.TASKS / "task-live.json", task)
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        handler.create_task_message("task-live", {"mode": "redirect", "content": "先分析预算风险，再给推进建议。"})
+        self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
+        message = next(server.TASK_MESSAGES.glob("message-*.json"))
+        self.assertEqual(server.load_json(message)["status"], "queued")
+
+        event_id = "event-task-live-12345678-1234-4234-8234-123456789abc"
+        server.atomic_json(server.TASK_EVENTS / f"{event_id}.json", {
+            "schema_version": "1.0", "event_id": event_id, "task_id": "task-live",
+            "profile_id": "sales-director", "node_id": "analyze", "phase": "analyzing",
+            "summary": "正在对照预算与决策链。", "basis": "客户记录尚未确认预算负责人。",
+            "next_step": "形成风险和推进建议。", "created_at": server.now(), "source": "assistant",
+        })
+        summary = server.task_summaries()[0]
+        self.assertEqual(summary["queued_message_count"], 1)
+        self.assertTrue(any(item["title"] == "你调整了任务方向" and item["status"] == "queued" for item in summary["progress"]))
+        self.assertTrue(any(item.get("basis") == "客户记录尚未确认预算负责人。" for item in summary["progress"]))
+
+    def test_terminal_task_rejects_new_messages(self):
+        server.atomic_json(server.TASKS / "task-done.json", {
+            "task_id": "task-done", "profile_id": "sales-director", "status": "completed",
+        })
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        handler.create_task_message("task-done", {"mode": "supplement", "content": "再补充一项"})
+        self.assertEqual(replies[-1][0], HTTPStatus.CONFLICT)
+        self.assertFalse(server.TASK_MESSAGES.exists())
 
     def test_workbench_can_request_cancellation_only_for_an_interrupted_task(self):
         task = {

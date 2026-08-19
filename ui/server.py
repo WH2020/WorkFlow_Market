@@ -54,6 +54,8 @@ INPUTS = ROOT / "inputs"
 PROJECTS = RUNTIME / "projects.json"
 SCHEDULES = RUNTIME / "schedules.json"
 AGENT_LEASES = RUNTIME / "agent-leases"
+TASK_EVENTS = RUNTIME / "task-events"
+TASK_MESSAGES = RUNTIME / "task-messages"
 DESKTOP_SETTINGS = RUNTIME / "desktop-settings.json"
 AI_CORE_LOG = RUNTIME / "ai-core.log"
 SERVER_TOKEN = secrets.token_urlsafe(32)
@@ -256,6 +258,146 @@ def task_display_state(task: dict[str, Any], leases: dict[str, dict[str, Any]] |
     ):
         return "running", "active"
     return "interrupted", "interrupted"
+
+
+def task_message_records() -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    if TASK_MESSAGES.is_symlink() or not TASK_MESSAGES.is_dir():
+        return result
+    for path in sorted(TASK_MESSAGES.glob("message-*.json"))[:2000]:
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 16_384:
+                continue
+            message = load_json(path)
+            message_id = message.get("message_id")
+            task_id = message.get("task_id")
+            profile_id = message.get("profile_id")
+            content = message.get("content")
+            if (
+                message.get("schema_version") != "1.0" or message_id != path.stem or
+                not isinstance(message_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", message_id) is None or
+                not isinstance(task_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id) is None or
+                not isinstance(profile_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", profile_id) is None or
+                message.get("mode") not in {"supplement", "redirect"} or
+                message.get("status") not in {"queued", "dispatching", "delivered"} or
+                not isinstance(content, str) or not content.strip() or len(content) > 1200 or
+                not isinstance(message.get("created_at"), str)
+            ):
+                continue
+            result.setdefault(task_id, []).append(message)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    for messages in result.values():
+        messages.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("message_id") or "")))
+    return result
+
+
+def task_progress_records() -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    if TASK_EVENTS.is_symlink() or not TASK_EVENTS.is_dir():
+        return result
+    allowed_phases = {"understanding", "collecting", "analyzing", "drafting", "validating", "waiting", "delivering"}
+    for path in sorted(TASK_EVENTS.glob("event-*.json"))[:4000]:
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 16_384:
+                continue
+            event = load_json(path)
+            event_id = event.get("event_id")
+            task_id = event.get("task_id")
+            profile_id = event.get("profile_id")
+            summary = event.get("summary")
+            if (
+                event.get("schema_version") != "1.0" or event_id != path.stem or
+                not isinstance(event_id, str) or not event_id.startswith("event-") or len(event_id) > 256 or
+                not isinstance(task_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id) is None or
+                not isinstance(profile_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", profile_id) is None or
+                event.get("phase") not in allowed_phases or event.get("source") not in {"assistant", "runtime"} or
+                not isinstance(summary, str) or not summary.strip() or len(summary) > 240 or
+                not isinstance(event.get("created_at"), str)
+            ):
+                continue
+            result.setdefault(task_id, []).append(event)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    for events in result.values():
+        events.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("event_id") or "")))
+    return result
+
+
+def readable_node(node_id: Any) -> str:
+    value = str(node_id or "").strip()
+    exact = {
+        "scope": "明确任务范围", "clarify": "梳理合作目标", "load_accounts": "读取客户记录",
+        "analyze": "分析客户进展", "public_research": "检索公开资料", "search_public_sources": "检索公开资料",
+        "open_sources": "核验来源正文", "open_public_sources": "核验来源正文", "open_policy_sources": "核验政策正文",
+        "internal_evidence": "读取知识库", "search_knowledge": "读取知识库", "synthesize": "形成综合判断",
+        "draft": "撰写方案", "validate": "校验内容", "validate_updates": "校验销售变更",
+        "build_payload": "组织汇报内容", "build_plan": "规划演示结构", "propose_outline": "编排演示大纲",
+        "build_storyboard": "制作逐页故事板", "select_design_system": "选择视觉体系",
+        "validate_and_freeze": "校验并冻结正式内容", "render_deck": "生成正式 PPT",
+    }
+    return exact.get(value, value.replace("_", " ") or "准备下一步")
+
+
+def task_progress_timeline(
+    task: dict[str, Any], events: list[dict[str, Any]], messages: list[dict[str, Any]], display_status: str
+) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    audit_titles = {
+        "task_started": "任务已接收", "node_completed": "阶段分析完成", "tool_completed": "资料处理完成",
+        "write_intent_prepared": "待写入内容已冻结", "write_commit_started": "开始提交已批准内容",
+        "write_commit_rolled_back": "写入已安全回滚", "write_commit_ambiguous": "写入状态需要人工检查",
+        "approval_granted": "你已批准继续", "approval_rejected": "你已驳回当前方案",
+        "task_resumed": "任务已恢复", "task_cancelled": "任务已结束", "task_completed": "任务已完成",
+        "write_reapproval_required": "写入需要重新确认",
+    }
+    for index, audit in enumerate(task.get("audit") if isinstance(task.get("audit"), list) else []):
+        if not isinstance(audit, dict) or audit.get("action") not in audit_titles or not isinstance(audit.get("at"), str):
+            continue
+        node = readable_node(audit.get("node_id"))
+        note = audit.get("note") if audit.get("action") == "node_completed" else None
+        summary = str(note).strip()[:500] if isinstance(note, str) and note.strip() else (f"已完成：{node}" if audit.get("node_id") else audit_titles[audit["action"]])
+        timeline.append({
+            "event_id": f"audit-{index}", "at": audit["at"], "kind": "assistant" if audit.get("actor") == "model" else "system",
+            "title": audit_titles[audit["action"]], "summary": summary, "status": "done",
+        })
+    phase_titles = {
+        "understanding": "正在理解任务", "collecting": "正在收集资料", "analyzing": "正在分析",
+        "drafting": "正在形成内容", "validating": "正在复核", "waiting": "等待确认", "delivering": "正在生成结果",
+    }
+    for event in events:
+        if event.get("profile_id") != task.get("profile_id"):
+            continue
+        timeline.append({
+            "event_id": event["event_id"], "at": event["created_at"], "kind": "assistant",
+            "title": phase_titles.get(str(event.get("phase")), "AI 处理进度"), "summary": event["summary"],
+            "basis": str(event.get("basis") or "")[:300], "next_step": str(event.get("next_step") or "")[:240],
+            "status": "done",
+        })
+    for message in messages:
+        if message.get("profile_id") != task.get("profile_id"):
+            continue
+        message_status = str(message.get("status"))
+        timeline.append({
+            "event_id": message["message_id"], "at": message["created_at"], "kind": "user",
+            "title": "你调整了任务方向" if message.get("mode") == "redirect" else "你补充了信息",
+            "summary": str(message.get("content") or "")[:1200],
+            "status": "queued" if message_status in {"queued", "dispatching"} else "done",
+        })
+    if display_status not in {"completed", "cancelled", "rejected", "failed", "superseded"}:
+        node = readable_node(task.get("waiting_node") or task.get("current_node"))
+        if display_status == "waiting_approval":
+            title, summary = "等待你的确认", "内容已到人工确认关口；新消息不会替代批准或驳回。"
+        elif display_status == "interrupted":
+            title, summary = "任务已中断", "AI 核心没有继续执行，可选择继续任务或重新开始。"
+        else:
+            title, summary = "当前处理阶段", node
+        timeline.append({
+            "event_id": f"current-{task.get('version')}", "at": str(task.get("updated_at") or now()),
+            "kind": "assistant", "title": title, "summary": summary, "status": "current",
+        })
+    timeline.sort(key=lambda item: (str(item.get("at") or ""), str(item.get("event_id") or "")))
+    return timeline[-80:]
 
 
 def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
@@ -756,6 +898,8 @@ def task_summaries() -> list[dict[str, Any]]:
     if not TASKS.exists():
         return result
     leases = live_agent_task_leases()
+    messages_by_task = task_message_records()
+    events_by_task = task_progress_records()
     candidates = list(TASKS.glob("*.json"))[:500]
     for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True):
         try:
@@ -768,6 +912,14 @@ def task_summaries() -> list[dict[str, Any]]:
             if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
                 continue
             summary["display_status"], summary["runtime_state"] = task_display_state(task, leases)
+            task_id = str(task.get("task_id") or "")
+            task_messages = messages_by_task.get(task_id, [])
+            summary["progress"] = task_progress_timeline(
+                task, events_by_task.get(task_id, []), task_messages, summary["display_status"]
+            )
+            summary["queued_message_count"] = sum(
+                message.get("status") in {"queued", "dispatching"} for message in task_messages
+            )
             summary["project_id"] = summary.get("project_id") or DEFAULT_PROJECT_ID
             if isinstance(task.get("task_id"), str):
                 summary["presentation_plan"] = presentation_plan(task["task_id"])
@@ -1150,6 +1302,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.decide(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/restart"):
                 self.restart_task(route.split("/")[3], payload)
+            elif route.startswith("/api/tasks/") and route.endswith("/messages"):
+                self.create_task_message(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/presentation-revision"):
                 self.create_presentation_revision(route.split("/")[3], payload)
             else:
@@ -1224,6 +1378,49 @@ class ControlHandler(SimpleHTTPRequestHandler):
                   "created_at": now(), "source": "local-workbench", "project_id": project_id}
         atomic_json(REQUESTS / f"{request_id}.json", record)
         self.send_json(HTTPStatus.CREATED, record)
+
+    def create_task_message(self, task_id: str, payload: dict[str, Any]) -> None:
+        task_id = safe_id(task_id)
+        mode = str(payload.get("mode", ""))
+        content = str(payload.get("content", "")).strip()
+        if mode not in {"supplement", "redirect"}:
+            raise ValueError("请选择补充信息或调整方向")
+        if not content or len(content) > 1200:
+            raise ValueError("任务消息必须为 1–1200 字")
+        task_path = TASKS / f"{task_id}.json"
+        if task_path.is_symlink() or not task_path.is_file():
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在"})
+            return
+        task = load_json(task_path)
+        if task.get("task_id") != task_id:
+            self.send_json(HTTPStatus.CONFLICT, {"error": "任务记录与文件名不一致"})
+            return
+        if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
+            self.send_json(HTTPStatus.FORBIDDEN, {"error": "该任务不属于当前销售总监版本"})
+            return
+        if task.get("status") in {"completed", "rejected", "cancelled", "failed"}:
+            self.send_json(HTTPStatus.CONFLICT, {"error": "任务已经结束；请使用“再次创建”发起新任务"})
+            return
+        existing = task_message_records().get(task_id, [])
+        if len(existing) >= 100:
+            self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务消息已达到 100 条上限，请完成后新建任务"})
+            return
+        if TASK_MESSAGES.exists() and (TASK_MESSAGES.is_symlink() or not TASK_MESSAGES.is_dir()):
+            raise ValueError("任务消息目录不安全")
+        message_id = f"message-{uuid.uuid4().hex}"
+        record = {
+            "schema_version": "1.0", "message_id": message_id, "task_id": task_id,
+            "profile_id": safe_id(str(task.get("profile_id", ""))), "mode": mode,
+            "content": content, "status": "queued", "created_at": now(),
+        }
+        target = TASK_MESSAGES / f"{message_id}.json"
+        if target.exists() or target.is_symlink():
+            raise RuntimeError("任务消息 ID 冲突，请重试")
+        atomic_json(target, record)
+        self.send_json(HTTPStatus.ACCEPTED, {
+            **record,
+            "message": "方向调整已排队，将在当前工具调用结束后优先生效。" if mode == "redirect" else "补充信息已排队，将在下一处理步骤前加入任务。",
+        })
 
     def decide(self, task_id: str, payload: dict[str, Any]) -> None:
         task_id = safe_id(task_id)
