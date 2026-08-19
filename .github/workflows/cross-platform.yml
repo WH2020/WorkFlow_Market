@@ -34,7 +34,15 @@ jobs:
       - name: Exercise Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/setup-windows.ps1 -SkipDependencies -SkipPiInstall
+        run: |
+          try {
+            ./scripts/setup-windows.ps1 -SkipDependencies -SkipPiInstall
+            if ($LASTEXITCODE -ne 0) { throw "setup-windows.ps1 exited with code $LASTEXITCODE" }
+          } catch {
+            $message = $_.Exception.Message -replace "`r?`n", " "
+            Write-Output "::error title=Windows setup failed::$message"
+            throw
+          }
       - name: Exercise macOS installer
         if: runner.os == 'macOS'
         shell: bash

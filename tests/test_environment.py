@@ -22,6 +22,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("BurntSushi.ripgrep.MSVC", windows)
         self.assertIn("sharkdp.fd", windows)
         self.assertIn("$env:Path, $UserPath, $MachinePath", windows)
+        self.assertIn("Microsoft\\WinGet\\Packages", windows)
 
     def _project_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, Path]:
         temporary = tempfile.TemporaryDirectory()

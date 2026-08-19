@@ -117,6 +117,20 @@ function Install-IndependentCli {
     }
     Update-ProcessPathFromSystem
     $Candidate = Get-Command $CommandName -ErrorAction SilentlyContinue
+    if (-not $Candidate) {
+        $WingetPackages = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+        if (Test-Path -LiteralPath $WingetPackages -PathType Container) {
+            $InstalledExecutable = Get-ChildItem -LiteralPath $WingetPackages -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "$WingetId`_*" } |
+                Sort-Object LastWriteTime -Descending |
+                ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Filter "$CommandName.exe" -File -Recurse -ErrorAction SilentlyContinue } |
+                Select-Object -First 1
+            if ($InstalledExecutable) {
+                $env:Path = $InstalledExecutable.DirectoryName + [IO.Path]::PathSeparator + $env:Path
+                $Candidate = Get-Command $CommandName -ErrorAction SilentlyContinue
+            }
+        }
+    }
     if (-not $Candidate -or $Candidate.Source -match $CodexPrivatePathPattern) {
         throw "$CommandName installation completed, but an independent executable is unavailable. Restart PowerShell and retry."
     }
