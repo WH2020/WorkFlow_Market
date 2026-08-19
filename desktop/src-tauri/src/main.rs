@@ -71,6 +71,39 @@ fn launcher_log(root: &Path) -> Result<File, String> {
         .map_err(|error| error.to_string())
 }
 
+fn ai_core_log(root: &Path) -> Result<File, String> {
+    let path = root.join(".pi/director-runtime/ai-core.log");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| error.to_string())
+}
+
+fn show_ai_core_window(root: &Path) -> bool {
+    let path = root.join(".pi/director-runtime/desktop-settings.json");
+    let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+        return false;
+    }
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let compact: String = contents
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact
+        .split_once("\"show_ai_core_window\":")
+        .is_some_and(|(_, value)| value.starts_with("true"))
+}
+
 fn log_launcher_event(root: &Path, event: &str) {
     if let Ok(mut output) = launcher_log(root) {
         let _ = writeln!(output, "[desktop pid={}] {event}", std::process::id());
@@ -222,10 +255,35 @@ fn pi_version_ok(root: &Path) -> bool {
 }
 
 #[cfg(windows)]
-fn start_agent(root: &Path) -> Result<Child, String> {
-    // The Tauri process uses the Windows GUI subsystem and has no console handles.
-    // Let cmd's START builtin allocate PowerShell's console, while /WAIT keeps a
-    // parent process that the desktop app can terminate together with its tree.
+fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
+    if !show_window {
+        let output = ai_core_log(root)?;
+        let error = output.try_clone().map_err(|value| value.to_string())?;
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &root.join("scripts/start-windows.ps1").to_string_lossy(),
+                "--mode",
+                "rpc",
+                "--approve",
+            ])
+            .current_dir(root)
+            .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID)
+            .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(error))
+            .creation_flags(CREATE_NO_WINDOW);
+        return command
+            .spawn()
+            .map_err(|value| format!("嵌入式 Pi 销售总监运行时启动失败：{value}"));
+    }
+    // Optional diagnostics mode keeps the original standalone console available.
     Command::new("cmd.exe")
         .args([
             "/D",
@@ -254,7 +312,22 @@ fn start_agent(root: &Path) -> Result<Child, String> {
 }
 
 #[cfg(not(windows))]
-fn start_agent(root: &Path) -> Result<Child, String> {
+fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
+    if !show_window {
+        let output = ai_core_log(root)?;
+        let error = output.try_clone().map_err(|value| value.to_string())?;
+        return Command::new("bash")
+            .arg(root.join("scripts/start-macos.sh"))
+            .args(["--mode", "rpc", "--approve"])
+            .current_dir(root)
+            .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID)
+            .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(error))
+            .spawn()
+            .map_err(|value| format!("嵌入式 Pi 销售总监运行时启动失败：{value}"));
+    }
     let script = format!(
         "cd '{}' && WORKFLOW_AGENT_PROFILE={} WORKFLOW_AGENT_EDITION_PROFILE={} ./scripts/start-macos.sh --approve",
         root.display(), PROFILE_ID, PROFILE_ID
@@ -356,8 +429,16 @@ fn main() {
                 }
             };
             log_launcher_event(&root, "main window ready");
-            log_launcher_event(&root, "starting AI core");
-            let mut agent = match start_agent(&root) {
+            let show_core_window = show_ai_core_window(&root);
+            log_launcher_event(
+                &root,
+                if show_core_window {
+                    "starting AI core in visible diagnostics mode"
+                } else {
+                    "starting embedded AI core"
+                },
+            );
+            let mut agent = match start_agent(&root, show_core_window) {
                 Ok(child) => child,
                 Err(error) => {
                     let _ = window.close();

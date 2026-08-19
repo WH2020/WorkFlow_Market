@@ -1,6 +1,6 @@
 [package]
 name = "agent4market-desktop"
-version = "0.8.1"
+version = "0.8.2"
 description = "Single-role Sales Director AI Assistant desktop shell"
 authors = ["WorkFlow_Market contributors"]
 edition = "2021"

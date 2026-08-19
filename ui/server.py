@@ -54,6 +54,8 @@ INPUTS = ROOT / "inputs"
 PROJECTS = RUNTIME / "projects.json"
 SCHEDULES = RUNTIME / "schedules.json"
 AGENT_LEASES = RUNTIME / "agent-leases"
+DESKTOP_SETTINGS = RUNTIME / "desktop-settings.json"
+AI_CORE_LOG = RUNTIME / "ai-core.log"
 SERVER_TOKEN = secrets.token_urlsafe(32)
 ACTIVE_PROFILE_ID: str | None = None
 
@@ -121,12 +123,12 @@ def safe_id(value: str) -> str:
     return value
 
 
-def live_agent_task_leases(reference: datetime | None = None) -> dict[str, dict[str, Any]]:
-    """Return fresh task-bound Pi leases without trusting stale process state."""
+def fresh_agent_leases(reference: datetime | None = None) -> list[dict[str, Any]]:
+    """Return fresh Pi leases, including an idle embedded core."""
     if AGENT_LEASES.is_symlink() or not AGENT_LEASES.is_dir():
-        return {}
+        return []
     current = (reference or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    result: dict[str, dict[str, Any]] = {}
+    result: list[dict[str, Any]] = []
     for path in sorted(AGENT_LEASES.glob("*.json"))[:64]:
         try:
             if path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
@@ -142,7 +144,7 @@ def live_agent_task_leases(reference: datetime | None = None) -> dict[str, dict[
                 lease.get("schema_version") != "1.0" or not isinstance(pid, int) or pid <= 0 or
                 path.name != f"{pid}.json" or not isinstance(nonce, str) or
                 re.fullmatch(r"[a-f0-9-]{36}", nonce) is None or
-                not isinstance(task_id, str) or safe_id(task_id) != task_id or
+                (task_id is not None and (not isinstance(task_id, str) or safe_id(task_id) != task_id)) or
                 not isinstance(profile_id, str) or safe_id(profile_id) != profile_id or
                 not isinstance(session_key, str) or not session_key or len(session_key) > 4096 or
                 not isinstance(heartbeat_at, str)
@@ -154,10 +156,80 @@ def live_agent_task_leases(reference: datetime | None = None) -> dict[str, dict[
             age = (current - heartbeat.astimezone(timezone.utc)).total_seconds()
             if age < -5 or age > AGENT_LEASE_FRESH_SECONDS:
                 continue
-            result[task_id] = lease
+            result.append(lease)
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             continue
     return result
+
+
+def live_agent_task_leases(reference: datetime | None = None) -> dict[str, dict[str, Any]]:
+    """Return fresh task-bound Pi leases without trusting stale process state."""
+    return {
+        lease["task_id"]: lease
+        for lease in fresh_agent_leases(reference)
+        if isinstance(lease.get("task_id"), str)
+    }
+
+
+def desktop_settings() -> dict[str, Any]:
+    value = {"schema_version": "1.0", "show_ai_core_window": False}
+    try:
+        if DESKTOP_SETTINGS.is_symlink() or not DESKTOP_SETTINGS.is_file() or DESKTOP_SETTINGS.stat().st_size > 4096:
+            return value
+        stored = load_json(DESKTOP_SETTINGS)
+        if stored.get("schema_version") == "1.0" and isinstance(stored.get("show_ai_core_window"), bool):
+            value["show_ai_core_window"] = stored["show_ai_core_window"]
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    return value
+
+
+def save_desktop_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    show_window = payload.get("show_ai_core_window")
+    if not isinstance(show_window, bool):
+        raise ValueError("AI 核心窗口设置必须为开启或关闭")
+    value = {"schema_version": "1.0", "show_ai_core_window": show_window}
+    atomic_json(DESKTOP_SETTINGS, value)
+    return {**value, "restart_required": True}
+
+
+def ai_core_log_tail() -> list[str]:
+    if AI_CORE_LOG.is_symlink() or not AI_CORE_LOG.is_file():
+        return []
+    try:
+        with AI_CORE_LOG.open("rb") as handle:
+            size = AI_CORE_LOG.stat().st_size
+            handle.seek(max(0, size - 64 * 1024))
+            text = handle.read(64 * 1024).decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = text.splitlines()[-60:]
+    redacted = []
+    for line in lines:
+        clean = re.sub(r"(?i)(authorization\s*:\s*bearer\s+)[^\s\",}]+", r"\1[已隐藏]", line)
+        clean = re.sub(r"(?i)(api[_ -]?key)([\"':= ]+)[^\s\",}]+", r"\1\2[已隐藏]", clean)
+        redacted.append(clean[:1000])
+    return redacted
+
+
+def desktop_runtime_summary() -> dict[str, Any]:
+    leases = fresh_agent_leases()
+    current = max(leases, key=lambda lease: str(lease.get("heartbeat_at") or ""), default=None)
+    if current is None:
+        status, label = "offline", "AI 核心未连接"
+    elif current.get("task_id"):
+        status, label = "working", "AI 核心正在处理任务"
+    else:
+        status, label = "idle", "AI 核心已就绪"
+    settings = desktop_settings()
+    return {
+        "status": status, "label": label,
+        "heartbeat_at": current.get("heartbeat_at") if current else None,
+        "task_id": current.get("task_id") if current else None,
+        "show_ai_core_window": settings["show_ai_core_window"],
+        "window_mode": "visible" if settings["show_ai_core_window"] else "embedded",
+        "log_tail": ai_core_log_tail(),
+    }
 
 
 def task_display_state(task: dict[str, Any], leases: dict[str, dict[str, Any]] | None = None) -> tuple[str, str]:
@@ -1010,7 +1082,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
                                            "data": data_summary(), "outputs": output_summary(),
                                            "projects": project_summaries(tasks), "project_files": project_files(),
                                            "schedules": schedule_records(),
-                                           "model": model_settings_summary(ROOT), "request_token": SERVER_TOKEN})
+                                           "model": model_settings_summary(ROOT),
+                                           "desktop_runtime": desktop_runtime_summary(),
+                                           "request_token": SERVER_TOKEN})
+            return
+        if route == "/api/desktop-settings":
+            self.send_json(HTTPStatus.OK, desktop_runtime_summary())
             return
         if route == "/api/model-settings":
             self.send_json(HTTPStatus.OK, model_settings_summary(ROOT))
@@ -1064,6 +1141,11 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.configure_model(payload)
             elif route == "/api/model-settings/reset":
                 self.reset_model()
+            elif route == "/api/desktop-settings":
+                self.send_json(HTTPStatus.OK, {
+                    **save_desktop_settings(payload),
+                    "message": "运行方式已保存，关闭并重新打开 Agent4Market 后生效。",
+                })
             elif route.startswith("/api/tasks/") and route.endswith("/decision"):
                 self.decide(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/restart"):

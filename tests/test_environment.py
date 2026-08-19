@@ -29,12 +29,21 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('const PROFILE_ID: &str = "sales-director"', desktop_source)
         self.assertNotIn("OpenBrowser", desktop_source)
 
-    def test_windows_desktop_allocates_a_console_and_keeps_the_ai_core_visible(self) -> None:
+    def test_desktop_embeds_the_ai_core_by_default_with_optional_visible_diagnostics(self) -> None:
         root = Path(__file__).resolve().parents[1]
         desktop_source = (root / "desktop" / "src-tauri" / "src" / "main.rs").read_text(
             encoding="utf-8"
         )
         launcher = (root / "scripts" / "start-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("fn show_ai_core_window", desktop_source)
+        self.assertIn('desktop-settings.json', desktop_source)
+        self.assertIn('split_once("\\\"show_ai_core_window\\\":")', desktop_source)
+        self.assertIn('fn start_agent(root: &Path, show_window: bool)', desktop_source)
+        self.assertIn('"--mode",', desktop_source)
+        self.assertIn('"rpc",', desktop_source)
+        self.assertIn(".stdin(Stdio::piped())", desktop_source)
+        self.assertIn("ai_core_log(root)", desktop_source)
+        self.assertIn("starting embedded AI core", desktop_source)
         self.assertIn('Command::new("cmd.exe")', desktop_source)
         self.assertIn('"start"', desktop_source)
         self.assertIn('"/WAIT"', desktop_source)

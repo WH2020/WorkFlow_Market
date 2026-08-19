@@ -5,6 +5,7 @@
   let selectedService = null;
   let guidedRenderedService = null;
   let modelSettingsInitialized = false;
+  let runtimeSettingsInitialized = false;
   let currentView = "home";
   let selectedProject = "project-default";
   let noticeTimer = null;
@@ -221,6 +222,23 @@
     $("model-api-key").value = "";
     $("model-api-key").placeholder = settings.has_api_key ? "已保存；留空则继续使用" : "请输入网关 API Key";
     populateModelOptions(settings.models || [], settings.selected_model || "");
+  }
+
+  function renderRuntimeSettings(force = false) {
+    const runtime = model?.desktop_runtime || { status: "offline", label: "AI 核心未连接", show_ai_core_window: false, log_tail: [] };
+    const top = $("runtime-status");
+    top.classList.toggle("offline", runtime.status === "offline");
+    top.classList.toggle("working", runtime.status === "working");
+    top.querySelector("b").textContent = runtime.label || "AI 核心未连接";
+    $("runtime-settings-status").textContent = runtime.heartbeat_at
+      ? `${runtime.label} · 最近心跳 ${new Date(runtime.heartbeat_at).toLocaleTimeString("zh-CN", { hour12: false })}`
+      : runtime.label;
+    $("runtime-mode-badge").textContent = runtime.show_ai_core_window ? "独立调试窗口" : "嵌入运行";
+    const lines = Array.isArray(runtime.log_tail) ? runtime.log_tail : [];
+    $("ai-core-log").textContent = lines.length ? lines.join("\n") : "暂无运行记录。";
+    if (runtimeSettingsInitialized && !force) return;
+    runtimeSettingsInitialized = true;
+    $("show-ai-core-window").checked = Boolean(runtime.show_ai_core_window);
   }
 
   function guidedControl(field, draft) {
@@ -736,7 +754,7 @@
   }
 
   function render() {
-    renderModelSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
+    renderModelSettings(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); switchView(currentView);
   }
 
@@ -1036,6 +1054,21 @@
     } catch (error) {
       $("model-discovery-status").textContent = error.message;
     } finally { button.disabled = false; }
+  };
+
+  $("save-runtime-settings").onclick = async () => {
+    const button = $("save-runtime-settings");
+    button.disabled = true;
+    try {
+      const response = await api("/api/desktop-settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ show_ai_core_window: $("show-ai-core-window").checked }),
+      });
+      model.desktop_runtime = { ...(model.desktop_runtime || {}), ...response };
+      renderRuntimeSettings(true);
+      note(response.message);
+    } catch (error) { note(error.message, true); }
+    finally { button.disabled = false; }
   };
 
   $("create-presentation").onclick = async () => {

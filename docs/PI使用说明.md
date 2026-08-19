@@ -86,7 +86,7 @@ Windows 默认使用 `Microsoft YaHei`，macOS 默认使用 `PingFang SC`；两�
 
 ## 本地工作台
 
-正常使用时双击仓库根目录的 `Agent4Market.exe`，桌面窗口会自动启动本地工作台和销售总监 Pi 终端，不会打开系统浏览器。以下命令只用于开发诊断：
+正常使用时双击仓库根目录的 `Agent4Market.exe`，桌面窗口会自动启动本地工作台和默认隐藏的嵌入式销售总监 Pi 核心，不会打开系统浏览器或 PowerShell。可在“设置 → AI 核心”查看状态与最近运行记录；如需排查底层启动问题，可启用独立调试窗口并重启应用。以下命令只用于开发诊断：
 
 ```powershell
 python ui/server.py

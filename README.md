@@ -41,7 +41,7 @@ cd WorkFlow_Market
 .\Agent4Market.exe
 ```
 
-Windows 安装器使用 Tauri 2 构建根目录下的桌面程序 `Agent4Market.exe`。双击后直接打开“销售总监 AI 助手”窗口，不调用系统浏览器；程序会同时启动仅本机可访问的工作台和销售总监 Pi 终端，关闭桌面窗口时回收两者。EXE 不包含业务数据，也不依赖 Codex Desktop；移动 EXE 时仍必须连同整个已安装目录一起移动。
+Windows 安装器使用 Tauri 2 构建根目录下的桌面程序 `Agent4Market.exe`。双击后直接打开“销售总监 AI 助手”窗口，不调用系统浏览器；程序默认以 RPC 子进程把销售总监 Pi 核心嵌入桌面应用，不再弹出 PowerShell。运行状态和最近记录可在“设置 → AI 核心”查看；只有用户主动开启“显示 AI 核心调试窗口”并重启应用时才显示独立终端。关闭桌面窗口时会回收工作台和 AI 核心进程树。EXE 不包含业务数据，也不依赖 Codex Desktop；移动 EXE 时仍必须连同整个已安装目录一起移动。
 
 macOS Terminal：
 

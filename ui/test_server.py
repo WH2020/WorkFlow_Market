@@ -13,8 +13,8 @@ from ui import server
 class ControlCentreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_active_profile = (
-            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.ACTIVE_PROFILE_ID
+        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile = (
+            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID
         )
         server.RUNTIME = Path(self.temporary.name)
         server.TASKS = server.RUNTIME / "tasks"
@@ -23,6 +23,8 @@ class ControlCentreTests(unittest.TestCase):
         server.PROJECTS = server.RUNTIME / "projects.json"
         server.SCHEDULES = server.RUNTIME / "schedules.json"
         server.AGENT_LEASES = server.RUNTIME / "agent-leases"
+        server.DESKTOP_SETTINGS = server.RUNTIME / "desktop-settings.json"
+        server.AI_CORE_LOG = server.RUNTIME / "ai-core.log"
         server.ACTIVE_PROFILE_ID = None
 
     def write_plan(self, task_id="task-ppt", **changes):
@@ -40,8 +42,8 @@ class ControlCentreTests(unittest.TestCase):
         return plan
 
     def tearDown(self):
-        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.ACTIVE_PROFILE_ID = (
-            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_active_profile
+        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID = (
+            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile
         )
         self.temporary.cleanup()
 
@@ -77,6 +79,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="discover-models"', html)
         self.assertIn('id="model-select"', html)
         self.assertIn('id="reset-model-settings"', html)
+        self.assertIn('id="show-ai-core-window"', html)
+        self.assertIn('id="ai-core-log"', html)
         self.assertIn('id="weekly-task-form"', html)
         self.assertIn('id="create-weekly"', html)
         self.assertIn("高级设置（页数、风格和文件名）", html)
@@ -91,7 +95,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function weeklyBrief()", javascript)
         self.assertIn("function guidedRequest()", javascript)
         self.assertIn("function renderModelSettings", javascript)
+        self.assertIn("function renderRuntimeSettings", javascript)
         self.assertIn('api("/api/model-discovery"', javascript)
+        self.assertIn('api("/api/desktop-settings"', javascript)
         for view in ("home", "projects", "schedules", "search"):
             self.assertIn(f'data-page="{view}"', html)
         self.assertIn('id="project-file-input"', html)
@@ -138,6 +144,36 @@ class ControlCentreTests(unittest.TestCase):
         lease["heartbeat_at"] = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
         server.atomic_json(server.AGENT_LEASES / "1234.json", lease)
         self.assertEqual(server.task_summaries()[0]["display_status"], "interrupted")
+
+    def test_embedded_ai_core_is_default_and_runtime_summary_accepts_an_idle_lease(self):
+        self.assertFalse(server.desktop_settings()["show_ai_core_window"])
+        saved = server.save_desktop_settings({"show_ai_core_window": True})
+        self.assertTrue(saved["show_ai_core_window"])
+        self.assertTrue(saved["restart_required"])
+        self.assertTrue(server.desktop_settings()["show_ai_core_window"])
+
+        server.atomic_json(server.AGENT_LEASES / "4321.json", {
+            "schema_version": "1.0", "pid": 4321, "nonce": "c" * 36,
+            "profile_id": "sales-director", "session_key": "session-idle",
+            "task_id": None, "task_status": None,
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+        })
+        summary = server.desktop_runtime_summary()
+        self.assertEqual(summary["status"], "idle")
+        self.assertEqual(summary["label"], "AI 核心已就绪")
+        self.assertEqual(summary["window_mode"], "visible")
+
+    def test_embedded_ai_core_log_is_bounded_and_redacts_credentials(self):
+        server.AI_CORE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        server.AI_CORE_LOG.write_text(
+            "startup\nAuthorization: Bearer secret-token\napi_key=secret-value\nready\n",
+            encoding="utf-8",
+        )
+        lines = server.ai_core_log_tail()
+        self.assertLessEqual(len(lines), 60)
+        self.assertNotIn("secret-token", "\n".join(lines))
+        self.assertNotIn("secret-value", "\n".join(lines))
+        self.assertIn("[已隐藏]", "\n".join(lines))
 
     def test_workbench_can_request_cancellation_only_for_an_interrupted_task(self):
         task = {
