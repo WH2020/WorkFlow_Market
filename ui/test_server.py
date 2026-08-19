@@ -80,6 +80,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="model-settings-panel"', html)
         self.assertIn('id="discover-models"', html)
         self.assertIn('id="model-select"', html)
+        self.assertIn('id="task-model"', html)
+        self.assertIn('id="task-thinking"', html)
         self.assertIn('id="reset-model-settings"', html)
         self.assertIn('id="show-ai-core-window"', html)
         self.assertIn('id="ai-core-log"', html)
@@ -98,6 +100,7 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function guidedRequest()", javascript)
         self.assertIn("function renderModelSettings", javascript)
         self.assertIn("function renderRuntimeSettings", javascript)
+        self.assertIn("function taskRuntimeSelection", javascript)
         self.assertIn('api("/api/model-discovery"', javascript)
         self.assertIn('api("/api/desktop-settings"', javascript)
         for view in ("home", "projects", "schedules", "search"):
@@ -124,6 +127,33 @@ class ControlCentreTests(unittest.TestCase):
             "task_id": "task-old", "profile_id": "sales-director", "status": "requested",
         })
         self.assertEqual(server.task_summaries()[0]["project_id"], server.DEFAULT_PROJECT_ID)
+
+    def test_task_request_accepts_only_a_configured_model_and_thinking_level(self):
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        settings = {
+            "configured": True, "status": "configured", "has_api_key": True,
+            "provider_id": "agent4market-newapi", "models": [{"id": "gpt-5.5"}],
+        }
+        payload = {
+            "profile_id": "sales-director", "service_id": "sales-review",
+            "project_id": server.DEFAULT_PROJECT_ID, "request": "复盘重点客户",
+            "requested_model": "agent4market-newapi/gpt-5.5",
+            "requested_thinking_level": "high",
+        }
+        with patch("ui.server.model_settings_summary", return_value=settings):
+            handler.create_request(payload)
+        self.assertEqual(replies[-1][0], HTTPStatus.CREATED)
+        record = server.load_json(server.REQUESTS / f"{replies[-1][1]['request_id']}.json")
+        self.assertEqual(record["requested_model"], "agent4market-newapi/gpt-5.5")
+        self.assertEqual(record["requested_thinking_level"], "high")
+
+        with patch("ui.server.model_settings_summary", return_value=settings):
+            with self.assertRaises(ValueError):
+                handler.create_request({**payload, "requested_model": "agent4market-newapi/not-allowed"})
+        with self.assertRaises(ValueError):
+            handler.create_request({**payload, "requested_thinking_level": "unlimited"})
 
     def test_running_task_requires_a_fresh_matching_agent_lease(self):
         task = {
@@ -276,6 +306,7 @@ class ControlCentreTests(unittest.TestCase):
             "workflow_id": "market.sales.pipeline-review", "project_id": server.DEFAULT_PROJECT_ID,
             "request": "复盘客户推进情况", "status": "running", "session_key": "old-session",
             "version": 2, "audit": [],
+            "requested_model": "agent4market-newapi/gpt-5.5", "requested_thinking_level": "high",
         }
         path = server.TASKS / "task-restart.json"
         server.atomic_json(path, task)
@@ -296,6 +327,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertEqual(request["request_kind"], "task-restart")
         self.assertEqual(request["restart_of_task_id"], "task-restart")
         self.assertEqual(request["request"], task["request"])
+        self.assertEqual(request["requested_model"], task["requested_model"])
+        self.assertEqual(request["requested_thinking_level"], "high")
 
     def test_historical_task_can_be_recreated_without_mutating_the_old_record(self):
         task = {
@@ -356,10 +389,17 @@ class ControlCentreTests(unittest.TestCase):
 
     def test_daily_schedule_enqueues_at_most_once_per_day(self):
         service = {"id": "sales-review", "workflow": "market.sales.review"}
-        with patch("ui.server.sales_service", return_value=service):
+        settings = {
+            "configured": True, "status": "configured", "has_api_key": True,
+            "provider_id": "agent4market-newapi", "models": [{"id": "gpt-5.5"}],
+        }
+        with patch("ui.server.sales_service", return_value=service), patch(
+            "ui.server.model_settings_summary", return_value=settings
+        ):
             schedule = server.create_schedule_record({
                 "name": "每日风险扫描", "project_id": server.DEFAULT_PROJECT_ID,
                 "service_id": "sales-review", "time_local": "09:00", "request": "检查重点客户风险与下一步动作。",
+                "requested_model": "agent4market-newapi/gpt-5.5", "requested_thinking_level": "high",
             })
         current = datetime.fromisoformat("2026-08-19T10:00:00+08:00")
         self.assertEqual(server.process_due_schedules(current), 1)
@@ -370,6 +410,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertEqual(record["schedule_id"], schedule["schedule_id"])
         self.assertEqual(record["scheduled_for"], "2026-08-19")
         self.assertEqual(record["project_id"], server.DEFAULT_PROJECT_ID)
+        self.assertEqual(record["requested_model"], "agent4market-newapi/gpt-5.5")
+        self.assertEqual(record["requested_thinking_level"], "high")
 
     def test_local_search_returns_structured_snippet_without_dumping_full_row(self):
         previous_root, previous_inputs, previous_outputs = server.ROOT, server.INPUTS, server.OUTPUTS

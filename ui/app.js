@@ -6,6 +6,7 @@
   let guidedRenderedService = null;
   let modelSettingsInitialized = false;
   let runtimeSettingsInitialized = false;
+  let taskRuntimeCatalogKey = "";
   let currentView = "home";
   let selectedProject = "project-default";
   let noticeTimer = null;
@@ -13,6 +14,7 @@
   const guidedDrafts = {};
   const guidedNotes = {};
   const taskMessageDrafts = {};
+  const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
 
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
@@ -223,6 +225,59 @@
     $("model-api-key").value = "";
     $("model-api-key").placeholder = settings.has_api_key ? "已保存；留空则继续使用" : "请输入网关 API Key";
     populateModelOptions(settings.models || [], settings.selected_model || "");
+  }
+
+  function renderTaskRuntimeOptions() {
+    const settings = model?.model || { configured: false, status: "unconfigured" };
+    const available = settings.configured && settings.status === "configured" ? (settings.models || []) : [];
+    const provider = settings.provider_id || "";
+    const catalogKey = JSON.stringify([provider, settings.selected_model || "", available.map((item) => item.id)]);
+    if (catalogKey !== taskRuntimeCatalogKey) {
+      taskRuntimeCatalogKey = catalogKey;
+      const previous = $("task-model").value;
+      let remembered = "";
+      try { remembered = localStorage.getItem("agent4market.taskModel") || ""; } catch { /* Local storage is optional. */ }
+      const options = [];
+      const fallback = document.createElement("option");
+      fallback.value = "";
+      fallback.textContent = settings.configured && settings.selected_model
+        ? `默认：${settings.selected_model}`
+        : "Pi 默认模型";
+      options.push(fallback);
+      available.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = `${provider}/${item.id}`;
+        option.textContent = item.owned_by ? `${item.id} · ${item.owned_by}` : item.id;
+        options.push(option);
+      });
+      $("task-model").replaceChildren(...options);
+      const desired = previous || remembered;
+      if (desired && options.some((option) => option.value === desired)) $("task-model").value = desired;
+      $("task-model").disabled = available.length === 0;
+    }
+    if (!$("task-thinking").dataset.initialized) {
+      let rememberedThinking = "";
+      try { rememberedThinking = localStorage.getItem("agent4market.taskThinking") || ""; } catch { /* Local storage is optional. */ }
+      if ([...$("task-thinking").options].some((option) => option.value === rememberedThinking)) {
+        $("task-thinking").value = rememberedThinking;
+      }
+      $("task-thinking").dataset.initialized = "true";
+      $("task-model").onchange = () => {
+        try { localStorage.setItem("agent4market.taskModel", $("task-model").value); } catch { /* Local storage is optional. */ }
+      };
+      $("task-thinking").onchange = () => {
+        try { localStorage.setItem("agent4market.taskThinking", $("task-thinking").value); } catch { /* Local storage is optional. */ }
+      };
+    }
+  }
+
+  function taskRuntimeSelection() {
+    const requestedModel = $("task-model").value;
+    const requestedThinking = $("task-thinking").value;
+    return {
+      ...(requestedModel ? { requested_model: requestedModel } : {}),
+      ...(requestedThinking ? { requested_thinking_level: requestedThinking } : {}),
+    };
   }
 
   function renderRuntimeSettings(force = false) {
@@ -615,7 +670,9 @@
       if (Object.hasOwn(label, effectiveStatus)) badge.classList.add(effectiveStatus);
       const scheduleMeta = task.schedule_id ? ` · 每日任务 ${task.scheduled_for || ""}` : "";
       const nodeLabel = historical ? "任务已结束" : (task.waiting_node || task.current_node || "等待 Pi 接手");
-      template.querySelector(".task-meta").textContent = `项目：${projectById(task.project_id)?.name || "日常工作"}${scheduleMeta} · 节点：${nodeLabel} · 版本 ${task.version ?? "-"}`;
+      const effectiveModel = task.effective_model || task.requested_model || "Pi 默认模型";
+      const effectiveThinking = thinkingLabels[task.effective_thinking_level || task.requested_thinking_level] || "默认";
+      template.querySelector(".task-meta").textContent = `项目：${projectById(task.project_id)?.name || "日常工作"}${scheduleMeta} · 模型：${effectiveModel} · 思考：${effectiveThinking} · 节点：${nodeLabel} · 版本 ${task.version ?? "-"}`;
       template.querySelector(".task-request").textContent = task.request || "";
       const actions = template.querySelector(".task-actions");
       const article = template.querySelector("article");
@@ -819,7 +876,9 @@
       const time = document.createElement("span"); time.className = "schedule-time"; time.textContent = schedule.time_local;
       const copy = document.createElement("div"); copy.className = "schedule-copy";
       const title = document.createElement("strong"); title.textContent = schedule.name;
-      const meta = document.createElement("small"); meta.textContent = `${projectById(schedule.project_id)?.name || "默认项目"} · ${serviceById(schedule.service_id)?.display_name || schedule.service_id} · ${schedule.last_enqueued_date ? `最近排队 ${schedule.last_enqueued_date}` : "尚未执行"}`;
+      const scheduleModel = schedule.requested_model || "默认模型";
+      const scheduleThinking = thinkingLabels[schedule.requested_thinking_level] || "默认思考";
+      const meta = document.createElement("small"); meta.textContent = `${projectById(schedule.project_id)?.name || "默认项目"} · ${serviceById(schedule.service_id)?.display_name || schedule.service_id} · ${scheduleModel} / ${scheduleThinking} · ${schedule.last_enqueued_date ? `最近排队 ${schedule.last_enqueued_date}` : "尚未执行"}`;
       const request = document.createElement("p"); request.textContent = schedule.request;
       copy.append(title, meta, request);
       const actions = document.createElement("div"); actions.className = "schedule-actions";
@@ -872,14 +931,14 @@
   }
 
   function render() {
-    renderModelSettings(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
+    renderModelSettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); switchView(currentView);
   }
 
   async function createTask(request) {
     return api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, project_id: selectedProject, request }),
+      body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, project_id: selectedProject, request, ...taskRuntimeSelection() }),
     });
   }
 
@@ -1031,7 +1090,7 @@
         body: JSON.stringify({
           name: $("schedule-name").value.trim(), time_local: $("schedule-time").value,
           project_id: $("schedule-project").value, service_id: $("schedule-service").value,
-          request: $("schedule-request").value.trim(),
+          request: $("schedule-request").value.trim(), ...taskRuntimeSelection(),
         }),
       });
       $("schedule-name").value = ""; $("schedule-request").value = ""; $("schedule-create-panel").hidden = true;

@@ -115,6 +115,17 @@ function harness(root: string) {
   const messages: string[] = [];
   const deliveries: Array<{ content: string; deliverAs?: string }> = [];
   const entries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+  const model = (provider: string, id: string, reasoning: boolean) => ({
+    provider, id, name: id, api: "openai-completions", baseUrl: "https://models.example/v1",
+    reasoning, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000, maxTokens: 32_768,
+  });
+  const defaultModel = model("test-provider", "default-model", false);
+  const gatewayModel = model("agent4market-newapi", "gpt-5.5", false);
+  const builtinReasoningModel = model("openai", "gpt-5.5", true);
+  const availableModels = [defaultModel, gatewayModel, builtinReasoningModel];
+  let selectedModel = defaultModel;
+  let thinkingLevel = "off";
   const pi = {
     on(name: string, handler: (...args: unknown[]) => unknown) {
       handlers.set(name, handler);
@@ -132,19 +143,34 @@ function harness(root: string) {
       messages.push(content);
       deliveries.push({ content, deliverAs: options?.deliverAs });
     },
+    async setModel(next: typeof defaultModel) {
+      selectedModel = next;
+      if (!next.reasoning) thinkingLevel = "off";
+      return true;
+    },
+    getThinkingLevel() { return thinkingLevel; },
+    setThinkingLevel(level: string) { thinkingLevel = selectedModel.reasoning ? level : "off"; },
   } as unknown as ExtensionAPI;
   verticalWorkflow(pi);
   const ui = { setStatus() {}, notify() {}, select: async () => undefined, input: async () => undefined };
   const context = {
     cwd: root,
+    mode: "tui",
     hasUI: true,
     ui,
     sessionManager: {
       getEntries: () => entries,
       getSessionFile: () => join(root, "session.jsonl"),
     },
+    model: defaultModel,
+    modelRegistry: {
+      getAll: () => availableModels,
+      getAvailable: () => availableModels,
+      find: (provider: string, id: string) => availableModels.find((candidate) => candidate.provider === provider && candidate.id === id),
+    },
+    scopedModels: [],
   };
-  return { handlers, commands, tools, messages, deliveries, entries, context };
+  return { handlers, commands, tools, messages, deliveries, entries, context, selectedModel: () => selectedModel, thinkingLevel: () => thinkingLevel };
 }
 
 function writeRequest(root: string, profileId: string): void {
@@ -201,6 +227,77 @@ test("a scheduled sales workbench request preserves project and schedule provena
     assert.equal(task.scheduled_for, "2026-08-19");
     const consumed = JSON.parse(readFileSync(join(directory, `${requestId}.json`), "utf8")) as { status: string };
     assert.equal(consumed.status, "accepted");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a workbench request applies and freezes its model and thinking level", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-task-model-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const requestId = "request-task-model";
+  try {
+    const directory = join(root, ".pi", "director-runtime", "requests");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `${requestId}.json`), JSON.stringify({
+      ...request(requestId, "sales-director"),
+      service_id: "sales-review", workflow_id: "market.sales.pipeline-review",
+      requested_model: "agent4market-newapi/gpt-5.5", requested_thinking_level: "high",
+    }), "utf8");
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const task = JSON.parse(readFileSync(
+      join(root, ".pi", "director-runtime", "tasks", `${requestId}.json`), "utf8",
+    )) as Record<string, unknown>;
+    assert.equal(task.requested_model, "agent4market-newapi/gpt-5.5");
+    assert.equal(task.requested_thinking_level, "high");
+    assert.equal(task.effective_model, "agent4market-newapi/gpt-5.5");
+    assert.equal(task.effective_thinking_level, "high");
+    assert.equal(runtime.selectedModel().provider, "agent4market-newapi");
+    assert.equal(runtime.selectedModel().reasoning, true);
+    assert.equal(runtime.thinkingLevel(), "high");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a tampered workbench model request is not accepted or persisted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-task-model-reject-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const requestId = "request-task-model-reject";
+  try {
+    const directory = join(root, ".pi", "director-runtime", "requests");
+    mkdirSync(directory, { recursive: true });
+    const path = join(directory, `${requestId}.json`);
+    writeFileSync(path, JSON.stringify({
+      ...request(requestId, "sales-director"),
+      service_id: "sales-review", workflow_id: "market.sales.pipeline-review",
+      requested_model: "agent4market-newapi/not-installed", requested_thinking_level: "max",
+    }), "utf8");
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(existsSync(join(root, ".pi", "director-runtime", "tasks", `${requestId}.json`)), false);
+    assert.equal((JSON.parse(readFileSync(path, "utf8")) as { status: string }).status, "requested");
+    assert.equal(runtime.selectedModel().provider, "test-provider");
+    assert.equal(runtime.thinkingLevel(), "off");
     await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;

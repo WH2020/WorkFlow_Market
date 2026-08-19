@@ -34,6 +34,8 @@ export type TaskStatus =
   | "cancelled"
   | "failed";
 
+export type TaskThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export type TaskAuditEvent = {
   at: string;
   action: string;
@@ -55,6 +57,10 @@ export type WorkflowTask = {
   service_id: string;
   workflow_id: string;
   request: string;
+  requested_model?: string;
+  requested_thinking_level?: TaskThinkingLevel;
+  effective_model?: string;
+  effective_thinking_level?: TaskThinkingLevel;
   status: TaskStatus;
   version: number;
   completed_nodes: string[];
@@ -250,6 +256,10 @@ export function createTask(input: {
   scheduleId?: string;
   scheduledFor?: string;
   restartOfTaskId?: string;
+  requestedModel?: string;
+  requestedThinkingLevel?: TaskThinkingLevel;
+  effectiveModel?: string;
+  effectiveThinkingLevel?: TaskThinkingLevel;
 }): WorkflowTask {
   const timestamp = now();
   const state: WorkflowTask = {
@@ -264,6 +274,10 @@ export function createTask(input: {
     service_id: input.serviceId,
     workflow_id: input.workflow.id,
     request: input.request,
+    ...(input.requestedModel ? { requested_model: input.requestedModel } : {}),
+    ...(input.requestedThinkingLevel ? { requested_thinking_level: input.requestedThinkingLevel } : {}),
+    ...(input.effectiveModel ? { effective_model: input.effectiveModel } : {}),
+    ...(input.effectiveThinkingLevel ? { effective_thinking_level: input.effectiveThinkingLevel } : {}),
     status: "running",
     version: 1,
     completed_nodes: [],

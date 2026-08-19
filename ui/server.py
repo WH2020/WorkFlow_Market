@@ -65,6 +65,7 @@ DEFAULT_PROJECT_ID = "project-default"
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".pptx"}
 AGENT_LEASE_FRESH_SECONDS = 15
+TASK_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 
 def now() -> str:
@@ -123,6 +124,43 @@ def safe_id(value: str) -> str:
     if not value or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in value):
         raise ValueError("标识符只能包含字母、数字、连字符和下划线")
     return value
+
+
+def _stored_runtime_selection(value: dict[str, Any]) -> dict[str, str]:
+    selection: dict[str, str] = {}
+    requested_model = value.get("requested_model")
+    requested_thinking = value.get("requested_thinking_level")
+    if requested_model is not None:
+        if (
+            not isinstance(requested_model, str) or not requested_model or len(requested_model) > 300 or
+            any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in requested_model) or
+            not requested_model.startswith("agent4market-newapi/") or requested_model == "agent4market-newapi/"
+        ):
+            raise ValueError("任务模型标识无效")
+        selection["requested_model"] = requested_model
+    if requested_thinking is not None:
+        if not isinstance(requested_thinking, str) or requested_thinking not in TASK_THINKING_LEVELS:
+            raise ValueError("任务思考强度无效")
+        selection["requested_thinking_level"] = requested_thinking
+    return selection
+
+
+def task_runtime_selection(payload: dict[str, Any]) -> dict[str, str]:
+    selection = _stored_runtime_selection(payload)
+    requested_model = selection.get("requested_model")
+    if requested_model:
+        settings = model_settings_summary(ROOT)
+        if settings.get("status") != "configured" or not settings.get("has_api_key"):
+            raise ValueError("当前模型网关尚未配置完成，不能为任务指定模型")
+        provider_id = str(settings.get("provider_id", ""))
+        allowed = {
+            f"{provider_id}/{item['id']}"
+            for item in settings.get("models", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        if requested_model not in allowed:
+            raise ValueError("所选任务模型不在当前已配置的模型列表中")
+    return selection
 
 
 def fresh_agent_leases(reference: datetime | None = None) -> list[dict[str, Any]]:
@@ -644,6 +682,7 @@ def schedule_records() -> list[dict[str, Any]]:
         ):
             raise ValueError("每日定时任务记录无效")
         seen.add(schedule_id)
+        runtime_selection = _stored_runtime_selection(schedule)
         result.append({
             "schedule_id": schedule_id,
             "project_id": project_id,
@@ -658,6 +697,7 @@ def schedule_records() -> list[dict[str, Any]]:
             "last_enqueued_at": schedule.get("last_enqueued_at"),
             "created_at": str(schedule.get("created_at", ""))[:40],
             "updated_at": str(schedule.get("updated_at", ""))[:40],
+            **runtime_selection,
         })
     return result
 
@@ -688,6 +728,7 @@ def create_schedule_record(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("执行时间必须为 00:00–23:59")
     active_project(project_id)
     service = sales_service(service_id)
+    runtime_selection = task_runtime_selection(payload)
     if service_id in {"presentation-studio", "weekly-deck"}:
         validate_presentation_brief_request(request)
     with exclusive_task(SCHEDULES):
@@ -709,6 +750,7 @@ def create_schedule_record(payload: dict[str, Any]) -> dict[str, Any]:
             "last_enqueued_at": None,
             "created_at": timestamp,
             "updated_at": timestamp,
+            **runtime_selection,
         }
         schedules.append(schedule)
         save_schedules(schedules)
@@ -742,6 +784,7 @@ def _schedule_request(schedule: dict[str, Any], scheduled_date: str, *, manual: 
         "project_id": schedule["project_id"],
         "schedule_id": schedule["schedule_id"],
         "scheduled_for": scheduled_date,
+        **_stored_runtime_selection(schedule),
     }
     if request_path.is_file():
         existing = load_json(request_path)
@@ -907,7 +950,8 @@ def task_summaries() -> list[dict[str, Any]]:
             summary = {key: task.get(key) for key in (
                 "task_id", "project_id", "schedule_id", "scheduled_for", "profile_id", "service_id", "workflow_id", "status", "current_stage",
                 "current_node", "waiting_node", "completed_nodes", "version", "created_at", "updated_at",
-                "approval_request", "pending_write", "artifacts", "request", "restarted_from_task_id", "superseded_by_task_id"
+                "approval_request", "pending_write", "artifacts", "request", "restarted_from_task_id", "superseded_by_task_id",
+                "requested_model", "requested_thinking_level", "effective_model", "effective_thinking_level"
             )}
             if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
                 continue
@@ -1372,10 +1416,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
             raise ValueError("该服务不属于当前角色")
         if service_id in {"presentation-studio", "weekly-deck"}:
             validate_presentation_brief_request(request_text)
+        runtime_selection = task_runtime_selection(payload)
         request_id = f"request-{uuid.uuid4().hex[:12]}"
         record = {"schema_version": "1.0", "request_id": request_id, "status": "requested", "profile_id": profile_id,
                   "service_id": service_id, "workflow_id": service["workflow"], "request": request_text,
-                  "created_at": now(), "source": "local-workbench", "project_id": project_id}
+                  "created_at": now(), "source": "local-workbench", "project_id": project_id,
+                  **runtime_selection}
         atomic_json(REQUESTS / f"{request_id}.json", record)
         self.send_json(HTTPStatus.CREATED, record)
 
@@ -1541,6 +1587,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "request": request_text, "created_at": now(), "source": "local-workbench",
                     "project_id": project_id, "request_kind": "task-restart",
                     "restart_of_task_id": task_id, "source_task_version": expected_version,
+                    **_stored_runtime_selection(task),
                 }
                 atomic_json(request_path, record)
                 if not historical:
@@ -1678,6 +1725,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "request_kind": "presentation-plan-revision",
                     "revision_of_task_id": task_id, "source_plan_sha256": expected_plan_sha256,
                     "source_task_version": expected_version,
+                    **_stored_runtime_selection(task),
                 }
                 atomic_json(request_path, record)
                 task["approval_request"] = {

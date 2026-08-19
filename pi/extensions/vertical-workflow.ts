@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   existsSync,
   lstatSync,
@@ -36,6 +36,7 @@ import {
   releaseTaskLock,
   rejectApproval,
   type RuntimeWorkflow,
+  type TaskThinkingLevel,
   type WorkflowTask,
 } from "./task-runtime.ts";
 import {
@@ -817,6 +818,7 @@ export function validateGovernedSubagentResultForTests(
 }
 
 type StoredEntry = { type?: string; customType?: string; data?: unknown };
+type RuntimePiModel = Parameters<ExtensionAPI["setModel"]>[0];
 export type WorkbenchRequest = {
   schema_version: "1.0";
   request_id: string;
@@ -825,6 +827,8 @@ export type WorkbenchRequest = {
   service_id: string;
   workflow_id: string;
   request: string;
+  requested_model?: string;
+  requested_thinking_level?: TaskThinkingLevel;
   created_at: string;
   source: "local-workbench";
   project_id?: string;
@@ -852,6 +856,9 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
   const request = value as Partial<WorkbenchRequest>;
   const safe = (candidate: unknown) => typeof candidate === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(candidate);
   const safeWorkflow = (candidate: unknown) => typeof candidate === "string" && /^[A-Za-z0-9_.-]{1,160}$/.test(candidate);
+  const safeModel = (candidate: unknown) =>
+    typeof candidate === "string" && candidate.length <= 300 && /^agent4market-newapi\/[^\s\u0000-\u001f\u007f]+$/u.test(candidate);
+  const thinkingLevels = new Set<TaskThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   if (
     request.schema_version !== "1.0" ||
     request.source !== "local-workbench" ||
@@ -863,6 +870,8 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
     typeof request.request !== "string" ||
     request.request.trim().length < 1 ||
     request.request.length > 4000 ||
+    (request.requested_model !== undefined && !safeModel(request.requested_model)) ||
+    (request.requested_thinking_level !== undefined && !thinkingLevels.has(request.requested_thinking_level)) ||
     typeof request.created_at !== "string" ||
     (request.project_id !== undefined && !safe(request.project_id)) ||
     (request.schedule_id !== undefined && !safe(request.schedule_id)) ||
@@ -891,6 +900,14 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
 function isWorkflowTask(value: unknown): value is WorkflowTask {
   if (!value || typeof value !== "object") return false;
   const task = value as Partial<WorkflowTask>;
+  const thinkingLevels = new Set<TaskThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  const optionalModel = (candidate: unknown) => candidate === undefined || (
+    typeof candidate === "string" && candidate.length <= 300 && /^[^\s\u0000-\u001f\u007f]+\/.+$/u.test(candidate)
+  );
+  const optionalRequestedModel = (candidate: unknown) => candidate === undefined || (
+    typeof candidate === "string" && candidate.length <= 300 && /^agent4market-newapi\/[^\s\u0000-\u001f\u007f]+$/u.test(candidate)
+  );
+  const optionalThinking = (candidate: unknown) => candidate === undefined || thinkingLevels.has(candidate as TaskThinkingLevel);
   return (
     task.schema_version === "1.0" &&
     typeof task.task_id === "string" &&
@@ -900,7 +917,11 @@ function isWorkflowTask(value: unknown): value is WorkflowTask {
     Array.isArray(task.completed_nodes) &&
     Array.isArray(task.waiting_nodes) &&
     Array.isArray(task.artifacts) &&
-    Array.isArray(task.audit)
+    Array.isArray(task.audit) &&
+    optionalRequestedModel(task.requested_model) &&
+    optionalModel(task.effective_model) &&
+    optionalThinking(task.requested_thinking_level) &&
+    optionalThinking(task.effective_thinking_level)
   );
 }
 
@@ -914,6 +935,7 @@ function renderRuntimeState(state: WorkflowTask, workflow: Workflow): string {
     `状态：${state.status}`,
     `角色/服务：${state.profile_id}/${state.service_id}`,
     `工作流：${state.workflow_id}`,
+    `运行配置：${state.effective_model ?? "Pi 默认模型"} / 思考 ${state.effective_thinking_level ?? "默认"}`,
     `版本：${state.version}`,
     `当前阶段：${state.current_stage ?? "已结束"}`,
     `当前节点：${pending || "无"}`,
@@ -941,6 +963,10 @@ function sameExternalDecisionBase(memory: WorkflowTask, disk: WorkflowTask): boo
     service_id: task.service_id,
     workflow_id: task.workflow_id,
     request: task.request,
+    requested_model: task.requested_model,
+    requested_thinking_level: task.requested_thinking_level,
+    effective_model: task.effective_model,
+    effective_thinking_level: task.effective_thinking_level,
     status: task.status,
     completed_nodes: task.completed_nodes,
     current_stage: task.current_stage,
@@ -1077,8 +1103,88 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   let profileSwitchQueued = false;
   let runtimeLeaseNonce = "";
   let runtimeLeasePath: string | undefined;
+  let runtimeModelRegistry: ExtensionContext["modelRegistry"] | undefined;
+  let currentRuntimeModel: RuntimePiModel | undefined;
+  let defaultRuntimeModel: RuntimePiModel | undefined;
+  let defaultThinkingLevel: TaskThinkingLevel = "off";
+  let scopedModelKeys = new Set<string>();
   const pendingSubagentCalls = new Map<string, PendingGovernedSubagent>();
   const inFlightSubagentNodes = new Set<string>();
+
+  const modelKey = (model: RuntimePiModel | undefined): string | undefined =>
+    model ? `${model.provider}/${model.id}` : undefined;
+
+  const enrichedRuntimeModel = (target: RuntimePiModel): RuntimePiModel => {
+    if (target.reasoning || !runtimeModelRegistry) return target;
+    const peer = runtimeModelRegistry.getAll().find((candidate) =>
+      candidate.provider !== target.provider && candidate.id === target.id && candidate.reasoning,
+    );
+    if (!peer) return target;
+    return {
+      ...target,
+      reasoning: peer.reasoning,
+      input: peer.input,
+      contextWindow: peer.contextWindow,
+      maxTokens: peer.maxTokens,
+      ...(peer.thinkingLevelMap ? { thinkingLevelMap: peer.thinkingLevelMap } : {}),
+      ...(peer.compat ? { compat: { ...peer.compat, ...(target.compat ?? {}) } } : {}),
+    };
+  };
+
+  const resolveRequestedModel = (requestedModel: string | undefined): RuntimePiModel | undefined => {
+    if (!requestedModel) return defaultRuntimeModel ? enrichedRuntimeModel(defaultRuntimeModel) : undefined;
+    if (!runtimeModelRegistry) throw new Error("Pi 模型目录尚未就绪");
+    if (scopedModelKeys.size > 0 && !scopedModelKeys.has(requestedModel)) {
+      throw new Error(`模型 ${requestedModel} 不在当前会话允许范围内`);
+    }
+    const separator = requestedModel.indexOf("/");
+    const provider = requestedModel.slice(0, separator);
+    const modelId = requestedModel.slice(separator + 1);
+    const target = runtimeModelRegistry.find(provider, modelId);
+    if (!target) throw new Error(`模型 ${requestedModel} 未安装或当前不可用`);
+    return enrichedRuntimeModel(target);
+  };
+
+  const applyTaskRuntimeSelection = async (selection: {
+    requested_model?: string;
+    requested_thinking_level?: TaskThinkingLevel;
+  }): Promise<{
+    effective_model?: string;
+    effective_thinking_level: TaskThinkingLevel;
+    rollback: () => Promise<void>;
+  }> => {
+    const previousModel = currentRuntimeModel;
+    const previousThinking = pi.getThinkingLevel() as TaskThinkingLevel;
+    const target = resolveRequestedModel(selection.requested_model);
+    const requestedThinking = selection.requested_thinking_level ?? defaultThinkingLevel;
+    try {
+      if (target) {
+        const switched = await pi.setModel(target);
+        if (!switched) throw new Error(`模型 ${modelKey(target)} 缺少可用凭据`);
+        currentRuntimeModel = target;
+      } else if (selection.requested_model) {
+        throw new Error(`无法解析模型 ${selection.requested_model}`);
+      }
+      pi.setThinkingLevel(requestedThinking);
+      const effectiveThinking = pi.getThinkingLevel() as TaskThinkingLevel;
+      return {
+        ...(modelKey(currentRuntimeModel) ? { effective_model: modelKey(currentRuntimeModel) } : {}),
+        effective_thinking_level: effectiveThinking,
+        rollback: async () => {
+          if (previousModel) await pi.setModel(previousModel);
+          currentRuntimeModel = previousModel;
+          pi.setThinkingLevel(previousThinking);
+        },
+      };
+    } catch (error) {
+      if (previousModel && modelKey(currentRuntimeModel) !== modelKey(previousModel)) {
+        await pi.setModel(previousModel);
+        currentRuntimeModel = previousModel;
+      }
+      pi.setThinkingLevel(previousThinking);
+      throw error;
+    }
+  };
 
   const updateRuntimeLease = () => {
     if (!runtimeLeaseNonce || !sessionKey) return;
@@ -1302,6 +1408,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           request.project_id !== selectedRequest.project_id ||
           request.schedule_id !== selectedRequest.schedule_id ||
           request.scheduled_for !== selectedRequest.scheduled_for ||
+          request.requested_model !== selectedRequest.requested_model ||
+          request.requested_thinking_level !== selectedRequest.requested_thinking_level ||
           request.request_kind !== selectedRequest.request_kind ||
           request.revision_of_task_id !== selectedRequest.revision_of_task_id ||
           request.source_plan_sha256 !== selectedRequest.source_plan_sha256 ||
@@ -1320,15 +1428,23 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             (existing.project_id ?? undefined) !== (request.project_id ?? undefined) ||
             (existing.schedule_id ?? undefined) !== (request.schedule_id ?? undefined) ||
             (existing.scheduled_for ?? undefined) !== (request.scheduled_for ?? undefined) ||
+            (existing.requested_model ?? undefined) !== (request.requested_model ?? undefined) ||
+            (existing.requested_thinking_level ?? undefined) !== (request.requested_thinking_level ?? undefined) ||
             (existing.restarted_from_task_id ?? undefined) !== (request.restart_of_task_id ?? undefined) ||
             existing.request !== request.request.trim() ||
             isTerminal(existing))
         ) {
           throw new Error(`任务 ID ${request.request_id} 已属于另一个任务，拒绝接管`);
         }
-        const task =
-          existing ??
-          createTask({
+        const applied = await applyTaskRuntimeSelection(existing
+          ? {
+              requested_model: existing.effective_model ?? existing.requested_model,
+              requested_thinking_level: existing.effective_thinking_level ?? existing.requested_thinking_level,
+            }
+          : request);
+        let task: WorkflowTask;
+        try {
+          task = existing ?? createTask({
             sessionKey,
             profileId: activeProfile.id,
             serviceId: service.id,
@@ -1339,9 +1455,17 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             scheduleId: request.schedule_id,
             scheduledFor: request.scheduled_for,
             restartOfTaskId: request.restart_of_task_id,
+            requestedModel: request.requested_model,
+            requestedThinkingLevel: request.requested_thinking_level,
+            effectiveModel: applied.effective_model,
+            effectiveThinkingLevel: applied.effective_thinking_level,
           });
-        if (!existing) persistNew(task);
-        else activeTask = existing;
+          if (!existing) persistNew(task);
+          else activeTask = existing;
+        } catch (error) {
+          await applied.rollback();
+          throw error;
+        }
         const accepted: WorkbenchRequest = {
           ...request,
           status: "accepted",
@@ -1515,11 +1639,16 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     clearRuntimeLease();
     runtimeLeaseNonce = randomUUID();
     profileSwitchQueued = false;
     projectRoot = resolve(ctx.cwd);
+    runtimeModelRegistry = ctx.modelRegistry;
+    currentRuntimeModel = ctx.model;
+    defaultRuntimeModel = ctx.model;
+    defaultThinkingLevel = pi.getThinkingLevel() as TaskThinkingLevel;
+    scopedModelKeys = new Set(ctx.scopedModels.map((entry) => modelKey(entry.model)!).filter(Boolean));
     pendingSubagentCalls.clear();
     inFlightSubagentNodes.clear();
     cleanupExpiredSubagentContracts(projectRoot);
@@ -1559,6 +1688,10 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       if (!recoveredProfile) throw new Error(`Recovered task references unknown Profile ${activeTask.profile_id}`);
       activeProfile = recoveredProfile;
       process.env.WORKFLOW_AGENT_PROFILE = recoveredProfile.id;
+      await applyTaskRuntimeSelection({
+        requested_model: activeTask.effective_model ?? activeTask.requested_model,
+        requested_thinking_level: activeTask.effective_thinking_level ?? activeTask.requested_thinking_level,
+      });
     }
     updateRuntimeLease();
     const taskStatus = activeTask && !isTerminal(activeTask) ? `｜任务：${activeTask.status}` : "";
@@ -1587,6 +1720,10 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     }
     pendingSubagentCalls.clear();
     inFlightSubagentNodes.clear();
+    runtimeModelRegistry = undefined;
+    currentRuntimeModel = undefined;
+    defaultRuntimeModel = undefined;
+    scopedModelKeys.clear();
     clearRuntimeLease();
   });
 
@@ -2062,6 +2199,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         serviceId: service.id,
         workflow: workflow as RuntimeWorkflow,
         request,
+        effectiveModel: modelKey(currentRuntimeModel),
+        effectiveThinkingLevel: pi.getThinkingLevel() as TaskThinkingLevel,
       });
       try {
         persistNew(task);

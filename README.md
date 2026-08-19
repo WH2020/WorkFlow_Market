@@ -69,6 +69,8 @@ python -m agent_platform doctor --require-ppt
 
 实现借鉴了 MIT 许可项目 [pi-provider-newapi](https://github.com/ttimasdf/pi-provider-newapi) 的动态发现、端点判断和本地目录思路，但为保证独立桌面版首次启动即可选中模型，实际由 Agent4Market 自己维护受控的 Pi 模型目录，不依赖上游扩展在会话启动后刷新。Windows 的 API Key 使用当前用户 DPAPI 加密，macOS 使用系统钥匙串；`models.json` 只保存环境变量引用。保存时应用会再次验证 `/v1/models` 并把所选模型写入 Pi 可直接读取的目录；下次启动通过 `--model agent4market-newapi/<model-id>` 绑定。公网网关必须使用 HTTPS；本机或局域网地址需要用户明确勾选允许。
 
+每次发起任务前，可以在工作台顶栏选择“本次模型”和“思考强度”。选择会随请求冻结，Pi 在接手任务、发出第一条任务提示前实际切换模型；最终生效的模型和思考等级会写入任务记录并显示在任务卡。模型不支持所选等级时，以 Pi 实际裁剪后的等级为准。历史任务“再次创建”、中断任务“重新开始”和每日定时任务都会保留各自的显式选择；选择“默认”则在每次新任务开始时恢复应用启动时的默认模型与思考等级。
+
 如需公开资料检索，在本机环境中设置 `BRAVE_SEARCH_API_KEY`；密钥不要写入仓库。`web.search` 只发现来源，后续 `web.open` 才读取正文；正文读取固定到已核验的公网地址，拒绝重定向、本机/私网地址、危险协议、疑似带密钥 URL 和超限响应，并限制 DNS、连接空闲和总处理时间。[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
 桌面发行版只加载销售总监所需 Skills，包含政府合作能力，不加载产品研发 Skills；旧版邮箱与聊天 Skill 也不会加载。
