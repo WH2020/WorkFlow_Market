@@ -26,8 +26,20 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutputPath -PathType L
     throw "Agent4Market.exe compilation failed with exit code $LASTEXITCODE."
 }
 if (-not $SkipSelfTest) {
-    & $OutputPath --self-test
-    if ($LASTEXITCODE -ne 0) { throw "Agent4Market.exe self-test failed with exit code $LASTEXITCODE." }
+    $SelfTestOutput = @(& $OutputPath --self-test 2>&1)
+    $SelfTestExitCode = $LASTEXITCODE
+    $SelfTestOutput | ForEach-Object { Write-Output $_ }
+    if ($SelfTestExitCode -ne 0) {
+        $LauncherLog = Join-Path $ProjectRoot ".pi\director-runtime\launcher.log"
+        $Diagnostic = ($SelfTestOutput -join " ").Trim()
+        if (Test-Path -LiteralPath $LauncherLog -PathType Leaf) {
+            $LogTail = @(Get-Content -LiteralPath $LauncherLog -Tail 20 -ErrorAction SilentlyContinue)
+            if ($LogTail.Count -gt 0) {
+                $Diagnostic = ($Diagnostic + " launcher.log: " + ($LogTail -join " | ")).Trim()
+            }
+        }
+        throw "Agent4Market.exe self-test failed with exit code ${SelfTestExitCode}: $Diagnostic"
+    }
 }
 $File = Get-Item -LiteralPath $OutputPath
 Write-Output ([pscustomobject]@{
