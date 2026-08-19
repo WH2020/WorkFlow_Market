@@ -24,13 +24,41 @@ fi
 command -v python3 >/dev/null 2>&1 || { printf 'Python 3.11+ is required.\n' >&2; exit 2; }
 command -v node >/dev/null 2>&1 || { printf 'Node.js 22.19+ is required.\n' >&2; exit 2; }
 
-if ! command -v pnpm >/dev/null 2>&1; then
-  command -v corepack >/dev/null 2>&1 || { printf 'pnpm 9+ or Corepack is required.\n' >&2; exit 2; }
-  corepack enable
-  corepack prepare pnpm@10 --activate
+PNPM_COMMAND="$(command -v pnpm || true)"
+case "$PNPM_COMMAND" in
+  *codex-runtimes*|*/.codex/*)
+    CLEAN_PATH=""
+    OLD_IFS="$IFS"
+    IFS=:
+    for SEGMENT in $PATH; do
+      case "$SEGMENT" in *codex-runtimes*|*/.codex/*) continue ;; esac
+      CLEAN_PATH="${CLEAN_PATH:+$CLEAN_PATH:}$SEGMENT"
+    done
+    IFS="$OLD_IFS"
+    PATH="$CLEAN_PATH"
+    export PATH
+    PNPM_COMMAND="$(command -v pnpm || true)"
+    ;;
+esac
+if [ -z "$PNPM_COMMAND" ]; then
+  if command -v corepack >/dev/null 2>&1; then
+    corepack enable
+    corepack prepare pnpm@10 --activate
+  elif command -v npm >/dev/null 2>&1; then
+    npm install -g pnpm@10
+  elif command -v brew >/dev/null 2>&1; then
+    brew install pnpm
+  else
+    printf 'Independent pnpm 9+ is required. Install it with the official Node.js installer or Homebrew.\n' >&2
+    exit 2
+  fi
+  PNPM_COMMAND="$(command -v pnpm || true)"
 fi
+case "$PNPM_COMMAND" in
+  ""|*codex-runtimes*|*/.codex/*) printf 'A non-Codex pnpm command is required.\n' >&2; exit 2 ;;
+esac
 if [ "$SKIP_DEPENDENCIES" -eq 0 ]; then
-  pnpm install --frozen-lockfile
+  "$PNPM_COMMAND" install --frozen-lockfile --ignore-scripts
 fi
 LIBREOFFICE_PATH=""
 for candidate in "/Applications/LibreOffice.app/Contents/MacOS/soffice" "$HOME/Applications/LibreOffice.app/Contents/MacOS/soffice" "/opt/homebrew/bin/soffice" "/usr/local/bin/soffice"; do

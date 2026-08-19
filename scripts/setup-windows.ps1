@@ -34,15 +34,47 @@ function Invoke-ProjectPython {
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     throw "Node.js 22.19+ was not found. Install Node.js and run this script again."
 }
-if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
-    if (-not (Get-Command corepack -ErrorAction SilentlyContinue)) {
-        throw "pnpm was not found and Corepack is unavailable. Install pnpm 9+ and retry."
+
+function Get-IndependentPnpm {
+    $Candidate = Get-Command pnpm -ErrorAction SilentlyContinue
+    if ($Candidate -and $Candidate.Source -match '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/])') {
+        $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $env:Path = @($UserPath, $MachinePath) -join [IO.Path]::PathSeparator
+        $Candidate = Get-Command pnpm -ErrorAction SilentlyContinue
     }
-    Invoke-Checked -FilePath (Get-Command corepack).Source -Arguments @("enable")
-    Invoke-Checked -FilePath (Get-Command corepack).Source -Arguments @("prepare", "pnpm@10", "--activate")
+    if ($Candidate -and $Candidate.Source -notmatch '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/])') {
+        return $Candidate
+    }
+
+    $Corepack = Get-Command corepack -ErrorAction SilentlyContinue
+    $Winget = Get-Command winget -ErrorAction SilentlyContinue
+    $Npm = Get-Command npm -ErrorAction SilentlyContinue
+    if ($Corepack) {
+        Invoke-Checked -FilePath $Corepack.Source -Arguments @("enable")
+        Invoke-Checked -FilePath $Corepack.Source -Arguments @("prepare", "pnpm@10", "--activate")
+    } elseif ($Winget) {
+        Invoke-Checked -FilePath $Winget.Source -Arguments @(
+            "install", "--id", "pnpm.pnpm", "--exact", "--silent",
+            "--accept-package-agreements", "--accept-source-agreements"
+        )
+        $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $env:Path = @($UserPath, $MachinePath) -join [IO.Path]::PathSeparator
+    } elseif ($Npm) {
+        Invoke-Checked -FilePath $Npm.Source -Arguments @("install", "-g", "pnpm@10")
+    } else {
+        throw "Independent pnpm was not found. Install pnpm 9+ with winget or the official Node.js installer, then retry."
+    }
+    $Candidate = Get-Command pnpm -ErrorAction SilentlyContinue
+    if (-not $Candidate -or $Candidate.Source -match '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/])') {
+        throw "Independent pnpm installation finished, but a non-Codex pnpm command is still unavailable. Restart PowerShell and retry."
+    }
+    return $Candidate
 }
+$PnpmCommand = Get-IndependentPnpm
 if (-not $SkipDependencies) {
-    Invoke-Checked -FilePath (Get-Command pnpm).Source -Arguments @("install", "--frozen-lockfile")
+    Invoke-Checked -FilePath $PnpmCommand.Source -Arguments @("install", "--frozen-lockfile", "--ignore-scripts")
 }
 $LibreOfficeCandidates = @(
     (Join-Path ${env:ProgramFiles} "LibreOffice\program\soffice.com"),

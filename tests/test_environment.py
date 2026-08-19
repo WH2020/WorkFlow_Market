@@ -9,6 +9,14 @@ from agent_platform.environment import discover_ppt_runtime, launch_pi
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_setup_scripts_do_not_use_codex_pnpm_or_dependency_lifecycle_scripts(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        windows = (root / "scripts" / "setup-windows.ps1").read_text(encoding="utf-8")
+        macos = (root / "scripts" / "setup-macos.sh").read_text(encoding="utf-8")
+        for script in (windows, macos):
+            self.assertIn("codex-runtimes", script)
+            self.assertIn("--ignore-scripts", script)
+
     def _project_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, Path]:
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)
