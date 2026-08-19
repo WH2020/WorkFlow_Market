@@ -94,6 +94,23 @@ function writeRequest(root: string, profileId: string): void {
   writeFileSync(join(directory, "request-profile-switch.json"), JSON.stringify(payload), "utf8");
 }
 
+function writePresentationRevisionRequest(root: string): string {
+  const requestId = "request-presentation-revision";
+  const directory = join(root, ".pi", "director-runtime", "requests");
+  mkdirSync(directory, { recursive: true });
+  const payload = {
+    ...request(requestId, "market-director"),
+    service_id: "presentation-studio",
+    workflow_id: "shared.presentation.studio",
+    request: "[PRESENTATION_PLAN_REVISION]\n{\"source_task_id\":\"task-old\"}\n[/PRESENTATION_PLAN_REVISION]",
+    request_kind: "presentation-plan-revision",
+    revision_of_task_id: "task-old",
+    source_plan_sha256: "b".repeat(64),
+  };
+  writeFileSync(join(directory, `${requestId}.json`), JSON.stringify(payload), "utf8");
+  return requestId;
+}
+
 test("a valid idle workbench request queues a command-context profile reload", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-profile-switch-"));
   const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
@@ -116,6 +133,30 @@ test("a valid idle workbench request queues a command-context profile reload", a
     } finally {
       await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
     }
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the runtime accepts a task-bound presentation revision request from the workbench", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-presentation-revision-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "market-director";
+  try {
+    const requestId = writePresentationRevisionRequest(root);
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const persisted = JSON.parse(readFileSync(
+      join(root, ".pi", "director-runtime", "requests", `${requestId}.json`),
+      "utf8",
+    )) as { status: string; task_id?: string; request_kind?: string };
+    assert.equal(persisted.status, "accepted");
+    assert.equal(persisted.task_id, requestId);
+    assert.equal(persisted.request_kind, "presentation-plan-revision");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
     else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;

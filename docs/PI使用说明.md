@@ -55,6 +55,7 @@ RUNTIME_BIN_DIR                 = Override binaries
 /director-run industry-research 调研近三个月国内具身智能数据采集政策与项目
 /director-run pdf-import 读取 inputs/某报告.pdf，按页提取证据并准备写入知识库
 /director-run government-proposal 为某地形成脑机接口试点合作框架
+/director-run presentation-studio 为总经理制作一份 6 页脑机接口行业研判，采用技术研究风格
 /director-run product-discovery 核验一线工程师远程诊断工具的机会
 /director-run product-prd 为设备告警闭环形成可验收 PRD
 /director-run product-metrics 设计该功能的指标、埋点和灰度实验
@@ -75,7 +76,11 @@ RUNTIME_BIN_DIR                 = Override binaries
 python ui/server.py
 ```
 
-浏览器打开 `http://127.0.0.1:8765`。工作台只监听 `127.0.0.1`，提供岗位/服务选择、任务提交、阶段查看、审批、驳回、取消、台账状态摘要和最近产物入口。任务请求由 Pi 接手，页面本身不会执行模型、改客户阶段或发送文件。
+浏览器打开 `http://127.0.0.1:8765`。工作台只监听 `127.0.0.1`，提供岗位/服务选择、任务提交、阶段查看、审批、驳回、取消、台账状态摘要和最近产物入口。选择“PPT 工作室”或“周五工作汇报”时，页面会切换为结构化表单，收集主题、场景、模式、受众、目的、使用场合、语言、时长、4–10 页、保密等级、输出名和设计风格。任务请求由 Pi 接手，页面本身不会执行模型、改客户阶段或发送文件。
+
+PPT 工作室首版的资料范围固定为“公开网页 + 当前 Profile 知识库”：DAG 先执行公开检索与正文读取，再读取内部知识。本地 PDF 应先通过“PDF 资料入库”进入知识库。界面不会提供尚未生效的“仅本地/仅公开”开关；不要把秘密、客户口令或未公开项目代号写入会用于公开检索的主题。后续如需这两种范围，必须用权限和节点都独立的受控工作流实现。
+
+大纲写入后以便利贴展示。用户可编辑结论式标题、拖拽排序，然后点击“按此大纲创建修订任务”。为防止旧审批被复用，工作台不会修改原 plan；它会驳回旧大纲并创建一个新的受管任务，新任务重新建立证据、写 plan、确认大纲和批准正式生成。`.pi/director-runtime/presentation-plans/` 是运行时受控目录，不要手工编辑其中 JSON；哈希不一致时运行时会拒绝继续。
 
 工作台和 Pi 必须在同一仓库目录下运行。若 Pi 没有启动，请求会保持“等待 Pi 接手”；启动后运行时会轮询处理。
 
@@ -102,14 +107,15 @@ python ui/server.py
 - `web.open`：一次读取最多 6 个搜索结果或用户明确提供的公开 URL；固定使用预先核验的公网地址，拒绝二次 DNS、重定向、私网地址、密钥参数和 8 MiB 以上正文，清除 HTML 中的脚本与样式。在线 PDF 自动转入 PDF 文本提取。
 - `pdf.read`：只读取 `inputs/` 或 `data/inbox/` 下明确的普通 `.pdf`，最大 32 MiB，返回稳定来源 ID、文本、可靠度、截断状态和实际返回页码证据；文本层不足时失败停止。
 - `weekly.snapshot`：按北京时间聚合当前 Profile 的任务/审计、知识新增和受管任务登记的产物；只有市场总监读取销售三张表，产品总监不会跨 Profile 读取销售数据。每类数据都返回命中数、返回数和截断标记。
-- `artifact.deck.write`：接收已冻结并批准的 4–10 页结构化周报载荷；载荷的 Profile、period、`snapshot_sha256`、来源 URL 和本地来源 SHA-256 必须与当前任务持久化快照一致。在 task/intent 私有目录中使用 `@oai/artifact-tool` 构建，逐页生成 PNG/layout、检查 speaker notes 来源并运行官方 `slides_test.py`；QA 通过后才独占提交到 `outputs/`，不覆盖已有文件。
+- `presentation.plan.write`：按任务保存 outline/final 两阶段 plan，使用连续版本、证据上下文 SHA-256 和 plan SHA-256 防止跨任务接管或静默修改。final 必须延续已确认 brief、大纲、周期和来源上下文；要改大纲需创建新任务重新确认。
+- `artifact.deck.write`：接收已冻结并批准的 4–10 页结构化载荷；周报绑定当前 `weekly.snapshot`，PPT 工作室绑定当前 final plan 与证据 registry。经营管理、政企合作、前沿研究三套设计令牌确定配色、标签与视觉语气，逐页 `layout_intent` 决定几何版式；两者都随冻结载荷进入构建器。在 task/intent 私有目录中使用 `@oai/artifact-tool` 构建，逐页生成 PNG/layout、检查 speaker notes 来源并运行官方 `slides_test.py`；QA 通过后才独占提交到 `outputs/`，不覆盖已有文件。
 - 所有结构化数据文件继续位于本地 `data/`；适配器采用独占锁、同目录临时文件原子替换和 `.pi/director-runtime/commits/` 提交日志。若数据已替换但任务快照尚未推进，重试会按提交前后哈希完成恢复；哈希两边都不匹配时停止并要求人工核对。
 - 网页/PDF 工具生成的 URL allow-set 与精确 `knowledge.write` mutation 按任务写入 `.pi/director-runtime/evidence/`。Pi 重启后会重新加载该 registry；工具来源 ID 不在本任务 registry 中、或 mutation 内容发生变化时，写入会被拒绝。
 
 ## 当前限制与边界
 
 - 硬门禁适用于 `/director-run` 或工作台创建的“受管任务”，不是操作系统沙箱；第三方 Pi 扩展和用户在受管任务之外执行的命令仍拥有其自身权限。
-- 受管任务运行期间禁用通用 Bash，`data/` 结构化写入不能使用普通 `write` / `edit` 绕过；当前只有周报 PPT 具备受控文件生成链路，通用 Word、Excel 和任意模板 PPT 尚未实现。
+- 受管任务运行期间禁用通用 Bash，`data/` 结构化写入不能使用普通 `write` / `edit` 绕过；当前周报和 PPT 工作室具备受控 PPT 生成链路，通用 Word、Excel 及企业母版自动解析尚未实现。
 - 默认行业研究按 `web.search` → `web.open` → `knowledge.search` 顺序执行：先发现和读取外部来源，再读取内部知识，避免把内部资料带入外部查询。仓库另有 `shared.research.frontier-subagent` 契约，但在安装隔离 Subagent 执行器前不会作为默认服务运行，也不能被模型静默完成。
 - `web.open` 只处理公开、无需登录的 HTML、纯文本和 PDF，不执行 JavaScript、不保留登录态、不绕过反爬或访问控制。`user_provided=true` 只允许用于用户在当前任务中直接给出的 URL；该语义依赖主 Agent 遵守工具契约。
 - PDF 只提取已有文本层，不做 OCR。在线 PDF 的 PDF.js 解析失败时直接安全停止；本地受控目录文件可在同一受限子进程中使用标为 `limited` 的文本层兜底。主 Agent 进程不解析 PDF 数据流。扫描版、复杂字体映射或损坏 PDF 可能需要用户转换为可检索 PDF 后重试。

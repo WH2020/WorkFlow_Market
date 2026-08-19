@@ -53,6 +53,7 @@ Pi 扩展会按当前 Profile 动态加载 Skills；产品总监不会加载市�
 /director-profile product-director
 /director-services
 /director-run pdf-import 读取 inputs/example.pdf，提取页码证据并准备入库
+/director-run presentation-studio 为管理层制作一份 6 页具身智能行业判断，受众是总经理，使用技术研究风格
 /director-run product-prd 为设备端告警功能形成 PRD
 /director-status
 /director-approve
@@ -66,7 +67,7 @@ Pi 扩展会按当前 Profile 动态加载 Skills；产品总监不会加载市�
 python ui/server.py
 ```
 
-浏览器打开 `http://127.0.0.1:8765`，即可选择岗位与服务、提交任务、查看 DAG，并在人工关口批准、驳回或取消。服务只监听本机，不会自动发送文件。完整说明见 [Pi 使用说明](docs/PI使用说明.md)。
+浏览器打开 `http://127.0.0.1:8765`，即可选择岗位与服务、提交任务、查看 DAG，并在人工关口批准、驳回或取消。选择“PPT 工作室”后会出现结构化需求表单；大纲以便利贴呈现，允许改标题和拖拽排序。修订不会直接改写已确认 plan，而是创建一个新的受管任务并重新走证据、确认和生成审批。服务只监听本机，不会自动发送文件。完整说明见 [Pi 使用说明](docs/PI使用说明.md)。
 
 ## 校验插件与工作流
 
@@ -102,8 +103,8 @@ docs/                             架构、开发和操作说明
 
 ## 当前范围
 
-当前版本是可安装、可受管执行的本地原型：已包含按 Profile 隔离的 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售适配器、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT 生成与 QA、本地工作台。它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器，也未内置隔离 Subagent 执行器。默认行业研究按 `web.search` → `web.open` → `knowledge.search` 执行，避免把内部材料带入外部查询；仓库保留可选的有边界 Subagent Workflow，安装隔离执行器前不会被默认服务调用。
+当前版本是可安装、可受管执行的本地原型：已包含按 Profile 隔离的 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售适配器、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT 和通用 PPT 工作室、本地工作台。PPT 工作室首版覆盖周报、行业研究、政府方案和自定义演示，输出 4–10 页可编辑 PPTX，并提供经营管理、政企合作、前沿研究三套确定性视觉令牌。它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器、企业母版自动解析，也未内置隔离 Subagent 执行器。默认行业研究按 `web.search` → `web.open` → `knowledge.search` 执行，避免把内部材料带入外部查询；仓库保留可选的有边界 Subagent Workflow，安装隔离执行器前不会被默认服务调用。
 
-本地 PDF 只从 `inputs/` 或 `data/inbox/` 读取明确文件，两处目录默认被 Git 忽略。随包安装的 PDF.js 和本地受限文本层兜底都在独立子进程中运行，限制为 45 秒和 256 MiB；不可靠兜底结果只能保持 `pending`，在线 PDF 不执行兜底。周报先生成可审阅的精确载荷并等待 Approval，批准后才使用 Codex 工作区附带的 `@oai/artifact-tool` 构建、逐页渲染、检查来源备注和运行 `slides_test.py`，最后独占提交到 `outputs/`。首次使用前需按 [Pi 使用说明](docs/PI使用说明.md) 配置对应绝对路径。缺少依赖时工作流会停在确定性工具节点，不会把结构化文本伪装成 PPT。
+本地 PDF 只从 `inputs/` 或 `data/inbox/` 读取明确文件，两处目录默认被 Git 忽略。随包安装的 PDF.js 和本地受限文本层兜底都在独立子进程中运行，限制为 45 秒和 256 MiB；不可靠兜底结果只能保持 `pending`，在线 PDF 不执行兜底。周报和 PPT 工作室都先形成可审阅的 plan/精确载荷并等待 Approval，批准后才使用 Codex 工作区附带的 `@oai/artifact-tool` 构建、逐页渲染、检查来源备注和运行 `slides_test.py`，最后独占提交到 `outputs/`。首次使用前需按 [Pi 使用说明](docs/PI使用说明.md) 配置对应绝对路径。缺少依赖时工作流会停在确定性工具节点，不会把结构化文本伪装成 PPT。
 
 现有 Codex 市场总监插件仍可按 [旧版使用说明](docs/使用说明.md) 使用；它与新的 Pi Agent 是适配层关系，不是新架构的核心依赖。

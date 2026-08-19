@@ -19,6 +19,7 @@ TOOL_REQUIRED_PERMISSIONS = {
     "web.search": {"web.read"},
     "web.open": {"web.read"},
     "pdf.read": {"knowledge.read"},
+    "presentation.plan.write": {"presentation.plan.write"},
     "weekly.snapshot": {"knowledge.read", "sales.read", "task.audit.read", "artifact.read"},
     "artifact.deck.write": {"artifact.write"},
 }

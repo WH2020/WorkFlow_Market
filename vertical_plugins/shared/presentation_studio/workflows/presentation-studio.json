@@ -1,0 +1,22 @@
+{
+  "id": "shared.presentation.studio",
+  "plugin": "shared.presentation-studio",
+  "display_name": "PPT 工作室",
+  "entry_nodes": ["create_brief"],
+  "output_nodes": ["render_deck"],
+  "nodes": [
+    {"id": "create_brief", "type": "agent", "skill": "plan-director-presentations", "depends_on": [], "permissions": []},
+    {"id": "search_public_sources", "type": "tool", "tool": "web.search", "depends_on": ["create_brief"], "permissions": ["web.read"]},
+    {"id": "open_public_sources", "type": "tool", "tool": "web.open", "depends_on": ["search_public_sources"], "permissions": ["web.read"]},
+    {"id": "search_knowledge", "type": "tool", "tool": "knowledge.search", "depends_on": ["open_public_sources"], "permissions": ["knowledge.read"]},
+    {"id": "propose_outline", "type": "agent", "skill": "plan-director-presentations", "depends_on": ["search_knowledge"], "permissions": []},
+    {"id": "save_outline", "type": "tool", "tool": "presentation.plan.write", "depends_on": ["propose_outline"], "permissions": ["presentation.plan.write"]},
+    {"id": "confirm_outline", "type": "approval", "policy": "user_confirms_outline_before_storyboard", "depends_on": ["save_outline"], "permissions": []},
+    {"id": "build_storyboard", "type": "agent", "skill": "plan-director-presentations", "depends_on": ["confirm_outline"], "permissions": []},
+    {"id": "select_design_system", "type": "agent", "skill": "plan-director-presentations", "depends_on": ["build_storyboard"], "permissions": []},
+    {"id": "save_final_plan", "type": "tool", "tool": "presentation.plan.write", "depends_on": ["select_design_system"], "permissions": ["presentation.plan.write"]},
+    {"id": "validate_and_freeze", "type": "validator", "check": "presentation_plan_matches_evidence_and_frozen_deck_payload", "depends_on": ["save_final_plan"], "permissions": []},
+    {"id": "approve_render", "type": "approval", "policy": "user_confirms_exact_payload_sha256_before_artifact_commit", "depends_on": ["validate_and_freeze"], "permissions": []},
+    {"id": "render_deck", "type": "tool", "tool": "artifact.deck.write", "depends_on": ["approve_render"], "permissions": ["artifact.write"]}
+  ]
+}

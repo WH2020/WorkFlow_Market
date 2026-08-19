@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workflow-market.local/contracts/presentation-plan.schema.json",
+  "title": "Bound Presentation Plan",
+  "type": "object",
+  "required": [
+    "schema_version", "task_id", "project_id", "profile_id", "scene", "mode", "phase", "version",
+    "period", "brief", "evidence_refs", "outline", "design_system", "output_name",
+    "context_snapshot_sha256", "plan_sha256", "updated_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"$ref": "#/$defs/id"},
+    "project_id": {"$ref": "#/$defs/id"},
+    "profile_id": {"enum": ["market-director", "product-director"]},
+    "scene": {"enum": ["weekly", "industry", "government", "custom"]},
+    "mode": {"enum": ["quick", "standard", "strict"]},
+    "phase": {"enum": ["outline", "final"]},
+    "version": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "period": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+      },
+      "additionalProperties": false
+    },
+    "brief": {
+      "type": "object",
+      "required": ["topic", "audience", "purpose", "occasion", "language", "confidentiality", "target_slides"],
+      "properties": {
+        "topic": {"type": "string", "minLength": 1, "maxLength": 240},
+        "audience": {"type": "string", "minLength": 1, "maxLength": 240},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 500},
+        "occasion": {"type": "string", "minLength": 1, "maxLength": 240},
+        "language": {"type": "string", "minLength": 1, "maxLength": 40},
+        "confidentiality": {"enum": ["internal", "restricted", "public"]},
+        "target_slides": {"type": "integer", "minimum": 4, "maximum": 10},
+        "expected_decision": {"type": "string", "maxLength": 500},
+        "duration_minutes": {"type": "integer", "minimum": 1, "maximum": 240}
+      },
+      "additionalProperties": false
+    },
+    "evidence_refs": {
+      "type": "array", "minItems": 1, "maxItems": 200, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/id"}
+    },
+    "outline": {
+      "type": "array", "minItems": 4, "maxItems": 10,
+      "items": {"$ref": "#/$defs/outlineItem"}
+    },
+    "slides": {
+      "type": "array", "minItems": 4, "maxItems": 10,
+      "items": {"$ref": "#/$defs/slidePlan"}
+    },
+    "design_system": {
+      "type": "object",
+      "required": ["token_id"],
+      "properties": {"token_id": {"enum": ["management-report", "government-program", "technology-research"]}},
+      "additionalProperties": false
+    },
+    "output_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.pptx$"},
+    "context_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "plan_sha256": {"$ref": "#/$defs/sha256"},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {"if": {"properties": {"phase": {"const": "final"}}}, "then": {"required": ["slides"]}},
+    {"if": {"properties": {"phase": {"const": "outline"}}}, "then": {"not": {"required": ["slides"]}}}
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "evidenceRefArray": {"type": "array", "maxItems": 50, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "outlineItem": {
+      "type": "object",
+      "required": ["slide_id", "order", "conclusion_title", "evidence_refs"],
+      "properties": {
+        "slide_id": {"$ref": "#/$defs/id"},
+        "order": {"type": "integer", "minimum": 1, "maximum": 10},
+        "conclusion_title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "evidence_refs": {"$ref": "#/$defs/evidenceRefArray"}
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 500},
+        "url": {"type": "string", "maxLength": 2048},
+        "path": {"type": "string", "maxLength": 1024},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "page": {"type": "integer", "minimum": 1, "maximum": 100000}
+      },
+      "oneOf": [{"required": ["url"]}, {"required": ["path", "sha256"]}],
+      "additionalProperties": false
+    },
+    "renderSlide": {
+      "type": "object",
+      "required": ["title", "layout_intent"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "layout_intent": {"enum": ["single-focus", "fifty-fifty", "two-thirds", "three-column", "top-hero", "mixed-grid"]},
+        "subtitle": {"type": "string", "maxLength": 240},
+        "eyebrow": {"type": "string", "maxLength": 80},
+        "lead": {"type": "string", "maxLength": 240},
+        "body": {"type": "array", "maxItems": 7, "items": {"type": "string", "minLength": 1, "maxLength": 180}},
+        "callout": {"type": "string", "maxLength": 240},
+        "notes": {"type": "string", "maxLength": 4000},
+        "sources": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/source"}}
+      },
+      "additionalProperties": false
+    },
+    "slidePlan": {
+      "type": "object",
+      "required": [
+        "slide_id", "order", "conclusion_title", "audience_takeaway", "facts", "analyses",
+        "hypotheses", "unknowns", "evidence_refs", "layout_intent", "visual_assets",
+        "speaker_notes", "warnings", "render"
+      ],
+      "properties": {
+        "slide_id": {"$ref": "#/$defs/id"},
+        "order": {"type": "integer", "minimum": 1, "maximum": 10},
+        "conclusion_title": {"type": "string", "minLength": 1, "maxLength": 120},
+        "audience_takeaway": {"type": "string", "minLength": 1, "maxLength": 500},
+        "facts": {
+          "type": "array", "maxItems": 20,
+          "items": {
+            "type": "object", "required": ["text", "evidence_refs"],
+            "properties": {
+              "text": {"type": "string", "minLength": 1, "maxLength": 500},
+              "evidence_refs": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+            },
+            "additionalProperties": false
+          }
+        },
+        "analyses": {"$ref": "#/$defs/textArray"},
+        "hypotheses": {"$ref": "#/$defs/textArray"},
+        "unknowns": {"$ref": "#/$defs/textArray"},
+        "evidence_refs": {"$ref": "#/$defs/evidenceRefArray"},
+        "layout_intent": {"enum": ["single-focus", "fifty-fifty", "two-thirds", "three-column", "top-hero", "mixed-grid"]},
+        "visual_assets": {"$ref": "#/$defs/textArray"},
+        "speaker_notes": {"type": "string", "maxLength": 4000},
+        "warnings": {"$ref": "#/$defs/textArray"},
+        "render": {"$ref": "#/$defs/renderSlide"}
+      },
+      "additionalProperties": false
+    },
+    "textArray": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 500}}
+  }
+}

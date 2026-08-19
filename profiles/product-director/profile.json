@@ -5,6 +5,7 @@
   "plugins": [
     "shared.research",
     "shared.documents",
+    "shared.presentation-studio",
     "shared.weekly-report",
     "product.discovery",
     "product.requirements",
@@ -18,7 +19,8 @@
     {"id": "product-prd", "display_name": "需求澄清与 PRD", "description": "逐项核对范围、状态、约束和验收标准。", "workflow": "product.requirements.prd", "skill": "manage-product-requirements"},
     {"id": "product-metrics", "display_name": "产品指标与实验", "description": "定义指标口径、目标、护栏与验证实验。", "workflow": "product.metrics.experiment", "skill": "design-product-metrics"},
     {"id": "product-roadmap", "display_name": "产品路线图", "description": "按目标、证据、依赖和资源约束规划优先级。", "workflow": "product.roadmap.plan", "skill": "plan-product-roadmap"},
+    {"id": "presentation-studio", "display_name": "PPT 工作室", "description": "从产品证据、大纲和逐页策划生成经确认的 PPT。", "workflow": "shared.presentation.studio", "skill": "plan-director-presentations"},
     {"id": "release-review", "display_name": "发布检查与复盘", "description": "确认发布条件、风险、回滚和指标闭环。", "workflow": "product.release.review", "skill": "review-product-release"},
-    {"id": "weekly-deck", "display_name": "周五工作汇报", "description": "汇总本周事实并生成经确认的 PPT。", "workflow": "shared.reporting.weekly-deck", "skill": "build-director-decks"}
+    {"id": "weekly-deck", "display_name": "周五工作汇报", "description": "汇总本周事实并通过 PPT 工作室生成经确认的 PPT。", "workflow": "shared.reporting.weekly-deck-v2", "skill": "build-director-decks"}
   ]
 }

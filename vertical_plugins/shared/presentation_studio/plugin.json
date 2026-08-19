@@ -1,0 +1,15 @@
+{
+  "api_version": "1.0",
+  "id": "shared.presentation-studio",
+  "version": "1.0.0",
+  "display_name": "PPT 工作室",
+  "description": "将需求澄清、证据绑定、大纲、逐页策划、设计令牌和正式 PPT 审批组织为可恢复的受管流程。",
+  "category": "shared",
+  "permissions": ["web.read", "knowledge.read", "presentation.plan.write", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "shared.documents", "version": ">=1.0.0"}
+  ],
+  "skills": ["plan-director-presentations"],
+  "workflows": ["workflows/presentation-studio.json"]
+}

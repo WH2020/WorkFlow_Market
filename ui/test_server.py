@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from http import HTTPStatus
 from pathlib import Path
+from unittest.mock import patch
 
 from ui import server
 
@@ -10,13 +11,32 @@ from ui import server
 class ControlCentreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.old_runtime, self.old_tasks, self.old_requests = server.RUNTIME, server.TASKS, server.REQUESTS
+        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans = (
+            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS
+        )
         server.RUNTIME = Path(self.temporary.name)
         server.TASKS = server.RUNTIME / "tasks"
         server.REQUESTS = server.RUNTIME / "requests"
+        server.PRESENTATION_PLANS = server.RUNTIME / "presentation-plans"
+
+    def write_plan(self, task_id="task-ppt", **changes):
+        plan = {
+            "schema_version": "1.0", "task_id": task_id, "profile_id": "market-director",
+            "phase": "outline", "version": 1, "context_snapshot_sha256": "a" * 64,
+            "outline": [
+                {"slide_id": f"slide-{index}", "order": index, "conclusion_title": f"页面 {index}"}
+                for index in range(1, 5)
+            ],
+        }
+        plan.update(changes)
+        plan["plan_sha256"] = server.presentation_plan_sha256(plan)
+        server.atomic_json(server.PRESENTATION_PLANS / f"{task_id}.json", plan)
+        return plan
 
     def tearDown(self):
-        server.RUNTIME, server.TASKS, server.REQUESTS = self.old_runtime, self.old_tasks, self.old_requests
+        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS = (
+            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans
+        )
         self.temporary.cleanup()
 
     def test_atomic_json_round_trip(self):
@@ -71,6 +91,39 @@ class ControlCentreTests(unittest.TestCase):
             server.ROOT = previous_root
         self.assertEqual(summary["records"], 1)
 
+    def test_presentation_brief_limits_match_the_plan_contract(self):
+        brief = {
+            "schema_version": "1.0", "scene": "industry", "mode": "standard",
+            "topic": "主题", "audience": "管理层", "purpose": "形成判断", "occasion": "专题会", "language": "zh-CN",
+            "duration_minutes": 15, "target_slides": 6,
+            "design_system": {"token_id": "technology-research"},
+            "source_scope": "public-web-and-profile-knowledge", "confidentiality": "internal",
+            "expected_decision": "确认下一步", "output_name": "research.pptx",
+        }
+        request = f"[PRESENTATION_BRIEF]\n{json.dumps(brief, ensure_ascii=False)}\n[/PRESENTATION_BRIEF]"
+        self.assertEqual(server.validate_presentation_brief_request(request)["target_slides"], 6)
+        for field, length in (("topic", 241), ("expected_decision", 501)):
+            invalid = {**brief, field: "字" * length}
+            invalid_request = f"[PRESENTATION_BRIEF]\n{json.dumps(invalid, ensure_ascii=False)}\n[/PRESENTATION_BRIEF]"
+            with self.assertRaises(ValueError):
+                server.validate_presentation_brief_request(invalid_request)
+        invalid_scope = {**brief, "source_scope": "internal"}
+        with self.assertRaises(ValueError):
+            server.validate_presentation_brief_request(
+                f"[PRESENTATION_BRIEF]\n{json.dumps(invalid_scope, ensure_ascii=False)}\n[/PRESENTATION_BRIEF]"
+            )
+
+    def test_presentation_plan_is_task_bound_and_filters_internal_fields(self):
+        server.PRESENTATION_PLANS.mkdir(parents=True)
+        self.write_plan(
+            "task-a", version=2, outline=[{"conclusion_title": "本周结论"}], internal_secret="hidden",
+        )
+        plan = server.presentation_plan("task-a")
+        self.assertEqual(plan["outline"][0]["conclusion_title"], "本周结论")
+        self.assertNotIn("internal_secret", plan)
+        server.atomic_json(server.PRESENTATION_PLANS / "task-b.json", {"task_id": "another-task"})
+        self.assertIsNone(server.presentation_plan("task-b"))
+
     def test_approval_must_bind_the_frozen_write_hash(self):
         task = {
             "task_id": "task-a", "version": 7, "status": "waiting_approval",
@@ -97,6 +150,153 @@ class ControlCentreTests(unittest.TestCase):
         self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
         self.assertEqual(saved["approval_request"]["intent_id"], "intent-a")
         self.assertEqual(saved["approval_request"]["payload_sha256"], "a" * 64)
+
+    def test_presentation_revision_creates_a_new_request_and_rejects_the_old_plan(self):
+        task = {
+            "task_id": "task-ppt", "profile_id": "market-director", "service_id": "presentation-studio",
+            "workflow_id": "shared.presentation.studio", "version": 4, "status": "waiting_approval",
+        }
+        server.atomic_json(server.TASKS / "task-ppt.json", task)
+        plan = self.write_plan()
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        payload = {
+            "version": 4, "plan_sha256": plan["plan_sha256"],
+            "outline": [
+                {"slide_id": "slide-2", "title": "调整后的第二页"},
+                {"slide_id": "slide-1", "title": "调整后的第一页"},
+                {"slide_id": "slide-3", "title": "第三页"},
+                {"slide_id": "slide-4", "title": "第四页"},
+            ],
+        }
+        profile = {"id": "market-director", "services": [{"id": "presentation-studio"}]}
+        with patch("ui.server.profiles", return_value=[profile]):
+            handler.create_presentation_revision("task-ppt", payload)
+
+        self.assertEqual(replies[-1][0], HTTPStatus.CREATED)
+        saved_task = server.load_json(server.TASKS / "task-ppt.json")
+        self.assertEqual(saved_task["approval_request"]["decision"], "reject")
+        request = server.load_json(next(server.REQUESTS.glob("*.json")))
+        self.assertEqual(request["source"], "local-workbench")
+        self.assertEqual(request["request_kind"], "presentation-plan-revision")
+        self.assertEqual(request["revision_of_task_id"], "task-ppt")
+        self.assertIn("调整后的第二页", request["request"])
+        self.assertLess(request["request"].index("调整后的第二页"), request["request"].index("调整后的第一页"))
+
+    def test_presentation_revision_rejects_a_stale_plan_hash(self):
+        server.atomic_json(server.TASKS / "task-ppt.json", {
+            "task_id": "task-ppt", "profile_id": "market-director", "service_id": "presentation-studio",
+            "workflow_id": "shared.presentation.studio", "version": 4, "status": "waiting_approval",
+        })
+        self.write_plan()
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        handler.create_presentation_revision("task-ppt", {
+            "version": 4, "plan_sha256": "c" * 64,
+            "outline": [{"slide_id": f"slide-{index}", "title": f"页面 {index}"} for index in range(1, 5)],
+        })
+        self.assertEqual(replies[-1][0], HTTPStatus.CONFLICT)
+        self.assertFalse(server.REQUESTS.exists())
+        self.assertNotIn("approval_request", server.load_json(server.TASKS / "task-ppt.json"))
+
+    def test_presentation_revision_rejects_plan_content_tampering_with_a_reused_hash(self):
+        server.atomic_json(server.TASKS / "task-ppt.json", {
+            "task_id": "task-ppt", "profile_id": "market-director", "service_id": "presentation-studio",
+            "workflow_id": "shared.presentation.studio", "version": 4, "status": "waiting_approval",
+        })
+        plan = self.write_plan()
+        tampered = server.load_json(server.PRESENTATION_PLANS / "task-ppt.json")
+        tampered["outline"][0]["conclusion_title"] = "未经受控流程修改的标题"
+        server.atomic_json(server.PRESENTATION_PLANS / "task-ppt.json", tampered)
+        self.assertIsNone(server.presentation_plan("task-ppt"))
+
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        handler.create_presentation_revision("task-ppt", {
+            "version": 4, "plan_sha256": plan["plan_sha256"],
+            "outline": [{"slide_id": f"slide-{index}", "title": f"页面 {index}"} for index in range(1, 5)],
+        })
+        self.assertEqual(replies[-1][0], HTTPStatus.CONFLICT)
+        self.assertFalse(server.REQUESTS.exists())
+        self.assertNotIn("approval_request", server.load_json(server.TASKS / "task-ppt.json"))
+
+    def test_presentation_revision_publish_recovers_after_task_rejection(self):
+        server.atomic_json(server.TASKS / "task-ppt.json", {
+            "task_id": "task-ppt", "profile_id": "market-director", "service_id": "presentation-studio",
+            "workflow_id": "shared.presentation.studio", "version": 4, "status": "waiting_approval", "audit": [],
+        })
+        plan = self.write_plan()
+        payload = {
+            "version": 4, "plan_sha256": plan["plan_sha256"],
+            "outline": [{"slide_id": f"slide-{index}", "title": f"页面 {index}"} for index in range(1, 5)],
+        }
+        profile = {"id": "market-director", "services": [{"id": "presentation-studio"}]}
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        real_atomic = server.atomic_json
+        calls = 0
+
+        def fail_final_publish(path, value):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError("simulated publish interruption")
+            real_atomic(path, value)
+
+        with patch("ui.server.profiles", return_value=[profile]), patch("ui.server.atomic_json", side_effect=fail_final_publish):
+            handler.create_presentation_revision("task-ppt", payload)
+
+        self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
+        request_path = next(server.REQUESTS.glob("*.json"))
+        self.assertEqual(server.load_json(request_path)["status"], "prepared")
+        self.assertEqual(server.load_json(server.TASKS / "task-ppt.json")["approval_request"]["decision"], "reject")
+        server.recover_prepared_presentation_revisions()
+        self.assertEqual(server.load_json(request_path)["status"], "requested")
+
+    def test_prepared_revision_is_not_published_if_process_stops_before_task_rejection(self):
+        server.atomic_json(server.TASKS / "task-ppt.json", {
+            "task_id": "task-ppt", "profile_id": "market-director", "service_id": "presentation-studio",
+            "workflow_id": "shared.presentation.studio", "version": 4, "status": "waiting_approval", "audit": [],
+        })
+        plan = self.write_plan()
+        payload = {
+            "version": 4, "plan_sha256": plan["plan_sha256"],
+            "outline": [{"slide_id": f"slide-{index}", "title": f"页面 {index}"} for index in range(1, 5)],
+        }
+        profile = {"id": "market-director", "services": [{"id": "presentation-studio"}]}
+        handler = object.__new__(server.ControlHandler)
+        handler.send_json = lambda *_args: None
+        real_atomic = server.atomic_json
+        calls = 0
+
+        def stop_before_rejection(path, value):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise SystemExit("simulated process stop")
+            real_atomic(path, value)
+
+        with patch("ui.server.profiles", return_value=[profile]), patch("ui.server.atomic_json", side_effect=stop_before_rejection):
+            with self.assertRaises(SystemExit):
+                handler.create_presentation_revision("task-ppt", payload)
+
+        request_path = next(server.REQUESTS.glob("*.json"))
+        self.assertEqual(server.load_json(request_path)["status"], "prepared")
+        self.assertNotIn("approval_request", server.load_json(server.TASKS / "task-ppt.json"))
+        server.recover_prepared_presentation_revisions()
+        self.assertEqual(server.load_json(request_path)["status"], "prepared")
+
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        with patch("ui.server.profiles", return_value=[profile]):
+            handler.create_presentation_revision("task-ppt", payload)
+        self.assertEqual(replies[-1][0], HTTPStatus.CREATED)
+        self.assertEqual(server.load_json(request_path)["status"], "requested")
+        self.assertEqual(server.load_json(server.TASKS / "task-ppt.json")["approval_request"]["decision"], "reject")
 
 
 if __name__ == "__main__":

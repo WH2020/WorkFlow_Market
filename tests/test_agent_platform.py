@@ -17,22 +17,24 @@ ROOT = Path(__file__).resolve().parents[1]
 class PlatformTests(unittest.TestCase):
     def test_repository_bundles_validate(self) -> None:
         report = Platform(ROOT).validate_all()
-        self.assertEqual(11, report.plugins)
-        self.assertEqual(12, report.workflows)
+        self.assertEqual(12, report.plugins)
+        self.assertEqual(14, report.workflows)
         self.assertEqual(2, report.profiles)
-        self.assertEqual(12, report.services)
+        self.assertEqual(14, report.services)
 
     def test_market_and_product_profiles_resolve_dependencies(self) -> None:
         platform = Platform(ROOT)
         market = platform.resolve_profile("market-director")
         product = platform.resolve_profile("product-director")
         self.assertIn("shared.knowledge", market["resolved_plugins"])
+        self.assertIn("shared.presentation-studio", market["resolved_plugins"])
         self.assertIn("market.government", market["resolved_plugins"])
         self.assertIn("product.discovery", product["resolved_plugins"])
         self.assertIn("product.requirements", product["resolved_plugins"])
         self.assertIn("product.metrics", product["resolved_plugins"])
         self.assertIn("product.roadmap", product["resolved_plugins"])
         self.assertIn("product.release", product["resolved_plugins"])
+        self.assertIn("shared.presentation-studio", product["resolved_plugins"])
         self.assertNotIn("market.sales", product["resolved_plugins"])
 
     def test_resolved_profiles_contain_no_chat_import_reference(self) -> None:
@@ -253,6 +255,24 @@ class PlatformTests(unittest.TestCase):
         approval = next(node for node in weekly_nodes if node["type"] == "approval")
         self.assertTrue(approval["gate"])
         self.assertEqual("human_gate", approval["execution_mode"])
+        weekly_v2 = platform.plan_workflow("shared.reporting.weekly-deck-v2", "market-director")
+        weekly_v2_nodes = [node for stage in weekly_v2["stages"] for node in stage["nodes"]]
+        self.assertEqual(
+            {"collect_week", "build_payload", "validate_payload", "approve", "render_deck"},
+            {node["id"] for node in weekly_nodes},
+        )
+        self.assertIn("build_plan", {node["id"] for node in weekly_v2_nodes})
+        self.assertIn("save_plan", {node["id"] for node in weekly_v2_nodes})
+        market_services = {service["id"]: service for service in platform.resolve_profile("market-director")["profile"]["services"]}
+        self.assertEqual("shared.reporting.weekly-deck-v2", market_services["weekly-deck"]["workflow"])
+
+        studio = platform.plan_workflow("shared.presentation.studio", "market-director")
+        studio_nodes = [node for stage in studio["stages"] for node in stage["nodes"]]
+        self.assertEqual(2, sum(node["type"] == "approval" for node in studio_nodes))
+        self.assertEqual(
+            ["presentation.plan.write", "presentation.plan.write"],
+            [node["tool"] for node in studio_nodes if node.get("tool") == "presentation.plan.write"],
+        )
 
     def _sample_workflow(self) -> tuple[dict[str, object], dict[str, object]]:
         plugin: dict[str, object] = {

@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { assertDeckMatchesWeeklySnapshot, registerDataAdapters } from "./data-adapters.ts";
+import { assertDeckMatchesEvidenceContext, registerDataAdapters } from "./data-adapters.ts";
 import {
   TaskStore,
   approveNode,
@@ -107,6 +107,7 @@ const LOGICAL_TOOL_PERMISSIONS = new Map<string, readonly string[]>([
   ["web.search", ["web.read"]],
   ["web.open", ["web.read"]],
   ["pdf.read", ["knowledge.read"]],
+  ["presentation.plan.write", ["presentation.plan.write"]],
   ["weekly.snapshot", ["knowledge.read", "sales.read", "task.audit.read", "artifact.read"]],
   ["artifact.deck.write", ["artifact.write"]],
 ]);
@@ -489,6 +490,7 @@ const ADAPTER_TO_LOGICAL_TOOL = new Map([
   ["director_web_search", "web.search"],
   ["director_web_open", "web.open"],
   ["director_pdf_read", "pdf.read"],
+  ["director_presentation_plan_write", "presentation.plan.write"],
   ["director_weekly_snapshot", "weekly.snapshot"],
   ["director_artifact_deck_write", "artifact.deck.write"],
 ]);
@@ -518,6 +520,9 @@ export type WorkbenchRequest = {
   request: string;
   created_at: string;
   source: "local-workbench";
+  request_kind?: "presentation-plan-revision";
+  revision_of_task_id?: string;
+  source_plan_sha256?: string;
   task_id?: string;
   accepted_at?: string;
 };
@@ -547,6 +552,11 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
     request.request.trim().length < 1 ||
     request.request.length > 4000 ||
     typeof request.created_at !== "string" ||
+    (request.request_kind !== undefined && request.request_kind !== "presentation-plan-revision") ||
+    (request.revision_of_task_id !== undefined && !safe(request.revision_of_task_id)) ||
+    (request.source_plan_sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(request.source_plan_sha256)) ||
+    (request.request_kind === "presentation-plan-revision" &&
+      (!safe(request.revision_of_task_id) || !/^[a-f0-9]{64}$/u.test(request.source_plan_sha256 ?? ""))) ||
     (expectedRequestId !== undefined && request.request_id !== expectedRequestId)
   ) {
     throw new Error("工作台请求字段无效或与文件名不一致");
@@ -1080,7 +1090,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       consumeExternalDecision();
       if (!activeTask || isTerminal(activeTask)) throw new Error("当前会话没有运行中的受管任务");
       if (params.logical_tool === "artifact.deck.write") {
-        assertDeckMatchesWeeklySnapshot(projectRoot, activeTask.task_id, activeTask.profile_id, params.payload as never);
+        assertDeckMatchesEvidenceContext(projectRoot, activeTask.task_id, activeTask.profile_id, params.payload as never);
       }
       const previous = activeTask;
       const workflow = workflowFor(previous);

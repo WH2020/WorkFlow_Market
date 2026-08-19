@@ -1,16 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { deflateSync } from "node:zlib";
 import {
+  assertDeckMatchesPresentationPlan,
   assertDeckMatchesWeeklySnapshot,
   collectWeeklySnapshot,
   holdDeckIntentLockForTests,
   parseCsv,
+  publishPreparedDeckArtifactForTests,
+  readCommittedDeckReceipt,
   registerDataAdapters,
+  readPresentationPlan,
   serializeCsv,
+  sourceLocationMatchesForTests,
 } from "../extensions/data-adapters.ts";
 import { setSourceRequestForTests } from "../extensions/source-readers.ts";
 import { payloadSha256 } from "../extensions/task-runtime.ts";
@@ -306,7 +312,7 @@ test("web open only accepts discovered or user-provided public URLs and strips e
 });
 
 test("local PDF reader is confined to approved input folders and returns page evidence", async () => {
-  const state = fixture();
+  const state = fixture(false, "task-pdf-evidence", "market-director");
   try {
     mkdirSync(join(state.root, "inputs"), { recursive: true });
     const stream = "BT /F1 12 Tf 72 720 Td (PDF evidence page one) Tj ET";
@@ -344,6 +350,12 @@ test("local PDF reader is confined to approved input folders and returns page ev
     assert.equal(result.details.extracted_pages, 1);
     assert.equal(result.details.truncated, true);
     assert.match(result.details.knowledge_mutation.changes.notes, /#page=1/);
+    const evidenceState = JSON.parse(readFileSync(
+      join(state.root, ".pi", "director-runtime", "evidence", "task-pdf-evidence.json"),
+      "utf8",
+    )) as { presentation_sources: Record<string, { page_count?: number; extracted_pages?: number[] }> };
+    assert.equal(evidenceState.presentation_sources[result.details.source_id]?.page_count, 2);
+    assert.deepEqual(evidenceState.presentation_sources[result.details.source_id]?.extracted_pages, [1]);
 
     const compressedBomb = deflateSync(Buffer.alloc(8 * 1024 * 1024 + 1, 0x41));
     const bombPdf = Buffer.concat([
@@ -472,6 +484,217 @@ test("deck adapter rejects path traversal before invoking the artifact builder",
   }
 });
 
+test("presentation plans are task/profile/evidence bound, versioned and exact-deck frozen", async () => {
+  const state = fixture(false, "task-presentation-plan", "market-director");
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.BRAVE_SEARCH_API_KEY;
+  try {
+    process.env.BRAVE_SEARCH_API_KEY = "test-key";
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      web: { results: [{ title: "具身智能证据", url: "https://93.184.216.34/embodied", description: "公开证据" }] },
+    }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch;
+    setSourceRequestForTests(async () => new Response(
+      "<html><head><title>具身智能证据</title></head><body><p>这是当前任务读取并登记的公开证据正文。</p></body></html>",
+      { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
+    ));
+    await state.tools.get("director_web_search")!.execute("search", { queries: ["具身智能"] });
+    const opened = await state.tools.get("director_web_open")!.execute("open", {
+      items: [{ url: "https://93.184.216.34/embodied" }],
+    }) as { details: { sources: Array<{ source_id: string; title: string; url: string }> } };
+    const source = opened.details.sources[0]!;
+    const outline = Array.from({ length: 4 }, (_, index) => ({
+      slide_id: `slide-${index + 1}`,
+      order: index + 1,
+      conclusion_title: `第 ${index + 1} 页结论`,
+      evidence_refs: index === 0 ? [source.source_id] : [],
+    }));
+    const base = {
+      schema_version: "1.0",
+      project_id: "embodied-research",
+      profile_id: "market-director",
+      scene: "industry",
+      mode: "standard",
+      period: { start: "2026-08-01", end: "2026-08-19" },
+      brief: {
+        topic: "具身智能行业研究",
+        audience: "管理层",
+        purpose: "形成下一步研究决策",
+        occasion: "内部专题会",
+        language: "zh-CN",
+        confidentiality: "internal",
+        target_slides: 4,
+      },
+      evidence_refs: [source.source_id],
+      outline,
+      design_system: { token_id: "technology-research" },
+      output_name: "embodied-research.pptx",
+    };
+    const outlineResult = await state.tools.get("director_presentation_plan_write")!.execute("outline", {
+      ...base,
+      phase: "outline",
+      version: 1,
+    }) as { details: { plan_sha256: string; context_snapshot_sha256: string } };
+    const slides = outline.map((item, index) => ({
+      ...item,
+      audience_takeaway: `理解第 ${index + 1} 页结论`,
+      facts: index === 0 ? [{ text: "正文已由当前任务读取", evidence_refs: [source.source_id] }] : [],
+      analyses: index === 0 ? ["这是分析判断"] : [],
+      hypotheses: [],
+      unknowns: index > 0 ? ["待补充事实"] : [],
+      layout_intent: "single-focus",
+      visual_assets: [],
+      speaker_notes: "内部讲者提示",
+      warnings: [],
+      render: {
+        title: item.conclusion_title,
+        layout_intent: "single-focus" as const,
+        body: [index === 0 ? "正文已由当前任务读取" : "未知：待补充事实"],
+        notes: "内部讲者提示",
+        ...(index === 0 ? { sources: [{ title: source.title, url: source.url }] } : {}),
+      },
+    }));
+    await assert.rejects(
+      () => state.tools.get("director_presentation_plan_write")!.execute("missing-context-binding", {
+        ...base, phase: "final", version: 2,
+        expected_plan_sha256: outlineResult.details.plan_sha256,
+        slides,
+      }),
+      /必须绑定前一版 context_snapshot_sha256/u,
+    );
+    await assert.rejects(
+      () => state.tools.get("director_presentation_plan_write")!.execute("replaced-outline", {
+        ...base, phase: "final", version: 2,
+        expected_plan_sha256: outlineResult.details.plan_sha256,
+        expected_context_snapshot_sha256: outlineResult.details.context_snapshot_sha256,
+        outline: outline.map((item, index) => index === 0 ? { ...item, conclusion_title: "未经重新确认的新大纲" } : item),
+        slides,
+      }),
+      /改变了已确认/u,
+    );
+    await assert.rejects(
+      () => state.tools.get("director_presentation_plan_write")!.execute("fake-web-page", {
+        ...base, phase: "final", version: 2,
+        expected_plan_sha256: outlineResult.details.plan_sha256,
+        expected_context_snapshot_sha256: outlineResult.details.context_snapshot_sha256,
+        slides: slides.map((slide, index) => index === 0
+          ? { ...slide, render: { ...slide.render, sources: [{ title: source.title, url: source.url, page: 1 }] } }
+          : slide),
+      }),
+      /render.sources (?:缺少证据|包含未登记来源)/u,
+    );
+    await assert.rejects(
+      () => state.tools.get("director_presentation_plan_write")!.execute("changed-render-title", {
+        ...base, phase: "final", version: 2,
+        expected_plan_sha256: outlineResult.details.plan_sha256,
+        expected_context_snapshot_sha256: outlineResult.details.context_snapshot_sha256,
+        slides: slides.map((slide, index) => index === 0 ? { ...slide, render: { ...slide.render, title: "未经确认的标题" } } : slide),
+      }),
+      /render\.title 必须与已确认结论标题一致/u,
+    );
+    await assert.rejects(
+      () => state.tools.get("director_presentation_plan_write")!.execute("unmapped-render-claim", {
+        ...base, phase: "final", version: 2,
+        expected_plan_sha256: outlineResult.details.plan_sha256,
+        expected_context_snapshot_sha256: outlineResult.details.context_snapshot_sha256,
+        slides: slides.map((slide, index) => index === 0 ? { ...slide, render: { ...slide.render, body: ["未进入策划的新事实"] } } : slide),
+      }),
+      /包含未映射到策划事实/u,
+    );
+    const finalResult = await state.tools.get("director_presentation_plan_write")!.execute("final", {
+      ...base,
+      phase: "final",
+      version: 2,
+      expected_plan_sha256: outlineResult.details.plan_sha256,
+      expected_context_snapshot_sha256: outlineResult.details.context_snapshot_sha256,
+      slides,
+    }) as { details: { plan_sha256: string; context_snapshot_sha256: string } };
+    const stored = readPresentationPlan(state.root, "task-presentation-plan")!;
+    assert.equal(stored.version, 2);
+    assert.equal(stored.plan_sha256, finalResult.details.plan_sha256);
+    const payload = {
+      schema_version: "1.0" as const,
+      snapshot_sha256: finalResult.details.context_snapshot_sha256,
+      plan_sha256: finalResult.details.plan_sha256,
+      output_name: base.output_name,
+      profile_id: "market-director" as const,
+      template_id: "technology-research" as const,
+      period: base.period,
+      slides: slides.map((slide) => slide.render),
+    };
+    assert.doesNotThrow(() => assertDeckMatchesPresentationPlan(state.root, "task-presentation-plan", "market-director", payload));
+    assert.throws(
+      () => assertDeckMatchesPresentationPlan(state.root, "task-presentation-plan", "market-director", {
+        ...payload,
+        slides: payload.slides.map((slide, index) => index === 0 ? { ...slide, title: "审批后篡改" } : slide),
+      }),
+      /slides 与当前 final plan/u,
+    );
+    await assert.rejects(
+      () => state.tools.get("director_presentation_plan_write")!.execute("stale", {
+        ...base,
+        phase: "final",
+        version: 2,
+        expected_plan_sha256: outlineResult.details.plan_sha256,
+        slides,
+      }),
+      /版本冲突/u,
+    );
+    const planPath = join(state.root, ".pi", "director-runtime", "presentation-plans", "task-presentation-plan.json");
+    const tampered = JSON.parse(readFileSync(planPath, "utf8")) as { brief: { topic: string } };
+    tampered.brief.topic = "绕过适配器直接修改";
+    writeFileSync(planPath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+    assert.throws(
+      () => readPresentationPlan(state.root, "task-presentation-plan"),
+      /内容与 plan_sha256 不一致/u,
+    );
+  } finally {
+    setSourceRequestForTests(undefined);
+    if (originalKey === undefined) delete process.env.BRAVE_SEARCH_API_KEY;
+    else process.env.BRAVE_SEARCH_API_KEY = originalKey;
+    globalThis.fetch = originalFetch;
+    state.cleanup();
+  }
+});
+
+test("deck page citations are limited to extracted PDF pages and rejected for non-PDF sources", () => {
+  const hash = "a".repeat(64);
+  assert.equal(sourceLocationMatchesForTests(
+    { title: "PDF", path: "inputs/report.pdf", sha256: hash, page: 1 },
+    {
+      source_id: "pdf-source", title: "PDF", source_type: "pdf", path: "inputs/report.pdf",
+      content_sha256: hash, page_count: 2, extracted_pages: [1], reliability: "standard", accessed_at: "2026-08-19T00:00:00.000Z",
+    },
+  ), true);
+  assert.equal(sourceLocationMatchesForTests(
+    { title: "PDF", path: "inputs/report.pdf", sha256: hash, page: 2 },
+    {
+      source_id: "pdf-source", title: "PDF", source_type: "pdf", path: "inputs/report.pdf",
+      content_sha256: hash, page_count: 2, extracted_pages: [1], reliability: "standard", accessed_at: "2026-08-19T00:00:00.000Z",
+    },
+  ), false);
+  assert.equal(sourceLocationMatchesForTests(
+    { title: "PDF", path: "inputs/report.pdf", sha256: hash },
+    {
+      source_id: "pdf-source", title: "PDF", source_type: "pdf", path: "inputs/report.pdf",
+      content_sha256: hash, page_count: 2, extracted_pages: [1], reliability: "standard", accessed_at: "2026-08-19T00:00:00.000Z",
+    },
+  ), false);
+  assert.equal(sourceLocationMatchesForTests(
+    { title: "网页", url: "https://example.com/source", page: 1 },
+    {
+      source_id: "web-source", title: "网页", source_type: "web", url: "https://example.com/source",
+      reliability: "standard", accessed_at: "2026-08-19T00:00:00.000Z",
+    },
+  ), false);
+  assert.equal(sourceLocationMatchesForTests(
+    { title: "伪造标题", url: "https://example.com/source" },
+    {
+      source_id: "web-source", title: "真实标题", source_type: "web", url: "https://example.com/source",
+      reliability: "standard", accessed_at: "2026-08-19T00:00:00.000Z",
+    },
+  ), false);
+});
+
 test("deck evidence validation failure reports not_committed after the commit hook", async () => {
   const state = fixture(false, "task-deck-missing-evidence", "market-director");
   try {
@@ -546,6 +769,14 @@ test("deck payload is bound to the current task profile, period, snapshot and so
       () => assertDeckMatchesWeeklySnapshot(state.root, "task-deck-binding", "market-director", rogueUrlPayload),
       /URL 来源不在当前 weekly\.snapshot/u,
     );
+    const fakePagePayload = structuredClone(payload);
+    fakePagePayload.slides[0]!.sources = [{
+      title: "非 PDF 快照不能伪造页码", path: knowledgeSource.path, sha256: knowledgeSource.sha256, page: 1,
+    }] as never;
+    assert.throws(
+      () => assertDeckMatchesWeeklySnapshot(state.root, "task-deck-binding", "market-director", fakePagePayload),
+      /页码不在本任务实际提取的 PDF 页/u,
+    );
 
     const restartedTools = new Map<string, RegisteredTool>();
     registerDataAdapters({ registerTool(tool: RegisteredTool & { name: string }) { restartedTools.set(tool.name, tool); } } as never, {
@@ -597,6 +828,114 @@ test("the same deck intent is exclusively locked across the full commit lifecycl
     releaseAfterRetry();
   } finally {
     state.cleanup();
+  }
+});
+
+test("a failed deck link removes only the owned prepared receipt so retry can rebuild", () => {
+  const root = mkdtempSync(join(tmpdir(), "director-deck-link-failure-"));
+  try {
+    const receiptDirectory = join(root, ".pi", "director-runtime", "artifact-commits");
+    const outputDirectory = join(root, "outputs");
+    const qaDirectory = join(root, ".pi", "director-runtime", "deck-jobs", "job", "qa");
+    mkdirSync(receiptDirectory, { recursive: true });
+    mkdirSync(outputDirectory, { recursive: true });
+    mkdirSync(qaDirectory, { recursive: true });
+    const temporaryDeckPath = join(root, "artifact.pptx");
+    const outputPath = join(outputDirectory, "deck.pptx");
+    const receiptPath = join(receiptDirectory, "intent-link-failure.json");
+    writeFileSync(temporaryDeckPath, "deck-content", "utf8");
+    writeFileSync(join(qaDirectory, "deck-montage.webp"), "preview", "utf8");
+    const receipt = {
+      schema_version: "1.0", intent_id: "intent-link-failure", task_id: "task-deck",
+      payload_sha256: "a".repeat(64), owner: "director_artifact_deck_write",
+      target: "outputs/deck.pptx", status: "prepared",
+      artifact_sha256: createHash("sha256").update("deck-content").digest("hex"),
+      bytes: 12, slide_count: 4,
+      qa: {
+        slides_test: "Test passed. No overflow detected.",
+        preview_directory: ".pi/director-runtime/deck-jobs/job/qa",
+        montage: ".pi/director-runtime/deck-jobs/job/qa/deck-montage.webp",
+      },
+      updated_at: new Date().toISOString(),
+    } as Parameters<typeof publishPreparedDeckArtifactForTests>[3];
+    const permissionError = Object.assign(new Error("permission denied"), { code: "EPERM" });
+    assert.throws(
+      () => publishPreparedDeckArtifactForTests(
+        receiptPath, temporaryDeckPath, outputPath, receipt, () => undefined,
+        {
+          writeReceipt: (path, content) => writeFileSync(path, content, "utf8"),
+          linkArtifact: () => { throw permissionError; },
+        },
+      ),
+      /permission denied/u,
+    );
+    assert.equal(readFileSync(temporaryDeckPath, "utf8"), "deck-content");
+    assert.equal(existsSync(receiptPath), false);
+    assert.equal(existsSync(outputPath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a published deck with an interrupted receipt finalize is promoted on retry", () => {
+  const root = mkdtempSync(join(tmpdir(), "director-deck-finalize-failure-"));
+  try {
+    const receiptDirectory = join(root, ".pi", "director-runtime", "artifact-commits");
+    const outputDirectory = join(root, "outputs");
+    const qaDirectory = join(root, ".pi", "director-runtime", "deck-jobs", "job", "qa");
+    mkdirSync(receiptDirectory, { recursive: true });
+    mkdirSync(outputDirectory, { recursive: true });
+    mkdirSync(qaDirectory, { recursive: true });
+    const temporaryDeckPath = join(root, "artifact.pptx");
+    const outputPath = join(outputDirectory, "deck.pptx");
+    const receiptPath = join(receiptDirectory, "intent-finalize-failure.json");
+    writeFileSync(temporaryDeckPath, "deck-content", "utf8");
+    writeFileSync(join(qaDirectory, "deck-montage.webp"), "preview", "utf8");
+    const receipt = {
+      schema_version: "1.0", intent_id: "intent-finalize-failure", task_id: "task-deck",
+      payload_sha256: "b".repeat(64), owner: "director_artifact_deck_write",
+      target: "outputs/deck.pptx", status: "prepared",
+      artifact_sha256: createHash("sha256").update("deck-content").digest("hex"),
+      bytes: 12, slide_count: 4,
+      qa: {
+        slides_test: "Test passed. No overflow detected.",
+        preview_directory: ".pi/director-runtime/deck-jobs/job/qa",
+        montage: ".pi/director-runtime/deck-jobs/job/qa/deck-montage.webp",
+      },
+      updated_at: new Date().toISOString(),
+    } as Parameters<typeof publishPreparedDeckArtifactForTests>[3];
+    let receiptWrites = 0;
+    let artifactPublished = false;
+    assert.throws(
+      () => publishPreparedDeckArtifactForTests(
+        receiptPath,
+        temporaryDeckPath,
+        outputPath,
+        receipt,
+        (progress) => { artifactPublished ||= progress.artifactPublished === true; },
+        {
+          writeReceipt: (path, content) => {
+            receiptWrites += 1;
+            if (receiptWrites === 2) throw new Error("simulated finalize interruption");
+            writeFileSync(path, content, "utf8");
+          },
+          linkArtifact: (source, target) => linkSync(source, target),
+        },
+      ),
+      /simulated finalize interruption/u,
+    );
+    assert.equal(artifactPublished, true);
+    assert.equal(JSON.parse(readFileSync(receiptPath, "utf8")).status, "prepared");
+    const recovered = readCommittedDeckReceipt(
+      root,
+      receiptPath,
+      { intent_id: "intent-finalize-failure", task_id: "task-deck", profile_id: "market-director", payload_sha256: "b".repeat(64) },
+      outputPath,
+    );
+    assert.equal(recovered?.status, "committed");
+    assert.equal(JSON.parse(readFileSync(receiptPath, "utf8")).status, "committed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

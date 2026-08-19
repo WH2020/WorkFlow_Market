@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import os
+import re
 import secrets
 import tempfile
 import uuid
@@ -27,6 +30,7 @@ UI_ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".pi" / "director-runtime"
 TASKS = RUNTIME / "tasks"
 REQUESTS = RUNTIME / "requests"
+PRESENTATION_PLANS = RUNTIME / "presentation-plans"
 PROFILES = ROOT / "profiles"
 PLUGINS = ROOT / "vertical_plugins"
 OUTPUTS = ROOT / "outputs"
@@ -91,6 +95,76 @@ def safe_id(value: str) -> str:
     return value
 
 
+def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
+    prefix, suffix = "[PRESENTATION_BRIEF]", "[/PRESENTATION_BRIEF]"
+    if not request_text.startswith(prefix) or not request_text.endswith(suffix):
+        raise ValueError("PPT 工作室请求必须使用结构化 brief")
+    value = json.loads(request_text[len(prefix):-len(suffix)].strip())
+    if not isinstance(value, dict) or value.get("schema_version") != "1.0":
+        raise ValueError("PPT brief 版本无效")
+    limits = {"topic": 240, "audience": 240, "purpose": 500, "occasion": 240, "language": 40}
+    for field, maximum in limits.items():
+        candidate = value.get(field)
+        if not isinstance(candidate, str) or not candidate.strip() or len(candidate) > maximum:
+            raise ValueError(f"PPT brief.{field} 无效或超过 {maximum} 字")
+    if value.get("scene") not in {"weekly", "industry", "government", "custom"}:
+        raise ValueError("PPT brief 场景无效")
+    if value.get("mode") not in {"quick", "standard", "strict"}:
+        raise ValueError("PPT brief 模式无效")
+    if value.get("confidentiality") not in {"internal", "restricted", "public"}:
+        raise ValueError("PPT brief 保密等级无效")
+    if value.get("source_scope") != "public-web-and-profile-knowledge":
+        raise ValueError("PPT 工作室首版只支持公开网页与当前 Profile 知识库")
+    if not isinstance(value.get("target_slides"), int) or not 4 <= value["target_slides"] <= 10:
+        raise ValueError("PPT brief 页数必须为 4–10")
+    if not isinstance(value.get("duration_minutes"), int) or not 3 <= value["duration_minutes"] <= 120:
+        raise ValueError("PPT brief 时长必须为 3–120 分钟")
+    decision = value.get("expected_decision")
+    if not isinstance(decision, str) or not decision.strip() or len(decision) > 500:
+        raise ValueError("PPT brief 期望决策无效或超过 500 字")
+    design = value.get("design_system")
+    if not isinstance(design, dict) or design.get("token_id") not in {"management-report", "government-program", "technology-research"}:
+        raise ValueError("PPT brief 设计令牌无效")
+    output_name = value.get("output_name")
+    if not isinstance(output_name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx", output_name) is None:
+        raise ValueError("PPT brief 输出文件名无效")
+    return value
+
+
+def canonical_plan_json(value: Any) -> str:
+    """Match the Pi runtime's canonicalEvidence encoding for finite JSON data."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("PPT plan 只能包含有限数字")
+        if value == 0:
+            return "0"
+        if value.is_integer():
+            return str(int(value))
+        return json.dumps(value, allow_nan=False, separators=(",", ":"))
+    if isinstance(value, list):
+        return f"[{','.join(canonical_plan_json(item) for item in value)}]"
+    if isinstance(value, dict):
+        pairs = (
+            f"{json.dumps(str(key), ensure_ascii=False, separators=(',', ':'))}:{canonical_plan_json(child)}"
+            for key, child in sorted(value.items(), key=lambda item: str(item[0]))
+        )
+        return f"{{{','.join(pairs)}}}"
+    raise ValueError("PPT plan 必须是有限 JSON 数据")
+
+
+def presentation_plan_sha256(plan: dict[str, Any]) -> str:
+    hash_base = {key: value for key, value in plan.items() if key not in {"plan_sha256", "updated_at"}}
+    return hashlib.sha256(canonical_plan_json(hash_base).encode("utf-8")).hexdigest()
+
+
 def profiles() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for path in sorted(PROFILES.glob("*/profile.json")):
@@ -116,7 +190,81 @@ def workflows() -> dict[str, dict[str, Any]]:
     return result
 
 
+def presentation_plan(task_id: str) -> dict[str, Any] | None:
+    """Return a task-bound planning view without scanning arbitrary paths."""
+    task_id = safe_id(task_id)
+    path = PRESENTATION_PLANS / f"{task_id}.json"
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 524_288:
+            return None
+        plan = load_json(path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    stored_hash = plan.get("plan_sha256")
+    context_hash = plan.get("context_snapshot_sha256")
+    if (
+        plan.get("schema_version") != "1.0" or plan.get("task_id") != task_id or
+        not isinstance(plan.get("version"), int) or plan["version"] < 1 or
+        not isinstance(stored_hash, str) or re.fullmatch(r"[a-f0-9]{64}", stored_hash) is None or
+        not isinstance(context_hash, str) or re.fullmatch(r"[a-f0-9]{64}", context_hash) is None
+    ):
+        return None
+    try:
+        computed_hash = presentation_plan_sha256(plan)
+    except (TypeError, ValueError):
+        return None
+    if not secrets.compare_digest(stored_hash, computed_hash):
+        return None
+    allowed = {
+        "schema_version", "task_id", "project_id", "profile_id", "scene", "mode", "phase", "version",
+        "period", "brief", "evidence_refs", "outline", "slides", "design_system", "output_name",
+        "context_snapshot_sha256", "plan_sha256", "warnings", "updated_at",
+    }
+    return {key: value for key, value in plan.items() if key in allowed}
+
+
+def recover_prepared_presentation_revisions() -> None:
+    """Publish only revisions whose old task durably records the matching rejection."""
+    if not REQUESTS.is_dir():
+        return
+    for path in sorted(REQUESTS.glob("request-revision-*.json"))[:500]:
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 16_384:
+                continue
+            record = load_json(path)
+            request_id = safe_id(str(record.get("request_id", "")))
+            task_id = safe_id(str(record.get("revision_of_task_id", "")))
+            if (
+                request_id != path.stem or record.get("status") != "prepared" or
+                record.get("source") != "local-workbench" or
+                record.get("request_kind") != "presentation-plan-revision"
+            ):
+                continue
+            task_path = TASKS / f"{task_id}.json"
+            if task_path.is_symlink() or not task_path.is_file():
+                continue
+            with exclusive_task(task_path):
+                task = load_json(task_path)
+                requested_by = f"local-workbench-revision:{request_id}"
+                approval = task.get("approval_request")
+                linked_pending = isinstance(approval, dict) and approval.get("decision") == "reject" and approval.get("requested_by") == requested_by
+                linked_audit = task.get("status") == "rejected" and any(
+                    isinstance(event, dict) and event.get("action") == "approval_rejected" and
+                    isinstance(event.get("note"), str) and event["note"].startswith(f"{requested_by} @ ")
+                    for event in task.get("audit", [])
+                )
+                if not linked_pending and not linked_audit:
+                    continue
+                record["status"] = "requested"
+                record["published_at"] = now()
+                atomic_json(path, record)
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            # A lock, partial file or unlinked task is retried on the next refresh.
+            continue
+
+
 def task_summaries() -> list[dict[str, Any]]:
+    recover_prepared_presentation_revisions()
     result: list[dict[str, Any]] = []
     if not TASKS.exists():
         return result
@@ -124,11 +272,14 @@ def task_summaries() -> list[dict[str, Any]]:
     for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True):
         try:
             task = load_json(path)
-            result.append({key: task.get(key) for key in (
+            summary = {key: task.get(key) for key in (
                 "task_id", "profile_id", "service_id", "workflow_id", "status", "current_stage",
                 "current_node", "waiting_node", "completed_nodes", "version", "created_at", "updated_at",
                 "approval_request", "pending_write", "artifacts", "request"
-            )})
+            )}
+            if isinstance(task.get("task_id"), str):
+                summary["presentation_plan"] = presentation_plan(task["task_id"])
+            result.append(summary)
         except (OSError, ValueError, json.JSONDecodeError):
             # A concurrently written file is simply omitted until the next refresh.
             continue
@@ -252,6 +403,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.create_request(payload)
             elif route.startswith("/api/tasks/") and route.endswith("/decision"):
                 self.decide(route.split("/")[3], payload)
+            elif route.startswith("/api/tasks/") and route.endswith("/presentation-revision"):
+                self.create_presentation_revision(route.split("/")[3], payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except (ValueError, KeyError, json.JSONDecodeError) as error:
@@ -269,6 +422,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
         service = next((item for item in profile["services"] if item["id"] == service_id), None)
         if service is None:
             raise ValueError("该服务不属于当前角色")
+        if service_id in {"presentation-studio", "weekly-deck"}:
+            validate_presentation_brief_request(request_text)
         request_id = f"request-{uuid.uuid4().hex[:12]}"
         record = {"schema_version": "1.0", "request_id": request_id, "status": "requested", "profile_id": profile_id,
                   "service_id": service_id, "workflow_id": service["workflow"], "request": request_text,
@@ -328,6 +483,138 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
             return
         self.send_json(HTTPStatus.ACCEPTED, {"task": task, "message": "操作已提交，等待 Pi 工作流确认。"})
+
+    def create_presentation_revision(self, task_id: str, payload: dict[str, Any]) -> None:
+        """Queue a new audited task instead of mutating an approved/frozen plan in place."""
+        task_id = safe_id(task_id)
+        expected_version = payload.get("version")
+        expected_plan_sha256 = str(payload.get("plan_sha256", ""))
+        outline = payload.get("outline")
+        if not isinstance(expected_version, int):
+            raise ValueError("缺少任务版本")
+        if len(expected_plan_sha256) != 64 or any(character not in "0123456789abcdef" for character in expected_plan_sha256):
+            raise ValueError("缺少有效的计划校验码")
+        if not isinstance(outline, list) or not 4 <= len(outline) <= 10:
+            raise ValueError("修订大纲必须包含 4–10 页")
+        normalized_outline: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for index, item in enumerate(outline):
+            if not isinstance(item, dict):
+                raise ValueError(f"第 {index + 1} 页大纲无效")
+            slide_id = safe_id(str(item.get("slide_id", "")))
+            if slide_id in seen_ids:
+                raise ValueError("大纲页面 ID 不能重复")
+            seen_ids.add(slide_id)
+            title = str(item.get("title", "")).strip()
+            if not title or len(title) > 120:
+                raise ValueError(f"第 {index + 1} 页标题必须为 1–120 字")
+            normalized_outline.append({"slide_id": slide_id, "order": index + 1, "conclusion_title": title})
+
+        task_path = TASKS / f"{task_id}.json"
+        if not task_path.is_file():
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在"})
+            return
+        request_id = f"request-revision-{hashlib.sha256(task_id.encode('utf-8')).hexdigest()[:16]}"
+        request_path = REQUESTS / f"{request_id}.json"
+        if request_path.is_symlink():
+            raise ValueError("修订请求路径不能是符号链接")
+        try:
+            with exclusive_task(task_path):
+                task = load_json(task_path)
+                requested_by = f"local-workbench-revision:{request_id}"
+                existing_approval = task.get("approval_request")
+                if (
+                    isinstance(existing_approval, dict) and existing_approval.get("decision") == "reject" and
+                    existing_approval.get("requested_by") == requested_by and task.get("version") == expected_version + 1 and
+                    request_path.is_file() and not request_path.is_symlink()
+                ):
+                    prepared = load_json(request_path)
+                    if (
+                        prepared.get("status") not in {"prepared", "requested"} or
+                        prepared.get("source_plan_sha256") != expected_plan_sha256 or
+                        prepared.get("revision_of_task_id") != task_id or prepared.get("request_id") != request_id
+                    ):
+                        self.send_json(HTTPStatus.CONFLICT, {"error": "修订恢复记录与当前任务不一致"})
+                        return
+                    if prepared.get("status") == "prepared":
+                        prepared["status"] = "requested"
+                        prepared["published_at"] = now()
+                        atomic_json(request_path, prepared)
+                    self.send_json(HTTPStatus.CREATED, {
+                        "request_id": request_id, "task": task,
+                        "message": "修订任务已从中断点恢复，等待 Pi 接手。",
+                    })
+                    return
+                if task.get("version") != expected_version:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务已更新，请刷新后重试", "task": task})
+                    return
+                if task.get("status") != "waiting_approval" or task.get("approval_request") is not None:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "只有尚未处理的大纲确认关口可以创建修订任务"})
+                    return
+                if task.get("pending_write") is not None:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "正式载荷已经冻结；请驳回后重新创建任务，不能在此修改"})
+                    return
+                plan = presentation_plan(task_id)
+                if not plan or plan.get("phase") not in {"outline", "final"}:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务没有可修订的 PPT 计划"})
+                    return
+                if plan.get("profile_id") != task.get("profile_id") or plan.get("plan_sha256") != expected_plan_sha256:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "PPT 计划已变化，请刷新后重试"})
+                    return
+                service_id = str(task.get("service_id", ""))
+                profile_id = str(task.get("profile_id", ""))
+                workflow_id = str(task.get("workflow_id", ""))
+                if service_id != "presentation-studio" or workflow_id != "shared.presentation.studio":
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务不是可修订的 PPT 工作室任务"})
+                    return
+                profile = next((item for item in profiles() if item["id"] == profile_id), None)
+                if profile is None or not any(service.get("id") == service_id for service in profile["services"]):
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "PPT 工作室服务与当前角色不匹配"})
+                    return
+                revision = {
+                    "schema_version": "1.0", "source_task_id": task_id,
+                    "source_plan_sha256": expected_plan_sha256, "outline": normalized_outline,
+                }
+                request_text = f"[PRESENTATION_PLAN_REVISION]\n{json.dumps(revision, ensure_ascii=False, indent=2)}\n[/PRESENTATION_PLAN_REVISION]"
+                if len(request_text) > 4000:
+                    raise ValueError("修订请求过大")
+                record = {
+                    "schema_version": "1.0", "request_id": request_id, "status": "prepared",
+                    "profile_id": profile_id, "service_id": service_id, "workflow_id": workflow_id,
+                    "request": request_text, "created_at": now(), "source": "local-workbench",
+                    "request_kind": "presentation-plan-revision",
+                    "revision_of_task_id": task_id, "source_plan_sha256": expected_plan_sha256,
+                    "source_task_version": expected_version,
+                }
+                atomic_json(request_path, record)
+                task["approval_request"] = {
+                    "decision": "reject", "requested_at": now(),
+                    "requested_by": requested_by, "expected_version": expected_version,
+                }
+                task["updated_at"] = now()
+                task["version"] = expected_version + 1
+                try:
+                    atomic_json(task_path, task)
+                except Exception:
+                    request_path.unlink(missing_ok=True)
+                    raise
+                try:
+                    record["status"] = "requested"
+                    record["published_at"] = now()
+                    atomic_json(request_path, record)
+                except Exception:
+                    self.send_json(HTTPStatus.ACCEPTED, {
+                        "request_id": request_id, "task": task,
+                        "message": "旧任务已安全结束；新修订请求将在刷新后自动恢复。",
+                    })
+                    return
+        except RuntimeError as error:
+            self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
+            return
+        self.send_json(HTTPStatus.CREATED, {
+            "request_id": request_id, "task": task,
+            "message": "已保留修订大纲并请求结束旧任务；Pi 将在旧任务关闭后接手新版本。",
+        })
 
 
 def main() -> None:

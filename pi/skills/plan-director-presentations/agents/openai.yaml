@@ -1,0 +1,4 @@
+interface:
+  display_name: "PPT 工作室"
+  short_description: "从需求、证据和逐页策划生成受控 PPT"
+  default_prompt: "使用 $plan-director-presentations 为当前任务先形成可确认的大纲和逐页策划，再生成正式 PPT。"

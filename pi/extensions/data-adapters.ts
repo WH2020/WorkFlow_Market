@@ -800,15 +800,17 @@ function assertSafeDeckText(value: unknown, label: string, maxLength: number, si
   if (singleLine && /[\r\n]/u.test(value)) throw new Error(`${label} 必须是单行文本`);
 }
 
-type DeckPayload = {
+export type DeckPayload = {
   schema_version: "1.0";
   snapshot_sha256: string;
+  plan_sha256?: string;
   output_name: string;
   profile_id: "market-director" | "product-director";
-  template_id: "ceo-weekly";
+  template_id: "ceo-weekly" | "management-report" | "government-program" | "technology-research";
   period: { start: string; end: string };
   slides: Array<{
     title: string;
+    layout_intent?: "single-focus" | "fifty-fifty" | "two-thirds" | "three-column" | "top-hero" | "mixed-grid";
     subtitle?: string;
     eyebrow?: string;
     lead?: string;
@@ -825,15 +827,23 @@ export function assertDeckPayload(value: DeckPayload): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx$/u.test(value.output_name)) {
     throw new Error("PPT 输出名必须是 1-120 字符的安全 ASCII .pptx 文件名");
   }
-  if (value.template_id !== "ceo-weekly") throw new Error("第一版只支持 ceo-weekly 周报模板");
+  if (!new Set(["ceo-weekly", "management-report", "government-program", "technology-research"]).has(value.template_id)) {
+    throw new Error("PPT template_id 无效");
+  }
+  if (value.plan_sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(value.plan_sha256)) {
+    throw new Error("PPT plan_sha256 无效");
+  }
   if (!new Set(["market-director", "product-director"]).has(value.profile_id)) throw new Error("PPT Profile 无效");
   parsePeriod(value.period);
   if (!Array.isArray(value.slides) || value.slides.length < 4 || value.slides.length > 10) {
-    throw new Error("周报 PPT 必须包含 4-10 页");
+    throw new Error("PPT 必须包含 4-10 页");
   }
   for (const [index, slide] of value.slides.entries()) {
     assertSafeDeckText(slide.title, `PPT 第 ${index + 1} 页标题`, 120);
     if (typeof slide.title !== "string" || !slide.title.trim()) throw new Error(`PPT 第 ${index + 1} 页标题缺失`);
+    if (slide.layout_intent !== undefined && !new Set(["single-focus", "fifty-fifty", "two-thirds", "three-column", "top-hero", "mixed-grid"]).has(slide.layout_intent)) {
+      throw new Error(`PPT 第 ${index + 1} 页 layout_intent 无效`);
+    }
     assertSafeDeckText(slide.subtitle, `PPT 第 ${index + 1} 页副标题`, 240);
     assertSafeDeckText(slide.eyebrow, `PPT 第 ${index + 1} 页眉`, 80);
     assertSafeDeckText(slide.lead, `PPT 第 ${index + 1} 页引导语`, 240);
@@ -872,7 +882,7 @@ export function assertDeckPayload(value: DeckPayload): void {
           throw new Error(`PPT 第 ${index + 1} 页来源路径必须是项目内相对路径`);
         }
         if (!/^[a-f0-9]{64}$/u.test(source.sha256 ?? "")) {
-          throw new Error(`PPT 第 ${index + 1} 页本地来源必须包含 weekly.snapshot 中的 SHA-256`);
+          throw new Error(`PPT 第 ${index + 1} 页本地来源必须包含证据快照中的 SHA-256`);
         }
       } else if (source.sha256 !== undefined) {
         throw new Error(`PPT 第 ${index + 1} 页纯 URL 来源不能携带本地文件 SHA-256`);
@@ -883,7 +893,7 @@ export function assertDeckPayload(value: DeckPayload): void {
     }
   }
   if (!value.slides.some((slide) => (slide.sources?.length ?? 0) > 0)) {
-    throw new Error("周报 PPT 至少需要一条可追溯来源，来源将写入 speaker notes");
+    throw new Error("PPT 至少需要一条可追溯来源，来源将写入 speaker notes");
   }
 }
 
@@ -953,7 +963,7 @@ export function holdDeckIntentLockForTests(projectRoot: string, intentId: string
   };
 }
 
-function readCommittedDeckReceipt(root: string, path: string, commit: DeckCommitContext, outputPath: string): DeckReceipt | undefined {
+export function readCommittedDeckReceipt(root: string, path: string, commit: DeckCommitContext, outputPath: string): DeckReceipt | undefined {
   if (!existsSync(path)) return undefined;
   const receipt = JSON.parse(readFileSync(path, "utf8")) as DeckReceipt;
   if (
@@ -987,6 +997,64 @@ function readCommittedDeckReceipt(root: string, path: string, commit: DeckCommit
     atomicWrite(path, `${JSON.stringify(receipt, null, 2)}\n`);
   }
   return receipt;
+}
+
+type DeckPublishProgress = { artifactPublished?: boolean; preserveRecoveryState?: boolean };
+type DeckPublishOperations = {
+  writeReceipt: (path: string, content: string) => void;
+  linkArtifact: (temporaryPath: string, outputPath: string) => void;
+};
+
+function removeOwnedPreparedDeckReceipt(path: string, expected: DeckReceipt): boolean {
+  if (!existsSync(path)) return true;
+  let current: Partial<DeckReceipt>;
+  try {
+    current = JSON.parse(readFileSync(path, "utf8")) as Partial<DeckReceipt>;
+  } catch {
+    return false;
+  }
+  if (
+    current.schema_version !== expected.schema_version || current.status !== "prepared" ||
+    current.owner !== expected.owner || current.intent_id !== expected.intent_id ||
+    current.task_id !== expected.task_id || current.payload_sha256 !== expected.payload_sha256 ||
+    current.target !== expected.target || current.artifact_sha256 !== expected.artifact_sha256
+  ) return false;
+  unlinkSync(path);
+  return true;
+}
+
+export function publishPreparedDeckArtifactForTests(
+  receiptPath: string,
+  temporaryDeckPath: string,
+  outputPath: string,
+  receipt: DeckReceipt,
+  onProgress: (progress: DeckPublishProgress) => void,
+  operations: DeckPublishOperations = {
+    writeReceipt: (path, content) => atomicWrite(path, content),
+    linkArtifact: (temporaryPath, targetPath) => linkSync(temporaryPath, targetPath),
+  },
+): void {
+  operations.writeReceipt(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+  try {
+    operations.linkArtifact(temporaryDeckPath, outputPath);
+    onProgress({ artifactPublished: true });
+  } catch (error) {
+    let removed = false;
+    try {
+      removed = removeOwnedPreparedDeckReceipt(receiptPath, receipt);
+    } catch {
+      onProgress({ preserveRecoveryState: true });
+      throw new Error("PPT prepared receipt 清理失败，已保留 QA 证据供人工恢复", { cause: error });
+    }
+    if (!removed) onProgress({ preserveRecoveryState: true });
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new DeckNotCommittedError(`PPT 输出名在提交时被其他任务占用，当前意图未提交：${receipt.target}`);
+    }
+    throw error;
+  }
+  receipt.status = "committed";
+  receipt.updated_at = new Date().toISOString();
+  operations.writeReceipt(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
 }
 
 async function buildWeeklyDeck(projectRoot: string, payload: DeckPayload, commit: DeckCommitContext): Promise<Record<string, unknown>> {
@@ -1042,6 +1110,8 @@ async function buildWeeklyDeck(projectRoot: string, payload: DeckPayload, commit
   if (!montageScript || !existsSync(montageScript)) throw new Error("PPT 预览拼图工具缺失");
   writeFileSync(inputPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
   let committed = false;
+  let artifactPublished = false;
+  let preserveRecoveryState = false;
   try {
     const stdout = await runDeckBuilder(nodePath, builderPath, inputPath, temporaryDeckPath, qaDirectory, payload.slides.length);
     if (!existsSync(temporaryDeckPath)) throw new Error("PPT 构建器未生成私有临时文件");
@@ -1078,29 +1148,16 @@ async function buildWeeklyDeck(projectRoot: string, payload: DeckPayload, commit
       target: `outputs/${payload.output_name}`, status: "prepared", artifact_sha256: artifactSha256,
       bytes: metadata.size, slide_count: payload.slides.length, qa, updated_at: new Date().toISOString(),
     };
-    atomicWrite(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
-    try {
-      linkSync(temporaryDeckPath, outputPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        if (existsSync(receiptPath)) {
-          try {
-            const current = JSON.parse(readFileSync(receiptPath, "utf8")) as Partial<DeckReceipt>;
-            if (
-              current.status === "prepared" && current.intent_id === commit.intent_id &&
-              current.task_id === commit.task_id && current.payload_sha256 === commit.payload_sha256
-            ) unlinkSync(receiptPath);
-          } catch {
-            // Preserve an unreadable or ownership-mismatched receipt for manual recovery.
-          }
-        }
-        throw new DeckNotCommittedError(`PPT 输出名在提交时被其他任务占用，当前意图未提交：outputs/${payload.output_name}`);
-      }
-      throw error;
-    }
-    receipt.status = "committed";
-    receipt.updated_at = new Date().toISOString();
-    atomicWrite(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    publishPreparedDeckArtifactForTests(
+      receiptPath,
+      temporaryDeckPath,
+      outputPath,
+      receipt,
+      (progress) => {
+        if (progress.artifactPublished) artifactPublished = true;
+        if (progress.preserveRecoveryState) preserveRecoveryState = true;
+      },
+    );
     committed = true;
     return {
       path: `outputs/${payload.output_name}`,
@@ -1119,7 +1176,7 @@ async function buildWeeklyDeck(projectRoot: string, payload: DeckPayload, commit
     if (committed) {
       if (existsSync(inputPath)) unlinkSync(inputPath);
       if (existsSync(temporaryDeckPath)) unlinkSync(temporaryDeckPath);
-    } else if (existsSync(ownedCanonical)) {
+    } else if (!artifactPublished && !preserveRecoveryState && existsSync(ownedCanonical)) {
       rmSync(ownedCanonical, { recursive: true, force: true });
     }
   }
@@ -1346,8 +1403,22 @@ type TaskEvidenceState = {
   task_id: string;
   searched_urls: string[];
   mutations: Record<string, string>;
+  presentation_sources?: Record<string, PresentationEvidenceSource>;
   weekly_snapshot?: WeeklySnapshotEvidence;
   updated_at: string;
+};
+
+export type PresentationEvidenceSource = {
+  source_id: string;
+  title: string;
+  source_type: string;
+  url?: string;
+  path?: string;
+  content_sha256?: string;
+  page_count?: number;
+  extracted_pages?: number[];
+  reliability: "standard" | "limited";
+  accessed_at: string;
 };
 
 export type WeeklySnapshotEvidence = {
@@ -1386,7 +1457,7 @@ function taskEvidencePath(projectRoot: string, taskId: string): string {
 function readTaskEvidence(projectRoot: string, taskId: string): TaskEvidenceState {
   const path = taskEvidencePath(projectRoot, taskId);
   if (!existsSync(path)) {
-    return { schema_version: "1.0", task_id: taskId, searched_urls: [], mutations: {}, updated_at: new Date().toISOString() };
+    return { schema_version: "1.0", task_id: taskId, searched_urls: [], mutations: {}, presentation_sources: {}, updated_at: new Date().toISOString() };
   }
   const meta = lstatSync(path);
   if (!meta.isFile() || meta.isSymbolicLink() || meta.size > 2 * 1024 * 1024) throw new Error("证据 registry 文件无效或过大");
@@ -1397,6 +1468,26 @@ function readTaskEvidence(projectRoot: string, taskId: string): TaskEvidenceStat
     state.searched_urls.some((url) => typeof url !== "string" || url.length > 2048) ||
     !state.mutations || typeof state.mutations !== "object" || Array.isArray(state.mutations) ||
     Object.keys(state.mutations).length > 500 || Object.values(state.mutations).some((value) => typeof value !== "string") ||
+    (state.presentation_sources !== undefined && (
+      !state.presentation_sources || typeof state.presentation_sources !== "object" || Array.isArray(state.presentation_sources) ||
+      Object.keys(state.presentation_sources).length > 1000 ||
+      Object.entries(state.presentation_sources).some(([sourceId, source]) => (
+        !source || typeof source !== "object" || source.source_id !== sourceId ||
+        typeof source.title !== "string" || !source.title.trim() || source.title.length > 500 ||
+        typeof source.source_type !== "string" || !source.source_type.trim() || source.source_type.length > 80 ||
+        (source.url !== undefined && typeof source.url !== "string") ||
+        (source.path !== undefined && typeof source.path !== "string") ||
+        (source.content_sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(source.content_sha256)) ||
+        (source.page_count !== undefined && (!Number.isInteger(source.page_count) || source.page_count < 1 || source.page_count > 100000)) ||
+        (source.extracted_pages !== undefined && (
+          !Array.isArray(source.extracted_pages) || source.extracted_pages.length > 200 ||
+          new Set(source.extracted_pages).size !== source.extracted_pages.length ||
+          source.extracted_pages.some((page) => !Number.isInteger(page) || page < 1 || page > (source.page_count ?? 100000))
+        )) ||
+        (source.reliability !== "standard" && source.reliability !== "limited") ||
+        typeof source.accessed_at !== "string"
+      ))
+    )) ||
     (state.weekly_snapshot !== undefined && (
       !state.weekly_snapshot || typeof state.weekly_snapshot !== "object" ||
       typeof state.weekly_snapshot.profile_id !== "string" ||
@@ -1418,6 +1509,333 @@ function writeTaskEvidence(projectRoot: string, state: TaskEvidenceState): void 
   atomicWrite(taskEvidencePath(projectRoot, state.task_id), content);
 }
 
+type PresentationPlanInput = {
+  schema_version: "1.0";
+  project_id: string;
+  profile_id: "market-director" | "product-director";
+  scene: "weekly" | "industry" | "government" | "custom";
+  mode: "quick" | "standard" | "strict";
+  phase: "outline" | "final";
+  version: number;
+  expected_plan_sha256?: string;
+  expected_context_snapshot_sha256?: string;
+  period: { start: string; end: string };
+  brief: {
+    topic: string;
+    audience: string;
+    purpose: string;
+    occasion: string;
+    language: string;
+    confidentiality: "internal" | "restricted" | "public";
+    target_slides: number;
+    expected_decision?: string;
+    duration_minutes?: number;
+  };
+  evidence_refs: string[];
+  outline: Array<{
+    slide_id: string;
+    order: number;
+    conclusion_title: string;
+    evidence_refs: string[];
+  }>;
+  slides?: Array<{
+    slide_id: string;
+    order: number;
+    conclusion_title: string;
+    audience_takeaway: string;
+    facts: Array<{ text: string; evidence_refs: string[] }>;
+    analyses: string[];
+    hypotheses: string[];
+    unknowns: string[];
+    evidence_refs: string[];
+    layout_intent: "single-focus" | "fifty-fifty" | "two-thirds" | "three-column" | "top-hero" | "mixed-grid";
+    visual_assets: string[];
+    speaker_notes: string;
+    warnings: string[];
+    render: DeckPayload["slides"][number];
+  }>;
+  design_system: {
+    token_id: "management-report" | "government-program" | "technology-research";
+  };
+  output_name: string;
+};
+
+export type StoredPresentationPlan = Omit<PresentationPlanInput, "expected_plan_sha256" | "expected_context_snapshot_sha256"> & {
+  task_id: string;
+  context_snapshot_sha256: string;
+  plan_sha256: string;
+  updated_at: string;
+};
+
+function assertPlanText(value: unknown, field: string, maximum: number, allowEmpty = false): asserts value is string {
+  if (typeof value !== "string" || (!allowEmpty && !value.trim()) || value.length > maximum || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/u.test(value)) {
+    throw new Error(`${field} 无效或超过 ${maximum} 字符`);
+  }
+  if (/\[Sources\]/iu.test(value)) throw new Error(`${field} 不能伪造 speaker notes 来源块`);
+}
+
+function assertPlanId(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(value)) throw new Error(`${field} 必须是安全 ID`);
+}
+
+function presentationPlanPath(projectRoot: string, taskId: string): string {
+  assertPlanId(taskId, "presentation plan task_id");
+  const root = realpathSync.native(resolve(projectRoot));
+  const requested = resolve(root, ".pi", "director-runtime", "presentation-plans");
+  mkdirSync(requested, { recursive: true });
+  const meta = lstatSync(requested);
+  const canonical = realpathSync.native(requested);
+  if (!meta.isDirectory() || meta.isSymbolicLink() || !isContained(root, canonical)) throw new Error("PPT plan 目录无效");
+  return join(canonical, `${taskId}.json`);
+}
+
+export function readPresentationPlan(projectRoot: string, taskId: string): StoredPresentationPlan | undefined {
+  const path = presentationPlanPath(projectRoot, taskId);
+  if (!existsSync(path)) return undefined;
+  const meta = lstatSync(path);
+  if (!meta.isFile() || meta.isSymbolicLink() || meta.size > 2 * 1024 * 1024) throw new Error("PPT plan 文件无效或过大");
+  const plan = JSON.parse(readFileSync(path, "utf8")) as StoredPresentationPlan;
+  if (
+    plan.schema_version !== "1.0" || plan.task_id !== taskId ||
+    !Number.isInteger(plan.version) || plan.version < 1 ||
+    !/^[a-f0-9]{64}$/u.test(plan.plan_sha256) ||
+    !/^[a-f0-9]{64}$/u.test(plan.context_snapshot_sha256)
+  ) throw new Error("PPT plan 持久化内容无效");
+  const { plan_sha256: storedHash, updated_at: _updatedAt, ...hashBase } = plan;
+  const computedHash = createHash("sha256").update(canonicalEvidence(hashBase), "utf8").digest("hex");
+  if (computedHash !== storedHash) throw new Error("PPT plan 文件内容与 plan_sha256 不一致，拒绝使用未受控修改");
+  return plan;
+}
+
+function sourceLocationMatches(
+  rendered: NonNullable<DeckPayload["slides"][number]["sources"]>[number],
+  source: PresentationEvidenceSource,
+): boolean {
+  if (rendered.title !== source.title) return false;
+  if (source.source_type === "pdf") {
+    if (rendered.page === undefined || !source.extracted_pages?.includes(rendered.page)) return false;
+  } else if (rendered.page !== undefined) return false;
+  if (source.url) {
+    try { return rendered.url === normalizePublicUrl(source.url).toString() && rendered.path === undefined && rendered.sha256 === undefined; }
+    catch { return false; }
+  }
+  return Boolean(source.path && rendered.path === source.path && rendered.sha256 === source.content_sha256 && rendered.url === undefined);
+}
+
+export function sourceLocationMatchesForTests(
+  rendered: NonNullable<DeckPayload["slides"][number]["sources"]>[number],
+  source: PresentationEvidenceSource,
+): boolean {
+  return sourceLocationMatches(rendered, source);
+}
+
+function normalizedPresentationContext(
+  projectRoot: string,
+  taskId: string,
+  evidenceRefs: string[],
+): { sources: PresentationEvidenceSource[]; sha256: string } {
+  const registry = readTaskEvidence(projectRoot, taskId).presentation_sources ?? {};
+  if (!Array.isArray(evidenceRefs) || evidenceRefs.length < 1 || evidenceRefs.length > 200 || new Set(evidenceRefs).size !== evidenceRefs.length) {
+    throw new Error("PPT plan evidence_refs 必须包含 1-200 个不重复来源");
+  }
+  const root = realpathSync.native(resolve(projectRoot));
+  const sources = evidenceRefs.map((sourceId) => {
+    assertPlanId(sourceId, "PPT evidence source_id");
+    const source = registry[sourceId];
+    if (!source) throw new Error(`PPT 来源 ${sourceId} 不在当前任务证据 registry 中`);
+    if (source.url) {
+      const normalized = normalizePublicUrl(source.url).toString();
+      if (normalized !== source.url) throw new Error(`PPT 来源 ${sourceId} URL 未规范化`);
+    } else if (source.path) {
+      if (!source.content_sha256) throw new Error(`PPT 本地来源 ${sourceId} 缺少 SHA-256`);
+      const path = resolve(root, source.path);
+      if (!isContained(root, path) || !existsSync(path)) throw new Error(`PPT 本地来源 ${sourceId} 不存在或越出项目目录`);
+      const meta = lstatSync(path);
+      const canonical = realpathSync.native(path);
+      if (!meta.isFile() || meta.isSymbolicLink() || meta.size > MAX_WEEKLY_SOURCE_BYTES || !isContained(root, canonical)) {
+        throw new Error(`PPT 本地来源 ${sourceId} 不是受控普通文件`);
+      }
+      if (binarySha256(canonical) !== source.content_sha256) throw new Error(`PPT 本地来源 ${sourceId} 自登记后已变化`);
+    } else {
+      throw new Error(`PPT 来源 ${sourceId} 缺少 URL 或项目相对路径`);
+    }
+    return source;
+  }).sort((left, right) => left.source_id.localeCompare(right.source_id));
+  const canonical = canonicalEvidence(sources);
+  return { sources, sha256: createHash("sha256").update(canonical, "utf8").digest("hex") };
+}
+
+function validatePresentationPlan(
+  projectRoot: string,
+  taskId: string,
+  profileId: string,
+  value: PresentationPlanInput,
+): { sources: PresentationEvidenceSource[]; contextSha256: string; normalized: Omit<PresentationPlanInput, "expected_plan_sha256" | "expected_context_snapshot_sha256"> } {
+  if (value.schema_version !== "1.0") throw new Error("PPT plan schema_version 必须为 1.0");
+  assertPlanId(value.project_id, "PPT project_id");
+  if (value.profile_id !== profileId || !new Set(["market-director", "product-director"]).has(value.profile_id)) {
+    throw new Error("PPT plan Profile 必须与当前受管任务一致");
+  }
+  if (!new Set(["weekly", "industry", "government", "custom"]).has(value.scene)) throw new Error("PPT scene 无效");
+  if (!new Set(["quick", "standard", "strict"]).has(value.mode)) throw new Error("PPT mode 无效");
+  if (value.phase !== "outline" && value.phase !== "final") throw new Error("PPT phase 无效");
+  if (!Number.isInteger(value.version) || value.version < 1 || value.version > 10000) throw new Error("PPT plan version 无效");
+  parsePeriod(value.period);
+  for (const [field, maximum] of [["topic", 240], ["audience", 240], ["purpose", 500], ["occasion", 240], ["language", 40]] as const) {
+    assertPlanText(value.brief?.[field], `PPT brief.${field}`, maximum);
+  }
+  if (!new Set(["internal", "restricted", "public"]).has(value.brief?.confidentiality)) throw new Error("PPT 保密等级无效");
+  if (!Number.isInteger(value.brief?.target_slides) || value.brief.target_slides < 4 || value.brief.target_slides > 10) throw new Error("PPT target_slides 必须为 4-10");
+  if (value.brief.expected_decision !== undefined) assertPlanText(value.brief.expected_decision, "PPT expected_decision", 500, true);
+  if (value.brief.duration_minutes !== undefined && (!Number.isInteger(value.brief.duration_minutes) || value.brief.duration_minutes < 1 || value.brief.duration_minutes > 240)) {
+    throw new Error("PPT duration_minutes 必须为 1-240");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx$/u.test(value.output_name)) throw new Error("PPT plan output_name 必须是安全 ASCII .pptx 文件名");
+  if (!new Set(["management-report", "government-program", "technology-research"]).has(value.design_system?.token_id)) throw new Error("PPT design token 无效");
+
+  const context = normalizedPresentationContext(projectRoot, taskId, value.evidence_refs);
+  if (value.expected_context_snapshot_sha256 !== undefined && value.expected_context_snapshot_sha256 !== context.sha256) {
+    throw new Error("PPT 证据上下文已变化，请重新检查 plan");
+  }
+  if (!Array.isArray(value.outline) || value.outline.length < 4 || value.outline.length > 10 || value.outline.length !== value.brief.target_slides) {
+    throw new Error("PPT outline 必须与 4-10 页 target_slides 一致");
+  }
+  const sourceIds = new Set(context.sources.map((source) => source.source_id));
+  const outlineIds = new Set<string>();
+  for (const [index, item] of value.outline.entries()) {
+    assertPlanId(item.slide_id, `PPT outline[${index}].slide_id`);
+    if (outlineIds.has(item.slide_id)) throw new Error("PPT outline slide_id 不能重复");
+    outlineIds.add(item.slide_id);
+    if (item.order !== index + 1) throw new Error("PPT outline order 必须从 1 连续递增");
+    assertPlanText(item.conclusion_title, `PPT outline[${index}].conclusion_title`, 120);
+    if (!Array.isArray(item.evidence_refs) || new Set(item.evidence_refs).size !== item.evidence_refs.length || item.evidence_refs.some((id) => !sourceIds.has(id))) {
+      throw new Error(`PPT outline 第 ${index + 1} 页包含未登记或重复证据`);
+    }
+  }
+  if (value.phase === "outline" && value.slides !== undefined && value.slides.length > 0) throw new Error("outline 阶段不得混入未确认的逐页策划");
+  if (value.phase === "final") {
+    if (!Array.isArray(value.slides) || value.slides.length !== value.outline.length) throw new Error("final plan slides 必须与 outline 一一对应");
+    for (const [index, slide] of value.slides.entries()) {
+      const outline = value.outline[index]!;
+      if (slide.slide_id !== outline.slide_id || slide.order !== index + 1 || slide.conclusion_title !== outline.conclusion_title) {
+        throw new Error(`PPT 第 ${index + 1} 页与已确认 outline 不一致`);
+      }
+      assertPlanText(slide.audience_takeaway, `PPT 第 ${index + 1} 页 audience_takeaway`, 500);
+      if (!Array.isArray(slide.evidence_refs) || new Set(slide.evidence_refs).size !== slide.evidence_refs.length || slide.evidence_refs.some((id) => !sourceIds.has(id))) {
+        throw new Error(`PPT 第 ${index + 1} 页包含未登记或重复证据`);
+      }
+      const slideEvidence = new Set(slide.evidence_refs);
+      if (!Array.isArray(slide.facts) || slide.facts.length > 20) throw new Error(`PPT 第 ${index + 1} 页 facts 无效`);
+      for (const fact of slide.facts) {
+        assertPlanText(fact.text, `PPT 第 ${index + 1} 页 fact`, 500);
+        if (!Array.isArray(fact.evidence_refs) || fact.evidence_refs.length < 1 || fact.evidence_refs.some((id) => !slideEvidence.has(id))) {
+          throw new Error(`PPT 第 ${index + 1} 页事实缺少当前页证据`);
+        }
+      }
+      for (const [field, maximum] of [["analyses", 20], ["hypotheses", 20], ["unknowns", 20], ["visual_assets", 20], ["warnings", 20]] as const) {
+        const items = slide[field];
+        if (!Array.isArray(items) || items.length > maximum) throw new Error(`PPT 第 ${index + 1} 页 ${field} 无效`);
+        items.forEach((item) => assertPlanText(item, `PPT 第 ${index + 1} 页 ${field}`, 500, true));
+      }
+      if (!new Set(["single-focus", "fifty-fifty", "two-thirds", "three-column", "top-hero", "mixed-grid"]).has(slide.layout_intent)) throw new Error(`PPT 第 ${index + 1} 页 layout_intent 无效`);
+      if (slide.render.layout_intent !== slide.layout_intent) throw new Error(`PPT 第 ${index + 1} 页 render.layout_intent 必须与逐页策划一致`);
+      assertPlanText(slide.speaker_notes, `PPT 第 ${index + 1} 页 speaker_notes`, 4000, true);
+      if (slide.render.title !== slide.conclusion_title) throw new Error(`PPT 第 ${index + 1} 页 render.title 必须与已确认结论标题一致`);
+      if ((slide.render.notes ?? "") !== slide.speaker_notes) throw new Error(`PPT 第 ${index + 1} 页 render.notes 必须与 speaker_notes 一致`);
+      const allowedRenderText = new Set([
+        slide.audience_takeaway,
+        value.brief.topic,
+        value.brief.purpose,
+        value.brief.occasion,
+        ...(value.brief.expected_decision ? [value.brief.expected_decision] : []),
+        ...slide.facts.map((fact) => fact.text),
+        ...slide.analyses.map((text) => `分析：${text}`),
+        ...slide.hypotheses.map((text) => `假设：${text}`),
+        ...slide.unknowns.map((text) => `未知：${text}`),
+        ...slide.warnings.map((text) => `风险：${text}`),
+      ]);
+      for (const [field, texts] of [
+        ["subtitle", slide.render.subtitle ? [slide.render.subtitle] : []],
+        ["lead", slide.render.lead ? [slide.render.lead] : []],
+        ["body", slide.render.body ?? []],
+        ["callout", slide.render.callout ? [slide.render.callout] : []],
+      ] as const) {
+        if (texts.some((text) => !allowedRenderText.has(text))) {
+          throw new Error(`PPT 第 ${index + 1} 页 render.${field} 包含未映射到策划事实/判断/假设/未知的信息`);
+        }
+      }
+      assertDeckPayload({
+        schema_version: "1.0", snapshot_sha256: context.sha256, output_name: value.output_name,
+        profile_id: value.profile_id, template_id: value.design_system.token_id, period: value.period,
+        slides: value.slides.map((candidate) => candidate.render),
+      });
+      const renderedSources = slide.render.sources ?? [];
+      for (const evidenceId of slideEvidence) {
+        const source = context.sources.find((candidate) => candidate.source_id === evidenceId)!;
+        if (!renderedSources.some((rendered) => sourceLocationMatches(rendered, source))) {
+          throw new Error(`PPT 第 ${index + 1} 页 render.sources 缺少证据 ${evidenceId}`);
+        }
+      }
+      if (renderedSources.some((rendered) => !context.sources.some((source) => slideEvidence.has(source.source_id) && sourceLocationMatches(rendered, source)))) {
+        throw new Error(`PPT 第 ${index + 1} 页 render.sources 包含未登记来源`);
+      }
+    }
+  }
+  const { expected_plan_sha256: _ignoredPlan, expected_context_snapshot_sha256: _ignoredContext, ...normalized } = value;
+  return { sources: context.sources, contextSha256: context.sha256, normalized };
+}
+
+export function writePresentationPlan(
+  projectRoot: string,
+  taskId: string,
+  profileId: string,
+  value: PresentationPlanInput,
+): StoredPresentationPlan {
+  const path = presentationPlanPath(projectRoot, taskId);
+  const lockPath = `${path}.lock`;
+  const descriptor = acquireLock(lockPath);
+  try {
+    const existing = readPresentationPlan(projectRoot, taskId);
+    if (existing) {
+      if (existing.task_id !== taskId || existing.profile_id !== profileId || existing.project_id !== value.project_id) throw new Error("PPT plan 不能跨任务、Profile 或 project 接管");
+      if (value.version !== existing.version + 1) throw new Error(`PPT plan 版本冲突：期望 ${existing.version + 1}`);
+      if (value.expected_plan_sha256 !== existing.plan_sha256) throw new Error("PPT plan expected_plan_sha256 与当前版本不一致");
+      if (value.expected_context_snapshot_sha256 !== existing.context_snapshot_sha256) throw new Error("PPT plan 更新必须绑定前一版 context_snapshot_sha256");
+      if (existing.phase !== "outline" || value.phase !== "final") throw new Error("同一任务只允许从已确认 outline 生成一次 final plan；其他修订必须新建任务并重新确认");
+      const confirmedExisting = {
+        project_id: existing.project_id, profile_id: existing.profile_id, scene: existing.scene, mode: existing.mode,
+        period: existing.period, brief: existing.brief, evidence_refs: existing.evidence_refs,
+        outline: existing.outline, output_name: existing.output_name,
+      };
+      const confirmedIncoming = {
+        project_id: value.project_id, profile_id: value.profile_id, scene: value.scene, mode: value.mode,
+        period: value.period, brief: value.brief, evidence_refs: value.evidence_refs,
+        outline: value.outline, output_name: value.output_name,
+      };
+      if (canonicalEvidence(confirmedIncoming) !== canonicalEvidence(confirmedExisting)) {
+        throw new Error("final plan 改变了已确认的 brief、outline、证据、周期或输出名；请新建修订任务并重新进行 outline Approval");
+      }
+    } else if (value.version !== 1 || value.expected_plan_sha256 !== undefined) {
+      throw new Error("新 PPT plan 必须从 version=1 开始且不能携带旧 plan 哈希");
+    }
+    const validated = validatePresentationPlan(projectRoot, taskId, profileId, value);
+    const hashBase = { ...validated.normalized, task_id: taskId, context_snapshot_sha256: validated.contextSha256 };
+    const plan: StoredPresentationPlan = {
+      ...validated.normalized,
+      task_id: taskId,
+      context_snapshot_sha256: validated.contextSha256,
+      plan_sha256: createHash("sha256").update(canonicalEvidence(hashBase), "utf8").digest("hex"),
+      updated_at: new Date().toISOString(),
+    };
+    const content = `${JSON.stringify(plan, null, 2)}\n`;
+    if (Buffer.byteLength(content, "utf8") > 2 * 1024 * 1024) throw new Error("PPT plan 超过 2 MiB 安全上限");
+    atomicWrite(path, content);
+    return plan;
+  } finally {
+    releaseLock(lockPath, descriptor);
+  }
+}
+
 export function assertDeckMatchesWeeklySnapshot(
   projectRoot: string,
   taskId: string,
@@ -1425,7 +1843,8 @@ export function assertDeckMatchesWeeklySnapshot(
   payload: DeckPayload,
 ): void {
   assertDeckPayload(payload);
-  const snapshot = readTaskEvidence(projectRoot, taskId).weekly_snapshot;
+  const evidenceState = readTaskEvidence(projectRoot, taskId);
+  const snapshot = evidenceState.weekly_snapshot;
   if (!snapshot) throw new Error("当前任务缺少持久化 weekly.snapshot 证据；请重新执行周报快照");
   if (payload.profile_id !== profileId || snapshot.profile_id !== profileId) {
     throw new Error("PPT 载荷、周报快照与当前受管任务的 Profile 必须一致");
@@ -1452,30 +1871,74 @@ export function assertDeckMatchesWeeklySnapshot(
           throw new Error(`PPT 第 ${index + 1} 页本地来源路径或 SHA-256 不在当前 weekly.snapshot 证据中`);
         }
       }
+      if (source.page !== undefined) {
+        const registeredSources = Object.values(evidenceState.presentation_sources ?? {});
+        if (!registeredSources.some((registered) => sourceLocationMatches(source, registered))) {
+          throw new Error(`PPT 第 ${index + 1} 页页码不在本任务实际提取的 PDF 页中`);
+        }
+      }
     }
   }
+}
+
+export function assertDeckMatchesPresentationPlan(
+  projectRoot: string,
+  taskId: string,
+  profileId: string,
+  payload: DeckPayload,
+): void {
+  assertDeckPayload(payload);
+  if (!payload.plan_sha256) throw new Error("通用 PPT 载荷缺少 plan_sha256");
+  const plan = readPresentationPlan(projectRoot, taskId);
+  if (!plan || plan.phase !== "final" || !plan.slides) throw new Error("当前任务缺少可渲染的 final presentation plan");
+  if (plan.profile_id !== profileId || payload.profile_id !== profileId) throw new Error("PPT plan、载荷与当前受管任务的 Profile 必须一致");
+  if (payload.plan_sha256 !== plan.plan_sha256) throw new Error("PPT plan_sha256 与当前 plan 不一致");
+  if (payload.snapshot_sha256 !== plan.context_snapshot_sha256) throw new Error("PPT snapshot_sha256 与当前 plan 证据上下文不一致");
+  if (payload.period.start !== plan.period.start || payload.period.end !== plan.period.end) throw new Error("PPT period 与当前 plan 不一致");
+  if (payload.output_name !== plan.output_name || payload.template_id !== plan.design_system.token_id) throw new Error("PPT 输出名或设计令牌与当前 plan 不一致");
+  const plannedSlides = plan.slides.map((slide) => slide.render);
+  if (canonicalEvidence(payload.slides) !== canonicalEvidence(plannedSlides)) throw new Error("PPT slides 与当前 final plan 的逐页渲染载荷不一致");
+  const context = normalizedPresentationContext(projectRoot, taskId, plan.evidence_refs);
+  if (context.sha256 !== plan.context_snapshot_sha256) throw new Error("PPT plan 的证据 registry 或本地文件在 Approval 后已变化");
+}
+
+export function assertDeckMatchesEvidenceContext(
+  projectRoot: string,
+  taskId: string,
+  profileId: string,
+  payload: DeckPayload,
+): void {
+  if (payload.plan_sha256) {
+    assertDeckMatchesPresentationPlan(projectRoot, taskId, profileId, payload);
+    return;
+  }
+  assertDeckMatchesWeeklySnapshot(projectRoot, taskId, profileId, payload);
 }
 
 export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): void {
   const searchableUrls = new Map<string, Set<string>>();
   const evidenceRegistry = new Map<string, Map<string, string>>();
+  const presentationSourceRegistry = new Map<string, Map<string, PresentationEvidenceSource>>();
   const weeklySnapshotRegistry = new Map<string, WeeklySnapshotEvidence>();
   const loadedEvidence = new Set<string>();
   const taskKey = (context: { task_id?: string } | void): string => context?.task_id ?? "__standalone__";
-  const loadEvidence = (context: { task_id?: string } | void): { urls: Set<string>; mutations: Map<string, string> } => {
+  const loadEvidence = (context: { task_id?: string } | void): { urls: Set<string>; mutations: Map<string, string>; sources: Map<string, PresentationEvidenceSource> } => {
     const key = taskKey(context);
     if (key !== "__standalone__" && !loadedEvidence.has(key)) {
       const persisted = readTaskEvidence(hooks.projectRoot(), key);
       searchableUrls.set(key, new Set(persisted.searched_urls));
       evidenceRegistry.set(key, new Map(Object.entries(persisted.mutations)));
+      presentationSourceRegistry.set(key, new Map(Object.entries(persisted.presentation_sources ?? {})));
       if (persisted.weekly_snapshot) weeklySnapshotRegistry.set(key, persisted.weekly_snapshot);
       loadedEvidence.add(key);
     }
     const urls = searchableUrls.get(key) ?? new Set<string>();
     const mutations = evidenceRegistry.get(key) ?? new Map<string, string>();
+    const sources = presentationSourceRegistry.get(key) ?? new Map<string, PresentationEvidenceSource>();
     searchableUrls.set(key, urls);
     evidenceRegistry.set(key, mutations);
-    return { urls, mutations };
+    presentationSourceRegistry.set(key, sources);
+    return { urls, mutations, sources };
   };
   const saveEvidence = (context: { task_id?: string } | void): void => {
     const key = taskKey(context);
@@ -1486,6 +1949,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       task_id: key,
       searched_urls: [...loaded.urls].sort(),
       mutations: Object.fromEntries([...loaded.mutations.entries()].sort(([left], [right]) => left.localeCompare(right))),
+      presentation_sources: Object.fromEntries([...loaded.sources.entries()].sort(([left], [right]) => left.localeCompare(right))),
       weekly_snapshot: weeklySnapshotRegistry.get(key),
       updated_at: new Date().toISOString(),
     });
@@ -1515,13 +1979,51 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
         snapshot_sha256: string;
         period: { start: string; end: string };
         knowledge: Array<Record<string, unknown>>;
-        source_versions: Array<{ path: string; sha256: string }>;
+        source_versions: Array<{ source_id?: string; path: string; sha256: string }>;
       };
       const allowedUrls = snapshot.knowledge.flatMap((row) => {
         if (typeof row.url !== "string" || !row.url.trim()) return [];
         try { return [normalizePublicUrl(row.url).toString()]; } catch { return []; }
       });
-      loadEvidence(context);
+      const loaded = loadEvidence(context);
+      for (const source of snapshot.source_versions) {
+        const sourceId = `snapshot-${createHash("sha256").update(`${source.path}\n${source.sha256}`, "utf8").digest("hex").slice(0, 20)}`;
+        loaded.sources.set(sourceId, {
+          source_id: sourceId,
+          title: source.path,
+          source_type: source.source_id?.split(":", 1)[0] || "snapshot",
+          path: source.path,
+          content_sha256: source.sha256,
+          reliability: "standard",
+          accessed_at: new Date().toISOString(),
+        });
+      }
+      for (const row of snapshot.knowledge) {
+        if (typeof row.source_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(row.source_id)) continue;
+        if (typeof row.url !== "string" || !row.url.trim()) continue;
+        try {
+          const notes = typeof row.notes === "string" ? row.notes : "";
+          const evidenceRefsText = /(?:^|;\s*)evidence_refs=([^;]+)/u.exec(notes)?.[1] ?? "";
+          const extractedPages = [...evidenceRefsText.matchAll(/#page=(\d+)/gu)]
+            .map((match) => Number(match[1]))
+            .filter((page, index, pages) => Number.isInteger(page) && page >= 1 && page <= 100000 && pages.indexOf(page) === index);
+          const pageCountValue = Number(/(?:^|;\s*)total_pages=(\d+)(?:;|$)/u.exec(notes)?.[1] ?? "");
+          loaded.sources.set(row.source_id, {
+            source_id: row.source_id,
+            title: typeof row.title === "string" ? row.title.slice(0, 500) : row.source_id,
+            source_type: typeof row.source_type === "string" ? row.source_type.slice(0, 80) : "knowledge",
+            url: normalizePublicUrl(row.url).toString(),
+            ...(row.source_type === "pdf" && Number.isInteger(pageCountValue) && pageCountValue >= 1 && pageCountValue <= 100000
+              ? { page_count: pageCountValue }
+              : {}),
+            ...(row.source_type === "pdf" ? { extracted_pages: extractedPages } : {}),
+            reliability: row.status === "verified" ? "standard" : "limited",
+            accessed_at: new Date().toISOString(),
+          });
+        } catch {
+          // An invalid historic URL remains in the weekly snapshot but is not eligible for a new deck plan.
+        }
+      }
       weeklySnapshotRegistry.set(context.task_id, {
         profile_id: profileId,
         period: snapshot.period,
@@ -1631,6 +2133,18 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
         });
         sources.push(source);
         loaded.mutations.set(source.source_id, canonicalEvidence(source.knowledge_mutation));
+        loaded.sources.set(source.source_id, {
+          source_id: source.source_id,
+          title: source.title,
+          source_type: source.source_type,
+          ...(source.url ? { url: source.url } : {}),
+          ...(source.path ? { path: source.path } : {}),
+          content_sha256: source.content_sha256,
+          ...(source.source_type === "pdf" && source.total_pages ? { page_count: source.total_pages } : {}),
+          ...(source.source_type === "pdf" ? { extracted_pages: source.pages.filter((page) => page.text).map((page) => page.page) } : {}),
+          reliability: source.extraction_reliability,
+          accessed_at: source.accessed_at,
+        });
       }
       saveEvidence(context);
       const result = { opened_at: new Date().toISOString(), sources };
@@ -1659,6 +2173,18 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       });
       const loaded = loadEvidence(context);
       loaded.mutations.set(result.source_id, canonicalEvidence(result.knowledge_mutation));
+      loaded.sources.set(result.source_id, {
+        source_id: result.source_id,
+        title: result.title,
+        source_type: result.source_type,
+        ...(result.url ? { url: result.url } : {}),
+        ...(result.path ? { path: result.path } : {}),
+        content_sha256: result.content_sha256,
+        ...(result.total_pages ? { page_count: result.total_pages } : {}),
+        extracted_pages: result.pages.filter((page) => page.text).map((page) => page.page),
+        reliability: result.extraction_reliability,
+        accessed_at: result.accessed_at,
+      });
       saveEvidence(context);
       assertResultSize(result);
       hooks.afterLogicalTool("pdf.read", params, result);
@@ -1667,21 +2193,128 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
   });
 
   pi.registerTool({
-    name: "director_artifact_deck_write",
-    label: "生成周报 PPT",
-    description: "使用受控的 @oai/artifact-tool 构建 4-10 页总监周报 PPT，输出到 outputs/，保留逐页来源备注且不覆盖已有文件。",
+    name: "director_presentation_plan_write",
+    label: "保存 PPT 规划",
+    description: "将当前任务/Profile 的 brief、证据引用、大纲、逐页策划和设计令牌原子写入受控 plan；使用版本和哈希防止覆盖并发修改。",
     parameters: Type.Object({
       schema_version: Type.Literal("1.0"),
-      snapshot_sha256: Type.String({ pattern: "^[a-f0-9]{64}$", description: "当前 weekly.snapshot 返回的 snapshot_sha256" }),
+      project_id: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" }),
+      profile_id: Type.Union([Type.Literal("market-director"), Type.Literal("product-director")]),
+      scene: Type.Union([Type.Literal("weekly"), Type.Literal("industry"), Type.Literal("government"), Type.Literal("custom")]),
+      mode: Type.Union([Type.Literal("quick"), Type.Literal("standard"), Type.Literal("strict")]),
+      phase: Type.Union([Type.Literal("outline"), Type.Literal("final")]),
+      version: Type.Number({ minimum: 1, maximum: 10000 }),
+      expected_plan_sha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+      expected_context_snapshot_sha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+      period: Type.Object({
+        start: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+        end: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
+      }),
+      brief: Type.Object({
+        topic: Type.String({ minLength: 1, maxLength: 240 }),
+        audience: Type.String({ minLength: 1, maxLength: 240 }),
+        purpose: Type.String({ minLength: 1, maxLength: 500 }),
+        occasion: Type.String({ minLength: 1, maxLength: 240 }),
+        language: Type.String({ minLength: 1, maxLength: 40 }),
+        confidentiality: Type.Union([Type.Literal("internal"), Type.Literal("restricted"), Type.Literal("public")]),
+        target_slides: Type.Number({ minimum: 4, maximum: 10 }),
+        expected_decision: Type.Optional(Type.String({ maxLength: 500 })),
+        duration_minutes: Type.Optional(Type.Number({ minimum: 1, maximum: 240 })),
+      }),
+      evidence_refs: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 200, uniqueItems: true }),
+      outline: Type.Array(Type.Object({
+        slide_id: Type.String({ minLength: 1, maxLength: 128 }),
+        order: Type.Number({ minimum: 1, maximum: 10 }),
+        conclusion_title: Type.String({ minLength: 1, maxLength: 120 }),
+        evidence_refs: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 50, uniqueItems: true }),
+      }), { minItems: 4, maxItems: 10 }),
+      slides: Type.Optional(Type.Array(Type.Object({
+        slide_id: Type.String({ minLength: 1, maxLength: 128 }),
+        order: Type.Number({ minimum: 1, maximum: 10 }),
+        conclusion_title: Type.String({ minLength: 1, maxLength: 120 }),
+        audience_takeaway: Type.String({ minLength: 1, maxLength: 500 }),
+        facts: Type.Array(Type.Object({
+          text: Type.String({ minLength: 1, maxLength: 500 }),
+          evidence_refs: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 20, uniqueItems: true }),
+        }), { maxItems: 20 }),
+        analyses: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 }),
+        hypotheses: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 }),
+        unknowns: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 }),
+        evidence_refs: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 50, uniqueItems: true }),
+        layout_intent: Type.Union([
+          Type.Literal("single-focus"), Type.Literal("fifty-fifty"), Type.Literal("two-thirds"),
+          Type.Literal("three-column"), Type.Literal("top-hero"), Type.Literal("mixed-grid"),
+        ]),
+        visual_assets: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 }),
+        speaker_notes: Type.String({ maxLength: 4000 }),
+        warnings: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 20 }),
+        render: Type.Object({
+          title: Type.String({ minLength: 1, maxLength: 120 }),
+          layout_intent: Type.Union([
+            Type.Literal("single-focus"), Type.Literal("fifty-fifty"), Type.Literal("two-thirds"),
+            Type.Literal("three-column"), Type.Literal("top-hero"), Type.Literal("mixed-grid"),
+          ]),
+          subtitle: Type.Optional(Type.String({ maxLength: 240 })),
+          eyebrow: Type.Optional(Type.String({ maxLength: 80 })),
+          lead: Type.Optional(Type.String({ maxLength: 240 })),
+          body: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 180 }), { maxItems: 7 })),
+          callout: Type.Optional(Type.String({ maxLength: 240 })),
+          notes: Type.Optional(Type.String({ maxLength: 4000 })),
+          sources: Type.Optional(Type.Array(Type.Object({
+            title: Type.String({ minLength: 1, maxLength: 500 }),
+            url: Type.Optional(Type.String({ maxLength: 2048 })),
+            path: Type.Optional(Type.String({ maxLength: 1024 })),
+            sha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+            page: Type.Optional(Type.Number({ minimum: 1, maximum: 100000 })),
+          }), { maxItems: 20 })),
+        }),
+      }), { minItems: 4, maxItems: 10 })),
+      design_system: Type.Object({
+        token_id: Type.Union([Type.Literal("management-report"), Type.Literal("government-program"), Type.Literal("technology-research")]),
+      }),
+      output_name: Type.String({ minLength: 6, maxLength: 125, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.pptx$" }),
+    }),
+    async execute(_toolCallId, params) {
+      const context = hooks.beforeLogicalTool("presentation.plan.write", params);
+      if (!context?.task_id || !context.profile_id) throw new Error("PPT plan 写入缺少当前受管任务/Profile 上下文");
+      const plan = writePresentationPlan(hooks.projectRoot(), context.task_id, context.profile_id, params as PresentationPlanInput);
+      const result = {
+        task_id: plan.task_id,
+        profile_id: plan.profile_id,
+        project_id: plan.project_id,
+        phase: plan.phase,
+        version: plan.version,
+        plan_sha256: plan.plan_sha256,
+        context_snapshot_sha256: plan.context_snapshot_sha256,
+        path: `.pi/director-runtime/presentation-plans/${plan.task_id}.json`,
+      };
+      assertResultSize(result);
+      hooks.afterLogicalTool("presentation.plan.write", params, result);
+      return { content: content(result), details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "director_artifact_deck_write",
+    label: "生成受控 PPT",
+    description: "使用受控的 @oai/artifact-tool 构建 4-10 页总监 PPT，输出到 outputs/，保留逐页来源备注且不覆盖已有文件。",
+    parameters: Type.Object({
+      schema_version: Type.Literal("1.0"),
+      snapshot_sha256: Type.String({ pattern: "^[a-f0-9]{64}$", description: "当前 weekly.snapshot 或 final plan 的证据上下文 SHA-256" }),
+      plan_sha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
       output_name: Type.String({ minLength: 6, maxLength: 125, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.pptx$" }),
       profile_id: Type.Union([Type.Literal("market-director"), Type.Literal("product-director")]),
-      template_id: Type.Literal("ceo-weekly"),
+      template_id: Type.Union([Type.Literal("ceo-weekly"), Type.Literal("management-report"), Type.Literal("government-program"), Type.Literal("technology-research")]),
       period: Type.Object({
         start: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
         end: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
       }),
       slides: Type.Array(Type.Object({
         title: Type.String({ minLength: 1, maxLength: 120 }),
+        layout_intent: Type.Optional(Type.Union([
+          Type.Literal("single-focus"), Type.Literal("fifty-fifty"), Type.Literal("two-thirds"),
+          Type.Literal("three-column"), Type.Literal("top-hero"), Type.Literal("mixed-grid"),
+        ])),
         subtitle: Type.Optional(Type.String({ maxLength: 240 })),
         eyebrow: Type.Optional(Type.String({ maxLength: 80 })),
         lead: Type.Optional(Type.String({ maxLength: 240 })),
@@ -1706,7 +2339,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
           throw new Error("PPT 写入缺少批准后的任务/意图/载荷/Profile 上下文");
         }
         if (commit.profile_id !== params.profile_id) throw new Error("PPT 载荷 Profile 与当前受管任务不一致");
-        assertDeckMatchesWeeklySnapshot(hooks.projectRoot(), commit.task_id, commit.profile_id, params as DeckPayload);
+        assertDeckMatchesEvidenceContext(hooks.projectRoot(), commit.task_id, commit.profile_id, params as DeckPayload);
         buildStarted = true;
         const result = await buildWeeklyDeck(hooks.projectRoot(), params as DeckPayload, commit as DeckCommitContext);
         assertResultSize(result);
@@ -1738,7 +2371,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIMIT })),
     }),
     async execute(_toolCallId, params) {
-      hooks.beforeLogicalTool("knowledge.search", params);
+      const context = hooks.beforeLogicalTool("knowledge.search", params);
       assertDistinctQueries(params.queries);
       const path = resolveDataFile(hooks.projectRoot(), "knowledge", KNOWLEDGE_DEFINITION.file);
       const table = readTable(path, KNOWLEDGE_DEFINITION);
@@ -1753,6 +2386,46 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       if (result.searches.reduce((total, search) => total + search.returned, 0) > 200) {
         throw new Error("本次知识库检索总返回行数超过 200，请缩小范围或 limit");
       }
+      const loaded = loadEvidence(context);
+      for (const rawRow of result.searches.flatMap((search) => search.rows)) {
+        const row = rawRow as Record<string, string>;
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(row.source_id)) continue;
+        const hash = /(?:^|;\s*)content_sha256=([a-f0-9]{64})(?:;|$)/u.exec(row.notes)?.[1];
+        const evidenceRefsText = /(?:^|;\s*)evidence_refs=([^;]+)/u.exec(row.notes)?.[1] ?? "";
+        const evidenceRef = evidenceRefsText.split("|")[0]?.trim();
+        const extractedPages = [...evidenceRefsText.matchAll(/#page=(\d+)/gu)]
+          .map((match) => Number(match[1]))
+          .filter((page, index, pages) => Number.isInteger(page) && page >= 1 && page <= 100000 && pages.indexOf(page) === index);
+        const pageCountValue = Number(/(?:^|;\s*)total_pages=(\d+)(?:;|$)/u.exec(row.notes)?.[1] ?? "");
+        let url: string | undefined;
+        if (row.url.trim()) {
+          try { url = normalizePublicUrl(row.url).toString(); } catch { continue; }
+        }
+        let relativePath: string | undefined;
+        if (!url && evidenceRef) {
+          const candidate = evidenceRef.replace(/#page=\d+$/u, "").replaceAll("\\", "/");
+          if (/^(inputs|data\/inbox)\/[^\0]+\.pdf$/iu.test(candidate) && !candidate.split("/").includes("..")) relativePath = candidate;
+        }
+        if (!url && (!relativePath || !hash)) continue;
+        const accessedAt = /^\d{4}-\d{2}-\d{2}$/u.test(row.accessed_date)
+          ? `${row.accessed_date}T00:00:00.000Z`
+          : result.snapshot_at;
+        loaded.sources.set(row.source_id, {
+          source_id: row.source_id,
+          title: row.title.slice(0, 500),
+          source_type: row.source_type || "knowledge",
+          ...(url ? { url } : {}),
+          ...(relativePath ? { path: relativePath } : {}),
+          ...(hash ? { content_sha256: hash } : {}),
+          ...(row.source_type === "pdf" && Number.isInteger(pageCountValue) && pageCountValue >= 1 && pageCountValue <= 100000
+            ? { page_count: pageCountValue }
+            : {}),
+          ...(row.source_type === "pdf" ? { extracted_pages: extractedPages } : {}),
+          reliability: row.status === "verified" ? "standard" : "limited",
+          accessed_at: accessedAt,
+        });
+      }
+      saveEvidence(context);
       assertResultSize(result);
       hooks.afterLogicalTool("knowledge.search", params, result);
       return { content: content(result), details: result };
