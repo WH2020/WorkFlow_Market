@@ -1,8 +1,8 @@
 {
   "name": "workflow-director-agent",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
-  "description": "A Pi package for composable market-director and product-director workflows.",
+  "description": "A single-role Sales Director AI Assistant with a Tauri desktop shell and governed Pi workflows.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,6 +15,7 @@
     "pi-package",
     "vertical-agent",
     "workflow",
+    "sales-director",
     "market-director",
     "product-director"
   ],

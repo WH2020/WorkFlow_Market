@@ -49,15 +49,6 @@
     return button;
   }
 
-  function renderProfiles() {
-    const box = $("profiles");
-    box.replaceChildren(...model.profiles.map((profile) => {
-      const button = choice(profile.display_name, profile.description, profile.id === selectedProfile);
-      button.onclick = () => { selectedProfile = profile.id; selectedService = profile.default_service; render(); };
-      return button;
-    }));
-  }
-
   function renderServices() {
     const box = $("services");
     box.replaceChildren(...currentProfile().services.map((service) => {
@@ -252,7 +243,8 @@
     if (!model.tasks.length) { box.textContent = "还没有任务。先选择服务并写下任务说明。"; renderWorkflow(); return; }
     model.tasks.forEach((task, index) => {
       const template = $("task-template").content.cloneNode(true);
-      template.querySelector("strong").textContent = `${task.profile_id || ""} / ${task.service_id || ""}`;
+      const serviceName = currentProfile()?.services.find((service) => service.id === task.service_id)?.display_name;
+      template.querySelector("strong").textContent = serviceName || task.service_id || "销售任务";
       const badge = template.querySelector(".status");
       badge.textContent = label[task.status] || task.status || "未知";
       if (Object.hasOwn(label, task.status)) badge.classList.add(task.status);
@@ -311,7 +303,7 @@
     model.outputs.forEach((item) => box.append(summaryRow("output-row", item.name, item.modified_at)));
   }
 
-  function render() { renderProfiles(); renderServices(); renderTaskForm(); renderTasks(); renderData(); renderOutputs(); }
+  function render() { renderServices(); renderTaskForm(); renderTasks(); renderData(); renderOutputs(); }
 
   async function createTask(request) {
     return api("/api/task-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, request }) });

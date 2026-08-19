@@ -35,6 +35,7 @@ PROFILES = ROOT / "profiles"
 PLUGINS = ROOT / "vertical_plugins"
 OUTPUTS = ROOT / "outputs"
 SERVER_TOKEN = secrets.token_urlsafe(32)
+ACTIVE_PROFILE_ID: str | None = None
 
 
 def now() -> str:
@@ -169,6 +170,8 @@ def profiles() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for path in sorted(PROFILES.glob("*/profile.json")):
         profile = load_json(path)
+        if ACTIVE_PROFILE_ID is not None and profile.get("id") != ACTIVE_PROFILE_ID:
+            continue
         result.append({
             "id": profile["id"], "display_name": profile["display_name"],
             "description": profile.get("description", ""),
@@ -180,8 +183,18 @@ def profiles() -> list[dict[str, Any]]:
 
 def workflows() -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
+    allowed_workflows = None
+    if ACTIVE_PROFILE_ID is not None:
+        allowed_workflows = {
+            service["workflow"]
+            for profile in profiles()
+            for service in profile.get("services", [])
+            if isinstance(service, dict) and isinstance(service.get("workflow"), str)
+        }
     for path in sorted(PLUGINS.glob("**/workflows/*.json")):
         workflow = load_json(path)
+        if allowed_workflows is not None and workflow.get("id") not in allowed_workflows:
+            continue
         result[workflow["id"]] = {
             "id": workflow["id"], "display_name": workflow.get("display_name", workflow["id"]),
             "nodes": [{key: node.get(key) for key in ("id", "type", "depends_on", "tool", "skill", "check", "policy")}
@@ -277,6 +290,8 @@ def task_summaries() -> list[dict[str, Any]]:
                 "current_node", "waiting_node", "completed_nodes", "version", "created_at", "updated_at",
                 "approval_request", "pending_write", "artifacts", "request"
             )}
+            if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
+                continue
             if isinstance(task.get("task_id"), str):
                 summary["presentation_plan"] = presentation_plan(task["task_id"])
             result.append(summary)
@@ -618,15 +633,20 @@ class ControlHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="启动仅本机可访问的总监工作台")
+    parser = argparse.ArgumentParser(description="启动仅本机可访问的销售总监工作台")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--profile", default=os.environ.get("WORKFLOW_AGENT_EDITION_PROFILE", "sales-director"))
     args = parser.parse_args()
+    global ACTIVE_PROFILE_ID
+    ACTIVE_PROFILE_ID = safe_id(args.profile)
+    if not (PROFILES / ACTIVE_PROFILE_ID / "profile.json").is_file():
+        parser.error(f"未知发行版角色：{ACTIVE_PROFILE_ID}")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ControlHandler)
-    print(f"总监工作台已启动：http://127.0.0.1:{args.port}")
+    print(f"销售总监工作台已启动：http://127.0.0.1:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n总监工作台已停止")
+        print("\n销售总监工作台已停止")
 
 
 if __name__ == "__main__":

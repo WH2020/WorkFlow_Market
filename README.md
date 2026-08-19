@@ -1,11 +1,10 @@
 # 垂直岗位智能体工作台
 
-一个以 [Pi](https://github.com/earendil-works/pi) 为 Agent 运行时的轻本体插件框架。当前提供两个开箱即用的岗位组合：
+一个以 [Pi](https://github.com/earendil-works/pi) 为 Agent 运行时的轻本体插件框架。当前 Windows 桌面发行版只提供一个开箱即用岗位：
 
-- `market-director`：行业研究、政府合作方案、日常文件、销售推进与复盘、周报 PPT。
-- `product-director`：产品发现、PRD、指标与实验、路线图、发布评审、周报 PPT。
+- `sales-director`：客户推进、资源协调、客户与行业研究、政府合作方案、销售文件、复盘和周报 PPT。
 
-用户选择的是“岗位”和“服务”，不需要理解底层插件。开发者可以独立升级插件，再通过 Profile 组合成新的岗位 Agent。
+用户直接选择销售服务，不需要再选择岗位或理解底层插件。仓库仍保留 Profile 插件框架，供开发者维护既有兼容组合，但销售总监发行版会在界面和 Pi 运行时同时锁定 `sales-director`。
 
 > 新的 Pi Agent 不接入微信或 WeFlow。仓库中原有 WeFlow 代码只为旧版 Codex 工作台兼容保留，不会被 Pi 包及两个新 Profile 加载。
 
@@ -42,7 +41,7 @@ cd WorkFlow_Market
 .\Agent4Market.exe
 ```
 
-Windows 安装器会使用系统自带的 .NET Framework 编译器生成根目录下的单文件启动器 `Agent4Market.exe`。双击后会启动仅本机可访问的工作台、打开浏览器并在同一控制台运行交互式 Pi；退出 Pi 时会自动停止本次启动的工作台。EXE 不包含业务数据，也不会复制 Codex Desktop 运行时；移动 EXE 时必须连同整个已安装目录一起移动。
+Windows 安装器使用 Tauri 2 构建根目录下的桌面程序 `Agent4Market.exe`。双击后直接打开“销售总监 AI 助手”窗口，不调用系统浏览器；程序会同时启动仅本机可访问的工作台和销售总监 Pi 终端，关闭桌面窗口时回收两者。EXE 不包含业务数据，也不依赖 Codex Desktop；移动 EXE 时仍必须连同整个已安装目录一起移动。
 
 macOS Terminal：
 
@@ -64,24 +63,22 @@ python -m agent_platform doctor --require-ppt
 
 如需公开资料检索，在本机环境中设置 `BRAVE_SEARCH_API_KEY`；密钥不要写入仓库。`web.search` 只发现来源，后续 `web.open` 才读取正文；正文读取固定到已核验的公网地址，拒绝重定向、本机/私网地址、危险协议、疑似带密钥 URL 和超限响应，并限制 DNS、连接空闲和总处理时间。[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
-Pi 扩展会按当前 Profile 动态加载 Skills；产品总监不会加载市场/销售 Skill，市场总监也不会加载产品 Skill，未进入任何 Profile 的旧版邮箱与聊天 Skill 不会加载。
+桌面发行版只加载销售总监所需 Skills，包含政府合作能力，不加载产品研发 Skills；旧版邮箱与聊天 Skill 也不会加载。
 
 进入 Pi 后：
 
 ```text
 /director-profile
-/director-profile product-director
 /director-services
 /director-run pdf-import 读取 inputs/example.pdf，提取页码证据并准备入库
 /director-run presentation-studio 为管理层制作一份 6 页具身智能行业判断，受众是总经理，使用技术研究风格
-/director-run product-prd 为设备端告警功能形成 PRD
 /director-status
 /director-approve
 /director-reject approve_scope 范围需要调整
 /director-cancel 暂停本次任务
 ```
 
-也可以启动面向非技术用户的本地工作台：
+开发诊断时也可以单独启动销售总监工作台：
 
 ```powershell
 python ui/server.py
@@ -89,7 +86,7 @@ python ui/server.py
 
 macOS 使用 `python3 ui/server.py`。
 
-浏览器打开 `http://127.0.0.1:8765`，即可选择岗位与服务、提交任务、查看 DAG，并在人工关口批准、驳回或取消。选择“PPT 工作室”后会出现结构化需求表单；大纲以便利贴呈现，允许改标题和拖拽排序。修订不会直接改写已确认 plan，而是创建一个新的受管任务并重新走证据、确认和生成审批。服务只监听本机，不会自动发送文件。完整说明见 [Pi 使用说明](docs/PI使用说明.md)。
+正常使用请直接双击 `Agent4Market.exe`。桌面窗口可以选择销售服务、提交任务、查看 DAG，并在人工关口批准、驳回或取消；没有市场总监或产品总监入口。开发模式下的 HTTP 服务仍只监听本机，不会自动发送文件。完整说明见 [Pi 使用说明](docs/PI使用说明.md)。
 
 ## 校验插件与工作流
 
@@ -113,10 +110,11 @@ python -m agent_platform list-services --profile product-director
 ```text
 agent_platform/                   轻本体加载、校验、组合与 DAG 规划
 contracts/                        插件、Profile、Workflow JSON 契约
-profiles/                         市场总监与产品总监开箱组合
+profiles/                         Profile 源码；桌面发行版锁定销售总监
 vertical_plugins/                 shared / market / product 插件
 pi/                               Pi 扩展与产品总监/共享 Skills
-ui/                               仅本机访问的非技术用户工作台
+ui/                               销售总监桌面窗口的本地工作台内容
+desktop/src-tauri/                Tauri 2 桌面壳与进程生命周期管理
 plugin/market-director-copilot/   既有 Codex 兼容插件
 data/                             本地知识与业务台账模板
 library/templates/                演示与办公模板

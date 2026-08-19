@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "sales-director-main",
+  "description": "Minimal capability set for the local Sales Director workbench.",
+  "windows": ["main"],
+  "permissions": ["core:default"],
+  "remote": {
+    "urls": ["http://127.0.0.1:8765/*"]
+  }
+}

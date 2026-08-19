@@ -722,13 +722,20 @@ function inputTargetsSafeProjectRead(input: unknown, projectRoot: string): boole
 }
 
 export default function verticalWorkflow(pi: ExtensionAPI) {
-  const profiles = loadProfiles();
+  const installedProfiles = loadProfiles();
+  const editionProfileId = process.env.WORKFLOW_AGENT_EDITION_PROFILE?.trim() || "";
+  if (editionProfileId && !installedProfiles.has(editionProfileId)) {
+    throw new Error(`Unknown WORKFLOW_AGENT_EDITION_PROFILE ${editionProfileId}`);
+  }
+  const profiles = editionProfileId
+    ? new Map([[editionProfileId, installedProfiles.get(editionProfileId)!]])
+    : installedProfiles;
   const { plugins, workflows } = loadPluginBundle();
   const skillCatalog = loadSkillCatalog();
   for (const profile of profiles.values()) {
     validateProfileBindings(profile, plugins, workflows, skillCatalog);
   }
-  const requested = process.env.WORKFLOW_AGENT_PROFILE || "market-director";
+  const requested = editionProfileId || process.env.WORKFLOW_AGENT_PROFILE || "sales-director";
   const initialProfile = profiles.get(requested);
   if (!initialProfile) {
     throw new Error(
@@ -790,7 +797,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         } catch {
           return [];
         }
-      });
+      }).filter((candidate) => profiles.has(candidate.request.profile_id));
       const selectedRequest = selectWorkbenchRequest(
         parsed.map((candidate) => candidate.request),
         activeProfile.id,
@@ -1022,6 +1029,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     } else {
       activeTask = taskStore.findActive(sessionKey);
     }
+    if (activeTask && !isTerminal(activeTask) && editionProfileId && activeTask.profile_id !== editionProfileId) {
+      activeTask = undefined;
+    }
     if (activeTask && !isTerminal(activeTask)) {
       const recoveredProfile = profiles.get(activeTask.profile_id);
       if (!recoveredProfile) throw new Error(`Recovered task references unknown Profile ${activeTask.profile_id}`);
@@ -1231,7 +1241,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("director-profile", {
-    description: "查看或切换市场总监/产品总监角色",
+    description: editionProfileId ? "查看当前销售总监发行版角色" : "查看或切换垂直角色",
     handler: async (args, ctx) => {
       let selected = args.trim();
       if (!selected && ctx.hasUI) {

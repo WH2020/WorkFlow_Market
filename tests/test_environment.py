@@ -13,19 +13,21 @@ class EnvironmentTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         windows = (root / "scripts" / "setup-windows.ps1").read_text(encoding="utf-8")
         macos = (root / "scripts" / "setup-macos.sh").read_text(encoding="utf-8")
-        launcher_build = (root / "scripts" / "build-windows-launcher.ps1").read_text(encoding="utf-8")
-        launcher_source = (root / "launcher" / "Agent4MarketLauncher.cs").read_text(encoding="utf-8")
+        desktop_build = (root / "scripts" / "build-windows-desktop.ps1").read_text(encoding="utf-8")
+        desktop_source = (root / "desktop" / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
         for script in (windows, macos):
             self.assertIn("codex-runtimes", script)
             self.assertIn("--ignore-scripts", script)
-        self.assertIn("build-windows-launcher.ps1", windows)
-        self.assertIn("--self-test", launcher_build)
+        self.assertIn("build-windows-desktop.ps1", windows)
+        self.assertIn("--self-test", desktop_build)
         self.assertIn("BurntSushi.ripgrep.MSVC", windows)
         self.assertIn("sharkdp.fd", windows)
         self.assertIn("$env:Path, $UserPath, $MachinePath", windows)
         self.assertIn("Microsoft\\WinGet\\Packages", windows)
-        self.assertIn("launcher.log", launcher_build)
-        self.assertIn('EnvironmentVariables["PYTHONUTF8"] = "1"', launcher_source)
+        self.assertIn("desktop-launcher.log", desktop_build)
+        self.assertIn('env("PYTHONUTF8", "1")', desktop_source)
+        self.assertIn('const PROFILE_ID: &str = "sales-director"', desktop_source)
+        self.assertNotIn("OpenBrowser", desktop_source)
 
     def _project_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, Path]:
         temporary = tempfile.TemporaryDirectory()

@@ -201,10 +201,9 @@ $DoctorJson | ForEach-Object { Write-Output $_ }
 $DoctorResult = ($DoctorJson -join [Environment]::NewLine) | ConvertFrom-Json
 if (-not [bool]$DoctorResult.ppt.ready) { throw "Independent PPT runtime validation failed." }
 Write-Host "Independent PPT runtime detected: PptxGenJS + LibreOffice + PDF.js." -ForegroundColor Green
-$LauncherBuild = Join-Path $ProjectRoot "scripts\build-windows-launcher.ps1"
-& $LauncherBuild
+$DesktopBuild = Join-Path $ProjectRoot "scripts\build-windows-desktop.ps1"
+& $DesktopBuild
 if ($LASTEXITCODE -ne 0) { throw "Agent4Market.exe build failed." }
 
-Write-Host "Setup complete. Double-click Agent4Market.exe or run: .\Agent4Market.exe" -ForegroundColor Green
-Write-Host "Start the local workbench in another terminal with: python ui/server.py"
+Write-Host "Setup complete. Double-click Agent4Market.exe to open the Sales Director desktop app." -ForegroundColor Green
 exit 0

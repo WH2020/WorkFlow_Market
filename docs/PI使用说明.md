@@ -10,7 +10,7 @@ Windows PowerShell：
 git clone https://github.com/WH2020/WorkFlow_Market.git
 cd WorkFlow_Market
 .\scripts\setup-windows.ps1
-.\scripts\start-windows.ps1
+.\Agent4Market.exe
 ```
 
 macOS Terminal：
@@ -24,7 +24,7 @@ bash scripts/start-macos.sh
 
 完整的参数、权限和故障处理见 [Windows / macOS 安装部署](双平台安装部署.md)。安装后可运行 `python -m agent_platform doctor`（macOS 使用 `python3`）；需要强制核验 PPT 时增加 `--require-ppt`。
 
-Pi Package 会按当前 Profile 动态加载所需 Skills；切换 Profile 时自动重载资源。产品总监不会加载市场/销售 Skill，市场总监也不会加载产品 Skill。未进入 Profile 的旧版邮箱与聊天 Skill 不会加载。第三方 Pi Package 具备本机执行权限，安装前应先审阅来源。
+Windows 桌面发行版固定加载 `sales-director`，保留销售、研究、政府合作、文件和 PPT Skills，不加载产品研发 Skill，也不允许切换到其他总监角色。未进入 Profile 的旧版邮箱与聊天 Skill不会加载。第三方 Pi Package 具备本机执行权限，安装前应先审阅来源。
 
 行业研究和政府合作方案需要公开检索。在本机环境变量中配置 `BRAVE_SEARCH_API_KEY` 后再启动 Pi；密钥不要放进 `.env`、JSON、截图或 Git。适配器先调用 Brave 正式 Web Search API 发现来源，再由受控 `web.open` 读取选中的正文；读取连接固定到已核验的公网地址，DNS 与连接空闲各限 10 秒，网页下载及在线 PDF 提取合计限 30 秒，并拒绝重定向。未配置、配额不足、私网目标或网络异常时会停在当前 DAG 节点。[官方认证说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
@@ -46,17 +46,15 @@ WORKFLOW_LATIN_FONT             = Latin font
 
 Windows 默认使用 `Microsoft YaHei`，macOS 默认使用 `PingFang SC`；两者的拉丁字体默认是 `Arial`。启动入口通过 `python -m agent_platform launch` 每次重新核验路径，并只向本次 Pi 子进程注入 LibreOffice 路径和字体；不会生成或执行包含路径的 shell 脚本。缺少任一项目依赖或 LibreOffice 时，`artifact.deck.write` 会停止并指出缺项；不会生成伪 `.pptx`。
 
-## 选择岗位
+## 岗位
 
-默认岗位为 `market-director`：
+桌面发行版岗位固定为 `sales-director`：
 
 ```text
 /director-profile
-/director-profile market-director
-/director-profile product-director
 ```
 
-也可在启动 Pi 前设置 `WORKFLOW_AGENT_PROFILE` 为上述 Profile ID。
+桌面程序同时设置 `WORKFLOW_AGENT_PROFILE` 和发行版锁；即使通过 Pi 命令也不能切换到其他角色。
 
 ## 选择服务
 
@@ -66,10 +64,6 @@ Windows 默认使用 `Microsoft YaHei`，macOS 默认使用 `PingFang SC`；两�
 /director-run pdf-import 读取 inputs/某报告.pdf，按页提取证据并准备写入知识库
 /director-run government-proposal 为某地形成脑机接口试点合作框架
 /director-run presentation-studio 为总经理制作一份 6 页脑机接口行业研判，采用技术研究风格
-/director-run product-discovery 核验一线工程师远程诊断工具的机会
-/director-run product-prd 为设备告警闭环形成可验收 PRD
-/director-run product-metrics 设计该功能的指标、埋点和灰度实验
-/director-run release-review 评审 1.2 版本是否可以进入灰度
 /director-status
 /director-approve
 /director-reject approve_scope 需要补充异常流程
@@ -80,7 +74,7 @@ Windows 默认使用 `Microsoft YaHei`，macOS 默认使用 `PingFang SC`；两�
 
 ## 本地工作台
 
-另开一个终端，在仓库根目录执行：
+正常使用时双击仓库根目录的 `Agent4Market.exe`，桌面窗口会自动启动本地工作台和销售总监 Pi 终端，不会打开系统浏览器。以下命令只用于开发诊断：
 
 ```powershell
 python ui/server.py
@@ -92,7 +86,7 @@ macOS 使用：
 python3 ui/server.py
 ```
 
-浏览器打开 `http://127.0.0.1:8765`。工作台只监听 `127.0.0.1`，提供岗位/服务选择、任务提交、阶段查看、审批、驳回、取消、台账状态摘要和最近产物入口。选择“PPT 工作室”或“周五工作汇报”时，页面会切换为结构化表单，收集主题、场景、模式、受众、目的、使用场合、语言、时长、4–10 页、保密等级、输出名和设计风格。任务请求由 Pi 接手，页面本身不会执行模型、改客户阶段或发送文件。
+工作台只监听 `127.0.0.1`，提供销售服务选择、任务提交、阶段查看、审批、驳回、取消、台账状态摘要和最近产物入口；界面不显示市场总监或产品总监。选择“PPT 工作室”或“周五销售汇报”时，窗口会切换为结构化表单。任务请求由 Pi 接手，界面本身不会执行模型、改客户阶段或发送文件。
 
 PPT 工作室首版的资料范围固定为“公开网页 + 当前 Profile 知识库”：DAG 先执行公开检索与正文读取，再读取内部知识。本地 PDF 应先通过“PDF 资料入库”进入知识库。界面不会提供尚未生效的“仅本地/仅公开”开关；不要把秘密、客户口令或未公开项目代号写入会用于公开检索的主题。后续如需这两种范围，必须用权限和节点都独立的受控工作流实现。
 

@@ -19,13 +19,14 @@ class PlatformTests(unittest.TestCase):
         report = Platform(ROOT).validate_all()
         self.assertEqual(12, report.plugins)
         self.assertEqual(14, report.workflows)
-        self.assertEqual(2, report.profiles)
-        self.assertEqual(14, report.services)
+        self.assertEqual(3, report.profiles)
+        self.assertEqual(21, report.services)
 
-    def test_market_and_product_profiles_resolve_dependencies(self) -> None:
+    def test_director_profiles_resolve_expected_dependencies(self) -> None:
         platform = Platform(ROOT)
         market = platform.resolve_profile("market-director")
         product = platform.resolve_profile("product-director")
+        sales = platform.resolve_profile("sales-director")
         self.assertIn("shared.knowledge", market["resolved_plugins"])
         self.assertIn("shared.presentation-studio", market["resolved_plugins"])
         self.assertIn("market.government", market["resolved_plugins"])
@@ -36,6 +37,9 @@ class PlatformTests(unittest.TestCase):
         self.assertIn("product.release", product["resolved_plugins"])
         self.assertIn("shared.presentation-studio", product["resolved_plugins"])
         self.assertNotIn("market.sales", product["resolved_plugins"])
+        self.assertIn("market.sales", sales["resolved_plugins"])
+        self.assertIn("market.government", sales["resolved_plugins"])
+        self.assertNotIn("product.discovery", sales["resolved_plugins"])
 
     def test_resolved_profiles_contain_no_chat_import_reference(self) -> None:
         platform = Platform(ROOT)
@@ -70,7 +74,7 @@ class PlatformTests(unittest.TestCase):
         platform = Platform(ROOT)
         plugins = platform.load_plugins()
         required_skills: set[str] = set()
-        for profile_id in ("market-director", "product-director"):
+        for profile_id in ("market-director", "product-director", "sales-director"):
             resolved = platform.resolve_profile(profile_id)["resolved_plugins"]
             for plugin_id in resolved:
                 required_skills.update(plugins[plugin_id].manifest["skills"])

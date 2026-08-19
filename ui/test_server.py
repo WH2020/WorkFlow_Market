@@ -11,13 +11,14 @@ from ui import server
 class ControlCentreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans = (
-            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS
+        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_active_profile = (
+            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.ACTIVE_PROFILE_ID
         )
         server.RUNTIME = Path(self.temporary.name)
         server.TASKS = server.RUNTIME / "tasks"
         server.REQUESTS = server.RUNTIME / "requests"
         server.PRESENTATION_PLANS = server.RUNTIME / "presentation-plans"
+        server.ACTIVE_PROFILE_ID = None
 
     def write_plan(self, task_id="task-ppt", **changes):
         plan = {
@@ -34,8 +35,8 @@ class ControlCentreTests(unittest.TestCase):
         return plan
 
     def tearDown(self):
-        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS = (
-            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans
+        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.ACTIVE_PROFILE_ID = (
+            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_active_profile
         )
         self.temporary.cleanup()
 
@@ -48,6 +49,18 @@ class ControlCentreTests(unittest.TestCase):
     def test_safe_id_rejects_path_traversal(self):
         with self.assertRaises(ValueError):
             server.safe_id("../task")
+
+    def test_sales_director_edition_returns_only_one_role(self):
+        server.ACTIVE_PROFILE_ID = "sales-director"
+        profiles = server.profiles()
+        self.assertEqual([profile["id"] for profile in profiles], ["sales-director"])
+        service_ids = {service["id"] for service in profiles[0]["services"]}
+        self.assertIn("sales-review", service_ids)
+        self.assertIn("government-proposal", service_ids)
+        self.assertNotIn("product-discovery", service_ids)
+        workflow_ids = set(server.workflows())
+        self.assertIn("market.government.proposal", workflow_ids)
+        self.assertFalse(any(workflow_id.startswith("product.") for workflow_id in workflow_ids))
 
     def test_exclusive_task_rejects_a_concurrent_writer(self):
         target = server.TASKS / "task-a.json"

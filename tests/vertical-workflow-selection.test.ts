@@ -46,6 +46,32 @@ test("accepted workbench requests are never selected", () => {
   );
 });
 
+test("sales director edition exposes only sales and government skills", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sales-director-edition-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "product-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  try {
+    writeRequest(root, "product-director");
+    const runtime = harness(root);
+    const resources = runtime.handlers.get("resources_discover")?.() as { skillPaths: string[] };
+    assert.ok(resources.skillPaths.some((path) => path.includes("manage-market-pipeline")));
+    assert.ok(resources.skillPaths.some((path) => path.includes("draft-government-program")));
+    assert.equal(resources.skillPaths.some((path) => path.includes("product-discovery")), false);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(runtime.messages.some((message) => message.includes("product-director")), false);
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function harness(root: string) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
