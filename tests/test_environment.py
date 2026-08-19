@@ -14,6 +14,7 @@ class EnvironmentTests(unittest.TestCase):
         windows = (root / "scripts" / "setup-windows.ps1").read_text(encoding="utf-8")
         macos = (root / "scripts" / "setup-macos.sh").read_text(encoding="utf-8")
         launcher_build = (root / "scripts" / "build-windows-launcher.ps1").read_text(encoding="utf-8")
+        launcher_source = (root / "launcher" / "Agent4MarketLauncher.cs").read_text(encoding="utf-8")
         for script in (windows, macos):
             self.assertIn("codex-runtimes", script)
             self.assertIn("--ignore-scripts", script)
@@ -24,6 +25,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("$env:Path, $UserPath, $MachinePath", windows)
         self.assertIn("Microsoft\\WinGet\\Packages", windows)
         self.assertIn("launcher.log", launcher_build)
+        self.assertIn('EnvironmentVariables["PYTHONUTF8"] = "1"', launcher_source)
 
     def _project_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, Path]:
         temporary = tempfile.TemporaryDirectory()

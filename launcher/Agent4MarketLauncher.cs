@@ -164,6 +164,8 @@ namespace Agent4MarketLauncher
             info.CreateNoWindow = true;
             info.RedirectStandardOutput = true;
             info.RedirectStandardError = true;
+            info.EnvironmentVariables["PYTHONUTF8"] = "1";
+            info.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
             Process process = new Process();
             process.StartInfo = info;
             process.EnableRaisingEvents = true;
