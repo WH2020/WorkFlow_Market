@@ -45,6 +45,7 @@ jobs:
           python -m agent_platform doctor
           pnpm check:types
           pnpm test:runtime
+          pnpm test:ppt-e2e
       - name: Run Python and workbench tests
         run: |
           python -m unittest discover -s tests -v

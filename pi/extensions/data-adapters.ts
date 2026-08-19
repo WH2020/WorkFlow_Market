@@ -682,7 +682,6 @@ function runDeckBuilder(
   inputPath: string,
   outputPath: string,
   qaDirectory: string,
-  expectedSlideCount: number,
 ): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     execFile(
@@ -691,27 +690,6 @@ function runDeckBuilder(
       { timeout: 180_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: artifactEnvironment() },
       (error, stdout, stderr) => {
         if (error) {
-          const output = String(stdout).trim();
-          const lastLine = output.split(/\r?\n/u).at(-1) ?? "";
-          try {
-            const manifest = JSON.parse(lastLine) as { output?: unknown; qa_dir?: unknown; slide_count?: unknown };
-            const code = error.code;
-            const verifiedWindowsCanvasTeardown = process.platform === "win32"
-              && (code === 3221226505 || code === -1073740791 || code === "3221226505" || code === "-1073740791");
-            if (
-              verifiedWindowsCanvasTeardown
-              && manifest.output === outputPath
-              && manifest.qa_dir === qaDirectory
-              && manifest.slide_count === expectedSlideCount
-              && existsSync(outputPath)
-              && lstatSync(outputPath).size > 0
-            ) {
-              resolvePromise(output);
-              return;
-            }
-          } catch {
-            // Fall through to the real build failure below.
-          }
           reject(new Error(`PPT 构建失败：${String(stderr || stdout || error.message).trim().slice(0, 4000)}`));
           return;
         }
@@ -721,18 +699,19 @@ function runDeckBuilder(
   });
 }
 
-function runSlidesTest(
-  pythonPath: string,
-  testPath: string,
+function runDeckQa(
+  nodePath: string,
+  qaScript: string,
   outputPath: string,
-  compatibilityRunner: string,
+  qaDirectory: string,
+  expectedSlideCount: number,
 ): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     execFile(
-      pythonPath,
-      [compatibilityRunner, testPath, outputPath],
+      nodePath,
+      [qaScript, "--input", outputPath, "--qa-dir", qaDirectory, "--expected-slides", String(expectedSlideCount)],
       {
-        timeout: 180_000,
+        timeout: 300_000,
         windowsHide: true,
         maxBuffer: 4 * 1024 * 1024,
         env: artifactEnvironment(),
@@ -753,43 +732,12 @@ function runSlidesTest(
   });
 }
 
-function runMontage(
-  pythonPath: string,
-  montageScript: string,
-  qaDirectory: string,
-  montagePath: string,
-): Promise<string> {
-  return new Promise((resolvePromise, reject) => {
-    execFile(
-      pythonPath,
-      [
-        montageScript,
-        "--input_dir", qaDirectory,
-        "--output_file", montagePath,
-        "--num_col", "3",
-        "--label_mode", "filename",
-        "--fail_on_image_error",
-      ],
-      { timeout: 120_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024, env: artifactEnvironment() },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(new Error(`PPT 预览拼图失败：${String(stderr || stdout || error.message).trim().slice(0, 4000)}`));
-          return;
-        }
-        resolvePromise(String(stdout).trim());
-      },
-    );
-  });
-}
-
 function artifactEnvironment(): NodeJS.ProcessEnv {
   const allowed = new Set([
     "PATH", "Path", "PATHEXT", "SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "COMSPEC",
     "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA",
     "LANG", "LC_ALL", "LC_CTYPE", "XDG_CACHE_HOME",
-    "NODE_PATH", "RUNTIME_NODE", "RUNTIME_NODE_MODULES", "RUNTIME_BIN_DIR",
-    "WORKFLOW_ARTIFACT_TOOL_PATH", "WORKFLOW_PRESENTATIONS_MARKER",
-    "WORKFLOW_CJK_FONT", "WORKFLOW_LATIN_FONT",
+    "WORKFLOW_LIBREOFFICE_PATH", "WORKFLOW_CJK_FONT", "WORKFLOW_LATIN_FONT",
   ]);
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key)));
 }
@@ -928,7 +876,14 @@ type DeckReceipt = {
   artifact_sha256: string;
   bytes: number;
   slide_count: number;
-  qa: { slides_test: string; preview_directory: string; montage: string };
+  qa: {
+    validation?: string;
+    /** Legacy field retained only so receipts created before v0.4 remain recoverable. */
+    slides_test?: string;
+    preview_directory: string;
+    montage: string;
+    renderer?: string;
+  };
   updated_at: string;
 };
 
@@ -968,6 +923,7 @@ export function holdDeckIntentLockForTests(projectRoot: string, intentId: string
 export function readCommittedDeckReceipt(root: string, path: string, commit: DeckCommitContext, outputPath: string): DeckReceipt | undefined {
   if (!existsSync(path)) return undefined;
   const receipt = JSON.parse(readFileSync(path, "utf8")) as DeckReceipt;
+  const validationEvidence = receipt.qa?.validation ?? receipt.qa?.slides_test;
   if (
     receipt.schema_version !== "1.0" || receipt.intent_id !== commit.intent_id || receipt.task_id !== commit.task_id ||
     receipt.payload_sha256 !== commit.payload_sha256 || receipt.owner !== "director_artifact_deck_write" ||
@@ -976,7 +932,7 @@ export function readCommittedDeckReceipt(root: string, path: string, commit: Dec
     !/^[a-f0-9]{64}$/u.test(receipt.artifact_sha256) ||
     !Number.isInteger(receipt.bytes) || receipt.bytes < 1 || receipt.bytes > MAX_DECK_BYTES ||
     !Number.isInteger(receipt.slide_count) || receipt.slide_count < 4 || receipt.slide_count > 10 ||
-    !receipt.qa || !/Test passed\. No overflow detected\./u.test(receipt.qa.slides_test)
+    !receipt.qa || typeof validationEvidence !== "string" || !/Test passed\. No overflow detected\./u.test(validationEvidence)
   ) throw new Error("PPT receipt 与当前任务/意图/载荷不一致，需人工恢复");
   const previewDirectory = resolve(root, receipt.qa.preview_directory);
   const montagePath = resolve(root, receipt.qa.montage);
@@ -1100,27 +1056,22 @@ async function buildWeeklyDeck(projectRoot: string, payload: DeckPayload, commit
   const temporaryDeckPath = join(ownedCanonical, "artifact.pptx");
   const qaDirectory = join(ownedCanonical, "qa");
   const builderPath = resolve(dirname(fileURLToPath(import.meta.url)), "..", "artifacts", "build-director-deck.mjs");
-  const compatibilityRunner = resolve(dirname(fileURLToPath(import.meta.url)), "..", "artifacts", "run-slides-test-compatible.py");
-  const nodePath = process.env.WORKFLOW_ARTIFACT_NODE?.trim() || process.execPath;
-  const pythonPath = process.env.WORKFLOW_ARTIFACT_PYTHON?.trim();
-  const slidesTestPath = process.env.WORKFLOW_SLIDES_TEST?.trim();
-  const montageScript = slidesTestPath ? resolve(dirname(slidesTestPath), "create_montage.py") : "";
+  const qaScript = resolve(dirname(fileURLToPath(import.meta.url)), "..", "artifacts", "validate-and-render-deck.mjs");
+  const nodePath = process.execPath;
   if (!existsSync(builderPath)) throw new Error("PPT 构建脚本缺失");
-  if (!existsSync(compatibilityRunner)) throw new Error("PPT QA 兼容运行器缺失");
-  if (!pythonPath || !existsSync(pythonPath)) throw new Error("缺少有效的 WORKFLOW_ARTIFACT_PYTHON，无法运行 PPT QA");
-  if (!slidesTestPath || !existsSync(slidesTestPath)) throw new Error("缺少有效的 WORKFLOW_SLIDES_TEST，无法运行 PPT QA");
-  if (!montageScript || !existsSync(montageScript)) throw new Error("PPT 预览拼图工具缺失");
+  if (!existsSync(qaScript)) throw new Error("独立 PPT 渲染与 QA 脚本缺失");
   writeFileSync(inputPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
   let committed = false;
   let artifactPublished = false;
   let preserveRecoveryState = false;
   try {
-    const stdout = await runDeckBuilder(nodePath, builderPath, inputPath, temporaryDeckPath, qaDirectory, payload.slides.length);
+    const stdout = await runDeckBuilder(nodePath, builderPath, inputPath, temporaryDeckPath, qaDirectory);
     if (!existsSync(temporaryDeckPath)) throw new Error("PPT 构建器未生成私有临时文件");
     const metadata = lstatSync(temporaryDeckPath);
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1 || metadata.size > MAX_DECK_BYTES) {
       throw new Error("PPT 输出不是有效大小的普通文件");
     }
+    const validation = await runDeckQa(nodePath, qaScript, temporaryDeckPath, qaDirectory, payload.slides.length);
     for (let index = 1; index <= payload.slides.length; index += 1) {
       const previewPath = join(qaDirectory, `slide-${String(index).padStart(2, "0")}.png`);
       if (!existsSync(previewPath)) throw new Error(`PPT 第 ${index} 页预览缺失`);
@@ -1129,20 +1080,21 @@ async function buildWeeklyDeck(projectRoot: string, payload: DeckPayload, commit
         throw new Error(`PPT 第 ${index} 页预览无效`);
       }
     }
-    const montagePath = join(qaDirectory, "deck-montage.webp");
-    await runMontage(pythonPath, montageScript, qaDirectory, montagePath);
+    const montagePath = join(qaDirectory, "deck-montage.png");
     const montageMeta = lstatSync(montagePath);
     if (!montageMeta.isFile() || montageMeta.isSymbolicLink() || montageMeta.size < 1) {
       throw new Error("PPT 全页预览拼图无效");
     }
-    const slidesTest = await runSlidesTest(pythonPath, slidesTestPath, temporaryDeckPath, compatibilityRunner);
     let build: unknown;
     try { build = JSON.parse(stdout.split(/\r?\n/u).at(-1) ?? "{}"); } catch { build = { stdout: stdout.slice(0, 1000) }; }
+    let qaResult: { renderer?: unknown } = {};
+    try { qaResult = JSON.parse(validation.split(/\r?\n/u).at(-1) ?? "{}"); } catch { /* keep textual QA evidence */ }
     const artifactSha256 = binarySha256(temporaryDeckPath);
     const qa = {
-      slides_test: slidesTest,
+      validation,
       preview_directory: relative(root, qaDirectory).replaceAll("\\", "/"),
-      montage: relative(root, join(qaDirectory, "deck-montage.webp")).replaceAll("\\", "/"),
+      montage: relative(root, montagePath).replaceAll("\\", "/"),
+      ...(typeof qaResult.renderer === "string" ? { renderer: qaResult.renderer } : {}),
     };
     const receipt: DeckReceipt = {
       schema_version: "1.0", intent_id: commit.intent_id, task_id: commit.task_id,
@@ -2299,7 +2251,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
   pi.registerTool({
     name: "director_artifact_deck_write",
     label: "生成受控 PPT",
-    description: "使用受控的 @oai/artifact-tool 构建 4-10 页总监 PPT，输出到 outputs/，保留逐页来源备注且不覆盖已有文件。",
+    description: "使用项目内置 PptxGenJS 与 LibreOffice QA 构建 4-10 页可编辑总监 PPT，输出到 outputs/，保留逐页来源备注且不覆盖已有文件。",
     parameters: Type.Object({
       schema_version: Type.Literal("1.0"),
       snapshot_sha256: Type.String({ pattern: "^[a-f0-9]{64}$", description: "当前 weekly.snapshot 或 final plan 的证据上下文 SHA-256" }),

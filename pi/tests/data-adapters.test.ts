@@ -852,7 +852,7 @@ test("a failed deck link removes only the owned prepared receipt so retry can re
       artifact_sha256: createHash("sha256").update("deck-content").digest("hex"),
       bytes: 12, slide_count: 4,
       qa: {
-        slides_test: "Test passed. No overflow detected.",
+        validation: "Test passed. No overflow detected.",
         preview_directory: ".pi/director-runtime/deck-jobs/job/qa",
         montage: ".pi/director-runtime/deck-jobs/job/qa/deck-montage.webp",
       },

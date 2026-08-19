@@ -16,21 +16,14 @@ from .core import ManifestError, Platform, WorkflowError
 MIN_NODE = (22, 19, 0)
 MIN_PNPM = (9, 0, 0)
 MIN_PI = (0, 84, 2)
-PPT_PATH_KEYS = (
-    "WORKFLOW_ARTIFACT_NODE",
-    "WORKFLOW_ARTIFACT_TOOL_PATH",
-    "WORKFLOW_PRESENTATIONS_MARKER",
-    "WORKFLOW_ARTIFACT_PYTHON",
-    "WORKFLOW_SLIDES_TEST",
-    "RUNTIME_NODE",
-    "RUNTIME_NODE_MODULES",
-    "RUNTIME_BIN_DIR",
-)
+PPT_PACKAGES = ("pptxgenjs", "@napi-rs/canvas", "jszip", "pdfjs-dist")
 
 
 def platform_id(system_name: str | None = None) -> str:
     normalized = (system_name or platform.system()).strip().lower()
-    return {"windows": "windows", "darwin": "macos"}.get(normalized, "linux" if normalized == "linux" else normalized)
+    return {"windows": "windows", "darwin": "macos"}.get(
+        normalized, "linux" if normalized == "linux" else normalized
+    )
 
 
 def _version(value: str) -> tuple[int, int, int] | None:
@@ -88,33 +81,51 @@ def _command_check(
     return result
 
 
-def _existing(candidates: Sequence[Path], *, directory: bool = False, executable: bool = False, os_id: str) -> Path | None:
-    for candidate in candidates:
-        try:
-            resolved = candidate.expanduser().resolve()
-            valid = resolved.is_dir() if directory else resolved.is_file()
-            if executable and os_id != "windows":
-                valid = valid and os.access(resolved, os.X_OK)
-            if valid:
-                return resolved
-        except OSError:
-            continue
-    return None
+def _executable(path: Path, os_id: str) -> bool:
+    try:
+        return path.is_file() and (os_id == "windows" or os.access(path, os.X_OK))
+    except OSError:
+        return False
 
 
-def _explicit_or_detected(
-    key: str,
-    environ: Mapping[str, str],
-    candidates: Sequence[Path],
-    *,
-    directory: bool = False,
-    executable: bool = False,
-    os_id: str,
-) -> Path | None:
-    explicit = environ.get(key, "").strip()
-    if explicit:
-        return _existing([Path(explicit)], directory=directory, executable=executable, os_id=os_id)
-    return _existing(candidates, directory=directory, executable=executable, os_id=os_id)
+def _env_value(environ: Mapping[str, str], name: str) -> str:
+    direct = environ.get(name)
+    if direct is not None:
+        return direct
+    lowered = name.lower()
+    return next((value for key, value in environ.items() if key.lower() == lowered), "")
+
+
+def _libreoffice_candidates(
+    environ: Mapping[str, str], user_home: Path, os_id: str
+) -> list[Path]:
+    candidates: list[Path] = []
+    for command in ("soffice", "libreoffice"):
+        detected = shutil.which(command, path=environ.get("PATH"))
+        if detected:
+            candidates.append(Path(detected))
+    if os_id == "windows":
+        for key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+            root = _env_value(environ, key).strip()
+            if root:
+                candidates.extend(
+                    [
+                        Path(root) / "LibreOffice" / "program" / "soffice.com",
+                        Path(root) / "LibreOffice" / "program" / "soffice.exe",
+                    ]
+                )
+    elif os_id == "macos":
+        candidates.extend(
+            [
+                Path("/Applications/LibreOffice.app/Contents/MacOS/soffice"),
+                user_home / "Applications" / "LibreOffice.app" / "Contents" / "MacOS" / "soffice",
+                Path("/opt/homebrew/bin/soffice"),
+                Path("/usr/local/bin/soffice"),
+            ]
+        )
+    else:
+        candidates.extend([Path("/usr/bin/soffice"), Path("/usr/local/bin/soffice")])
+    return candidates
 
 
 def discover_ppt_runtime(
@@ -124,116 +135,44 @@ def discover_ppt_runtime(
     home: Path | None = None,
     system_name: str | None = None,
 ) -> dict[str, Any]:
+    root = Path(project_root).resolve()
     environment = dict(os.environ if environ is None else environ)
     user_home = (home or Path.home()).expanduser().resolve()
     os_id = platform_id(system_name)
-    cache_roots = [user_home / ".cache"]
-    xdg_cache = environment.get("XDG_CACHE_HOME", "").strip()
-    if xdg_cache:
-        cache_roots.insert(0, Path(xdg_cache).expanduser())
-    if os_id == "macos":
-        cache_roots.append(user_home / "Library" / "Caches")
-    dependencies_candidates = tuple(
-        cache_root / "codex-runtimes" / "codex-primary-runtime" / "dependencies"
-        for cache_root in dict.fromkeys(cache_roots)
-    )
-    node_candidates = tuple(
-        candidate
-        for dependencies in dependencies_candidates
-        for candidate in (
-            dependencies / "node" / "bin" / ("node.exe" if os_id == "windows" else "node"),
-            dependencies / "node" / ("node.exe" if os_id == "windows" else "bin/node"),
-        )
-    )
-    python_candidates = tuple(
-        candidate
-        for dependencies in dependencies_candidates
-        for candidate in (
-            dependencies / "python" / ("python.exe" if os_id == "windows" else "bin/python3"),
-            dependencies / "python" / ("python.exe" if os_id == "windows" else "bin/python"),
-        )
-    )
-    node_modules_candidates = tuple(
-        candidate
-        for dependencies in dependencies_candidates
-        for candidate in (
-            dependencies / "node" / "node_modules",
-            dependencies / "node_modules",
-        )
-    )
-    bin_candidates = tuple(
-        candidate
-        for dependencies in dependencies_candidates
-        for candidate in (
-            dependencies / "bin" / "override",
-            dependencies / "bin",
-        )
-    )
-    node_modules = _explicit_or_detected(
-        "RUNTIME_NODE_MODULES", environment, node_modules_candidates, directory=True, os_id=os_id
-    )
-    artifact_candidates = tuple(
-        candidate / "@oai" / "artifact-tool" for candidate in node_modules_candidates
-    )
-    codex_home = Path(environment.get("CODEX_HOME", "").strip() or user_home / ".codex").expanduser()
-    container_tool_directories = sorted(
-        codex_home.glob(
-            "plugins/cache/openai-primary-runtime/presentations/*/skills/presentations/container_tools"
-        ),
-        key=lambda path: tuple(int(part) for part in re.findall(r"\d+", path.parents[2].name)),
-        reverse=True,
-    )
-    marker_candidates = tuple(path / "mark_artifact_operation_started.mjs" for path in container_tool_directories)
-    slides_test_candidates = tuple(path / "slides_test.py" for path in container_tool_directories)
+    explicit = _env_value(environment, "WORKFLOW_LIBREOFFICE_PATH").strip()
+    libreoffice: Path | None = None
+    candidates = [Path(explicit)] if explicit else _libreoffice_candidates(environment, user_home, os_id)
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if _executable(resolved, os_id):
+            libreoffice = resolved
+            break
 
-    artifact_node = _explicit_or_detected(
-        "WORKFLOW_ARTIFACT_NODE", environment, node_candidates, executable=True, os_id=os_id
-    )
-    runtime_node = _explicit_or_detected(
-        "RUNTIME_NODE", environment, node_candidates, executable=True, os_id=os_id
-    )
-    artifact_python = _explicit_or_detected(
-        "WORKFLOW_ARTIFACT_PYTHON", environment, python_candidates, executable=True, os_id=os_id
-    )
-    artifact_tool = _explicit_or_detected(
-        "WORKFLOW_ARTIFACT_TOOL_PATH", environment, artifact_candidates, directory=True, os_id=os_id
-    )
-    marker = _explicit_or_detected(
-        "WORKFLOW_PRESENTATIONS_MARKER", environment, marker_candidates, os_id=os_id
-    )
-    slides_test = _explicit_or_detected(
-        "WORKFLOW_SLIDES_TEST", environment, slides_test_candidates, os_id=os_id
-    )
-    runtime_bin = _explicit_or_detected(
-        "RUNTIME_BIN_DIR", environment, bin_candidates, directory=True, os_id=os_id
-    )
-    config = {
-        "WORKFLOW_ARTIFACT_NODE": artifact_node,
-        "WORKFLOW_ARTIFACT_TOOL_PATH": artifact_tool,
-        "WORKFLOW_PRESENTATIONS_MARKER": marker,
-        "WORKFLOW_ARTIFACT_PYTHON": artifact_python,
-        "WORKFLOW_SLIDES_TEST": slides_test,
-        "RUNTIME_NODE": runtime_node,
-        "RUNTIME_NODE_MODULES": node_modules,
-        "RUNTIME_BIN_DIR": runtime_bin,
+    required_files = {
+        "builder": root / "pi" / "artifacts" / "build-director-deck.mjs",
+        "qa": root / "pi" / "artifacts" / "validate-and-render-deck.mjs",
     }
-    missing = [key for key in PPT_PATH_KEYS if config[key] is None]
-    if artifact_tool is not None and not (artifact_tool / "dist" / "artifact_tool.mjs").is_file():
-        missing.append("WORKFLOW_ARTIFACT_TOOL_PATH/dist/artifact_tool.mjs")
-    if slides_test is not None and not (slides_test.parent / "create_montage.py").is_file():
-        missing.append("WORKFLOW_SLIDES_TEST/create_montage.py")
-    serializable = {key: str(value) for key, value in config.items() if value is not None}
-    serializable["WORKFLOW_CJK_FONT"] = environment.get("WORKFLOW_CJK_FONT", "").strip() or {
-        "windows": "Microsoft YaHei",
-        "macos": "PingFang SC",
-    }.get(os_id, "Noto Sans CJK SC")
-    serializable["WORKFLOW_LATIN_FONT"] = environment.get("WORKFLOW_LATIN_FONT", "").strip() or "Arial"
+    package_files = {
+        package: root / "node_modules" / package / "package.json"
+        for package in PPT_PACKAGES
+    }
+    missing = [f"file:{name}" for name, path in required_files.items() if not path.is_file()]
+    missing.extend(f"package:{name}" for name, path in package_files.items() if not path.is_file())
+    if libreoffice is None:
+        missing.append("WORKFLOW_LIBREOFFICE_PATH")
+    config = {
+        **({"WORKFLOW_LIBREOFFICE_PATH": str(libreoffice)} if libreoffice else {}),
+        "WORKFLOW_CJK_FONT": environment.get("WORKFLOW_CJK_FONT", "").strip()
+        or {"windows": "Microsoft YaHei", "macos": "PingFang SC"}.get(os_id, "Noto Sans CJK SC"),
+        "WORKFLOW_LATIN_FONT": environment.get("WORKFLOW_LATIN_FONT", "").strip() or "Arial",
+    }
     return {
         "ready": not missing,
         "platform": os_id,
-        "config": serializable,
+        "engine": "PptxGenJS + LibreOffice + PDF.js",
+        "config": config,
         "missing": sorted(set(missing)),
-        "source": "explicit_environment_or_codex_runtime",
+        "source": "project_local_dependencies",
     }
 
 
@@ -316,12 +255,7 @@ def launch_pi(
     ppt_ready = bool(report["ppt"]["ready"])
     if ppt_ready:
         environment.update(report["ppt"]["config"])
-    completed = subprocess.run(
-        [str(pi_path), *arguments],
-        cwd=root,
-        env=environment,
-        check=False,
-    )
+    completed = subprocess.run([str(pi_path), *arguments], cwd=root, env=environment, check=False)
     return completed.returncode, ppt_ready
 
 

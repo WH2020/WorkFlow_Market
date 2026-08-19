@@ -19,7 +19,7 @@ description: 创建市场总监或产品总监的管理汇报与每周工作 PPT
 6. `build_plan` 先形成 `phase=final` 的周报 plan，并在 `save_plan` 调用 `director_presentation_plan_write`。首版为 `version=1`；plan 中的 evidence_refs 只能使用当前快照登记到证据 registry 的来源，设计令牌默认 `management-report`。适配器返回 `plan_sha256` 和 `context_snapshot_sha256`。
 7. `validate_payload` 只编制精确 deck 载荷，不生成文件。`slides` 必须逐字复用 final plan 每页的 `render`，携带返回的 `plan_sha256` 和 `context_snapshot_sha256`（作为 `snapshot_sha256`），Profile、period、template_id 和 output_name 必须与 plan 一致。调用 `director_propose_write_intent(logical_tool="artifact.deck.write", payload=完整载荷)` 做确定性绑定校验并冻结载荷 SHA-256，再完成 Validator。
 8. 到达 Approval 必须暂停。用户批准的是完整载荷及其 SHA-256；批准前不得创建 `outputs/*.pptx`，载荷变化后必须重新冻结、重新批准。
-9. 批准后 `render_deck` 才调用 `director_artifact_deck_write`。适配器使用 `@oai/artifact-tool` 在当前 task/intent 的私有目录生成可编辑 PPT，逐页生成 PNG 和 layout JSON，并运行官方 `slides_test.py`；QA 通过后才独占提交到 `outputs/` 并写入 receipt。不得用普通 `write/edit` 伪造 `.pptx`。
+9. 批准后 `render_deck` 才调用 `director_artifact_deck_write`。适配器使用项目内固定版本的 PptxGenJS 在当前 task/intent 私有目录生成可编辑 PPTX，再由 LibreOffice 真实转换为 PDF、PDF.js 逐页生成 PNG，并检查 layout JSON、文本容量、画布边界、文本框重叠、页数和 speaker notes 来源块；QA 通过后才独占提交到 `outputs/` 并写入 receipt。不得用普通 `write/edit` 伪造 `.pptx`，也不得依赖 Codex Desktop 私有运行时。
 10. 每页外部事实和外部资产都放入 speaker notes 的 `[Sources]` 块；本地来源写项目相对路径，PDF 来源同时记录页码。URL 不得包含账号、口令、token、签名或密钥查询参数。
 11. 生成后仍不发送、不上传、不对外使用；外部使用由用户另行决定。
 
@@ -46,4 +46,4 @@ description: 创建市场总监或产品总监的管理汇报与每周工作 PPT
 
 ## 交付
 
-返回 PPT 路径、artifact receipt 路径、意图 ID、载荷 SHA-256、文件 SHA-256、模板、资料时间范围、逐页预览目录、`slides_test.py` 结果、待确认项和未执行的外部操作。相同意图重试时先核验 receipt 与正式文件哈希，不能重复覆盖。适配器依赖缺失时停止在 `render_deck`，交付已批准的结构化载荷并明确未生成 PPT，不能跳过工具节点。
+返回 PPT 路径、artifact receipt 路径、意图 ID、载荷 SHA-256、文件 SHA-256、模板、资料时间范围、LibreOffice 版本、逐页预览目录、独立 QA 结果、待确认项和未执行的外部操作。相同意图重试时先核验 receipt 与正式文件哈希，不能重复覆盖。项目依赖或 LibreOffice 缺失时停止在 `render_deck`，交付已批准的结构化载荷并明确未生成 PPT，不能跳过工具节点。

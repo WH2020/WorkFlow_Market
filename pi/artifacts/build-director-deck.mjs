@@ -1,10 +1,11 @@
-import { execFile as execFileCallback } from "node:child_process";
 import fs from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import PptxGenJS from "pptxgenjs";
 
-const execFile = promisify(execFileCallback);
+const PX_PER_INCH = 96;
+const SLIDE_WIDTH = 1280 / PX_PER_INCH;
+const SLIDE_HEIGHT = 720 / PX_PER_INCH;
 
 export function fontFamilies(os = process.platform, environment = process.env) {
   const defaults = os === "win32"
@@ -104,47 +105,134 @@ function parseArguments(argv) {
   return { input: resolve(argv[inputIndex + 1]), output: resolve(argv[outputIndex + 1]), qaDir: resolve(argv[qaIndex + 1]) };
 }
 
-async function loadArtifactTool() {
-  const configured = process.env.WORKFLOW_ARTIFACT_TOOL_PATH?.trim();
-  if (configured) {
-    const modulePath = resolve(configured, "dist", "artifact_tool.mjs");
-    return import(pathToFileURL(modulePath).href);
-  }
-  try {
-    return await import("@oai/artifact-tool");
-  } catch {
-    throw new Error(
-      "未找到 @oai/artifact-tool。请把 WORKFLOW_ARTIFACT_TOOL_PATH 设置为该包的绝对目录后重试。",
-    );
-  }
+function color(value, fallback = "000000") {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.replace(/^#/u, "").toUpperCase();
+  return /^[0-9A-F]{6}$/u.test(normalized) ? normalized : fallback;
 }
 
-async function markArtifactOperation() {
-  const marker = process.env.WORKFLOW_PRESENTATIONS_MARKER?.trim();
-  if (!marker) {
-    throw new Error(
-      "缺少 WORKFLOW_PRESENTATIONS_MARKER；请设置为 Presentations Skill 的 mark_artifact_operation_started.mjs 绝对路径。",
-    );
+function inches(position) {
+  return {
+    x: position.left / PX_PER_INCH,
+    y: position.top / PX_PER_INCH,
+    w: position.width / PX_PER_INCH,
+    h: Math.max(position.height / PX_PER_INCH, 0.001),
+  };
+}
+
+function weightedTextLength(text) {
+  return Array.from(text).reduce((total, character) => {
+    if (/\s/u.test(character)) return total + 0.32;
+    if (/^[\x00-\x7F]$/u.test(character)) return total + 0.58;
+    return total + 1;
+  }, 0);
+}
+
+export function validateTextFitForTests(text, position, style) {
+  const fontSize = Number(style.fontSize || 16);
+  const width = position.width / PX_PER_INCH;
+  const height = position.height / PX_PER_INCH;
+  const usableWidthPoints = Math.max(1, width * 72 - 6);
+  const capacity = Math.max(1, usableWidthPoints / fontSize);
+  const lines = String(text).split(/\r?\n/u).reduce(
+    (total, row) => total + Math.max(1, Math.ceil(weightedTextLength(row) / capacity)),
+    0,
+  );
+  const requiredHeight = lines * fontSize * 1.22 / 72 + 0.04;
+  if (requiredHeight > height + 0.02) {
+    throw new Error(`文本框 ${style.objectName || "unnamed"} 预计溢出：需要 ${requiredHeight.toFixed(2)}in，实际 ${height.toFixed(2)}in`);
   }
-  await execFile(process.execPath, [
-    resolve(marker),
-    "--operation-kind", "create",
-    "--expected-output-count", "1",
-    "--output-format", "pptx",
-  ], { timeout: 30_000, windowsHide: true });
+  return { lines, requiredHeight };
+}
+
+function createPresentation(qaDirectory) {
+  const pptx = new PptxGenJS();
+  pptx.layout = "LAYOUT_WIDE";
+  pptx.author = "WorkFlow Market Director Agent";
+  pptx.company = "WorkFlow_Market";
+  pptx.subject = "Governed director presentation";
+  pptx.lang = "zh-CN";
+  pptx.theme = {
+    headFontFace: FONTS.cjk,
+    bodyFontFace: FONTS.cjk,
+    lang: "zh-CN",
+  };
+  const items = [];
+  return {
+    pptx,
+    slides: {
+      items,
+      add() {
+        const nativeSlide = pptx.addSlide();
+        const layout = [];
+        const wrapper = {
+          nativeSlide,
+          layout,
+          background: {
+            set fill(value) { nativeSlide.background = { color: color(value, "FFFFFF") }; },
+          },
+          shapes: {
+            add(specification) {
+              const box = inches(specification.position);
+              const geometry = specification.geometry;
+              const lineFill = specification.line?.fill;
+              const line = lineFill === "none"
+                ? { color: "FFFFFF", transparency: 100, width: 0 }
+                : { color: color(lineFill, "000000"), width: Math.max(Number(specification.line?.width || 1), 0.1) };
+              const fill = specification.fill === "none"
+                ? { color: "FFFFFF", transparency: 100 }
+                : { color: color(specification.fill, "FFFFFF") };
+              const shapeType = geometry === "line" ? pptx.ShapeType.line : pptx.ShapeType.rect;
+              nativeSlide.addShape(shapeType, { ...box, fill, line, objectName: specification.name });
+              layout.push({ name: specification.name, type: geometry, ...box, allow_overlap: true });
+              return specification;
+            },
+          },
+          addText(name, text, position, style) {
+            validateTextFitForTests(text, position, { ...style, objectName: name });
+            const box = inches(position);
+            nativeSlide.addText(String(text), {
+              ...box,
+              objectName: name,
+              fontFace: style.fontFamily || FONTS.cjk,
+              fontSize: Number(style.fontSize || 16),
+              bold: Boolean(style.bold),
+              color: color(style.color, "000000"),
+              align: style.alignment || "left",
+              valign: "top",
+              margin: 0,
+              breakLine: false,
+              charSpacing: Number(style.letterSpacing || 0),
+            });
+            layout.push({ name, type: "text", text: String(text), font_size: Number(style.fontSize || 16), ...box });
+          },
+          speakerNotes: {
+            textFrame: {
+              setText(value) { nativeSlide.addNotes(String(value)); },
+            },
+          },
+        };
+        items.push(wrapper);
+        return wrapper;
+      },
+    },
+    async save(path) {
+      await fs.mkdir(qaDirectory, { recursive: true });
+      for (const [index, slide] of items.entries()) {
+        const stem = `slide-${String(index + 1).padStart(2, "0")}`;
+        await fs.writeFile(
+          resolve(qaDirectory, `${stem}.layout.json`),
+          `${JSON.stringify({ slide: index + 1, width: SLIDE_WIDTH, height: SLIDE_HEIGHT, elements: slide.layout }, null, 2)}\n`,
+          "utf8",
+        );
+      }
+      await pptx.writeFile({ fileName: path, compression: true });
+    },
+  };
 }
 
 function addText(slide, name, text, position, style) {
-  const shape = slide.shapes.add({
-    geometry: "textbox",
-    name,
-    position,
-    fill: "none",
-    line: { style: "solid", fill: "none", width: 0 },
-  });
-  shape.text = text;
-  shape.text.style = style;
-  return shape;
+  slide.addText(name, text, position, style);
 }
 
 function sourceNotes(slide) {
@@ -507,25 +595,14 @@ function addContentSlide(presentation, payload, slideData, pageNumber, theme) {
 async function main() {
   const paths = parseArguments(process.argv.slice(2));
   const payload = JSON.parse(await fs.readFile(paths.input, "utf8"));
-  const { Presentation, PresentationFile } = await loadArtifactTool();
-  await markArtifactOperation();
   const theme = themeFor(payload.template_id);
-  const presentation = Presentation.create({ slideSize: { width: 1280, height: 720 } });
+  const presentation = createPresentation(paths.qaDir);
   payload.slides.forEach((slide, index) => {
     if (slideTreatment(slide, index) === "cover") addCover(presentation, payload, slide, index + 1, theme);
     else addContentSlide(presentation, payload, slide, index + 1, theme);
   });
-  await fs.mkdir(paths.qaDir, { recursive: true });
-  for (const [index, slide] of presentation.slides.items.entries()) {
-    const stem = `slide-${String(index + 1).padStart(2, "0")}`;
-    const png = await presentation.export({ slide, format: "png", scale: 1 });
-    await fs.writeFile(resolve(paths.qaDir, `${stem}.png`), new Uint8Array(await png.arrayBuffer()));
-    const layout = await slide.export({ format: "layout" });
-    await fs.writeFile(resolve(paths.qaDir, `${stem}.layout.json`), await layout.text());
-  }
   await fs.mkdir(dirname(paths.output), { recursive: true });
-  const pptx = await PresentationFile.exportPptx(presentation);
-  await pptx.save(paths.output);
+  await presentation.save(paths.output);
   const result = {
     output: paths.output,
     filename: basename(paths.output),
@@ -534,6 +611,7 @@ async function main() {
     template_id: payload.template_id,
     theme_name: theme.name,
     qa_dir: paths.qaDir,
+    engine: "PptxGenJS 4.0.1",
   };
   await new Promise((done) => process.stdout.write(`${JSON.stringify(result)}\n`, done));
 }

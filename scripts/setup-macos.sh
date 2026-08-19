@@ -6,12 +6,12 @@ cd "$PROJECT_ROOT"
 
 SKIP_DEPENDENCIES=0
 SKIP_PI_INSTALL=0
-REQUIRE_PPT=0
+SKIP_LIBREOFFICE_INSTALL=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --skip-dependencies) SKIP_DEPENDENCIES=1 ;;
     --skip-pi-install) SKIP_PI_INSTALL=1 ;;
-    --require-ppt) REQUIRE_PPT=1 ;;
+    --skip-libreoffice-install) SKIP_LIBREOFFICE_INSTALL=1 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
   shift
@@ -32,6 +32,24 @@ fi
 if [ "$SKIP_DEPENDENCIES" -eq 0 ]; then
   pnpm install --frozen-lockfile
 fi
+LIBREOFFICE_PATH=""
+for candidate in "/Applications/LibreOffice.app/Contents/MacOS/soffice" "$HOME/Applications/LibreOffice.app/Contents/MacOS/soffice" "/opt/homebrew/bin/soffice" "/usr/local/bin/soffice"; do
+  if [ -x "$candidate" ]; then LIBREOFFICE_PATH="$candidate"; break; fi
+done
+if [ -z "$LIBREOFFICE_PATH" ] && command -v soffice >/dev/null 2>&1; then
+  LIBREOFFICE_PATH="$(command -v soffice)"
+fi
+if [ -z "$LIBREOFFICE_PATH" ]; then
+  if [ "$SKIP_LIBREOFFICE_INSTALL" -eq 1 ]; then
+    printf 'LibreOffice was not found. Remove --skip-libreoffice-install or install LibreOffice first.\n' >&2
+    exit 2
+  fi
+  command -v brew >/dev/null 2>&1 || { printf 'Homebrew is required to install LibreOffice automatically. Install LibreOffice from libreoffice.org and retry.\n' >&2; exit 2; }
+  brew install --cask libreoffice
+  LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"
+fi
+[ -x "$LIBREOFFICE_PATH" ] || { printf 'LibreOffice installation completed but soffice was not found.\n' >&2; exit 2; }
+export WORKFLOW_LIBREOFFICE_PATH="$LIBREOFFICE_PATH"
 PI_COMMAND="$(command -v pi || true)"
 if [ -z "$PI_COMMAND" ] && [ -x "$PROJECT_ROOT/node_modules/.bin/pi" ]; then
   PI_COMMAND="$PROJECT_ROOT/node_modules/.bin/pi"
@@ -47,16 +65,8 @@ fi
 python3 plugin/market-director-copilot/scripts/init_local_data.py --project .
 python3 -m agent_platform validate
 "$PI_COMMAND" install -l . --approve
-python3 -m agent_platform doctor
-
-if python3 -m agent_platform doctor --require-ppt >/dev/null 2>&1; then
-  printf '%s\n' 'PPT runtime detected. The start script will inject it only into the Pi process.'
-elif [ "$REQUIRE_PPT" -eq 1 ]; then
-  python3 -m agent_platform doctor --require-ppt
-  exit 3
-else
-  printf '%s\n' "Warning: Core Agent is ready, but the Codex PPT runtime was not detected. Run 'python3 -m agent_platform doctor --require-ppt' after installing or opening Codex Desktop." >&2
-fi
+python3 -m agent_platform doctor --require-ppt
+printf '%s\n' 'Independent PPT runtime detected: PptxGenJS + LibreOffice + PDF.js.'
 
 printf '%s\n' "Setup complete. Start the Agent with: bash scripts/start-macos.sh"
 printf '%s\n' "Start the local workbench in another terminal with: python3 ui/server.py"

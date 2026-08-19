@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fontFamilies, slideTreatment } from "../artifacts/build-director-deck.mjs";
+import { fontFamilies, slideTreatment, validateTextFitForTests } from "../artifacts/build-director-deck.mjs";
 
 test("only a content-free first top-hero slide is treated as a cover", () => {
   assert.equal(slideTreatment({ title: "封面", subtitle: "副标题", layout_intent: "top-hero" }, 0), "cover");
@@ -22,5 +22,13 @@ test("PPT fonts use native Windows and macOS CJK defaults with an explicit overr
   assert.deepEqual(
     fontFamilies("darwin", { WORKFLOW_CJK_FONT: "Custom CJK", WORKFLOW_LATIN_FONT: "Custom Latin" }),
     { cjk: "Custom CJK", latin: "Custom Latin" },
+  );
+});
+
+test("standalone builder rejects text that cannot fit the approved box", () => {
+  assert.doesNotThrow(() => validateTextFitForTests("可读的短结论", { width: 900, height: 80 }, { fontSize: 36 }));
+  assert.throws(
+    () => validateTextFitForTests("过长内容".repeat(80), { width: 400, height: 40 }, { fontSize: 24, objectName: "overflow" }),
+    /预计溢出/u,
   );
 });

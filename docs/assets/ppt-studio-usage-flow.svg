@@ -123,7 +123,7 @@
     <rect x="780" y="690" width="280" height="142" rx="18" fill="#EEF6FA" stroke="#9AB8C8"/>
     <circle cx="810" cy="720" r="18" fill="#176B87"/><text x="810" y="725" text-anchor="middle" class="badge">11</text>
     <text x="838" y="727" class="node-title">私有生成与 QA</text>
-    <text x="808" y="768" class="node-body">artifact-tool 生成 PPTX</text>
+    <text x="808" y="768" class="node-body">独立引擎生成并渲染 PPTX</text>
     <text x="808" y="795" class="node-body">逐页渲染、溢出与来源检查</text>
   </g>
   <g filter="url(#shadow)">

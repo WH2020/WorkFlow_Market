@@ -1,6 +1,6 @@
 {
   "name": "workflow-director-agent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "A Pi package for composable market-director and product-director workflows.",
   "license": "MIT",
@@ -20,7 +20,8 @@
   ],
   "scripts": {
     "check:types": "tsc --noEmit",
-    "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/data-adapters.test.ts pi/tests/source-readers.test.ts pi/tests/deck-builder.test.mjs"
+    "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/data-adapters.test.ts pi/tests/source-readers.test.ts pi/tests/deck-builder.test.mjs",
+    "test:ppt-e2e": "node pi/tests/standalone-deck-e2e.mjs"
   },
   "pi": {
     "extensions": [
@@ -37,6 +38,9 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "pdfjs-dist": "^6.2.108"
+    "@napi-rs/canvas": "1.0.7",
+    "jszip": "3.10.1",
+    "pdfjs-dist": "6.2.108",
+    "pptxgenjs": "4.0.1"
   }
 }

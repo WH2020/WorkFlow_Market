@@ -2,7 +2,7 @@
 
 ## 安装
 
-支持 Windows 10/11 与 macOS 13+ 本机部署。先安装 Git、Python 3.11+ 和 Node.js 22.19+，再克隆仓库并运行对应平台安装器；安装器负责 pnpm、Pi 0.84.2+、锁定依赖、本地数据、项目 Package、环境体检和 PPT 路径发现。
+支持 Windows 10/11 与 macOS 13+ 本机部署。先安装 Git、Python 3.11+ 和 Node.js 22.19+，再克隆仓库并运行对应平台安装器；安装器负责 pnpm、Pi 0.84.2+、锁定依赖、开源 LibreOffice、本地数据、项目 Package 和环境体检。
 
 Windows PowerShell：
 
@@ -32,22 +32,19 @@ Pi Package 会按当前 Profile 动态加载所需 Skills；切换 Profile 时�
 
 本地 PDF 放在 Project 的 `inputs/` 或 `data/inbox/` 下，并在任务中写明精确相对路径。这两个目录不会提交到 Git。项目依赖中已包含 `pdfjs-dist`，解析器和本地文本层兜底都在同一个隔离子进程中运行，单次最多 45 秒、256 MiB、32 MiB 输入和指定页数/字符预算；兜底另有限制对象、引用、数据流和解压总量。`WORKFLOW_PDFJS_MODULE` 只用于显式覆盖解析模块；通常不需要设置。PDF.js 无法解析时的兜底结果会标为 `extraction_reliability=limited`，只能以 `pending` 待核验来源入库；扫描件仍需先转换为可检索 PDF。
 
-周报和 PPT 工作室需要 Codex Desktop 附带的演示文稿运行时。setup/start 脚本会优先使用用户已显式设置且有效的路径，否则在当前用户的 Codex runtime/cache 中自动发现以下配置：
+周报和 PPT 工作室是独立工具链，不需要 Codex Desktop：
 
 ```text
-WORKFLOW_ARTIFACT_NODE          = Node.js executable
-WORKFLOW_ARTIFACT_TOOL_PATH     = <Node.js packages>/@oai/artifact-tool
-WORKFLOW_PRESENTATIONS_MARKER   = <Presentations Skill>/container_tools/mark_artifact_operation_started.mjs
-WORKFLOW_ARTIFACT_PYTHON        = Python executable
-WORKFLOW_SLIDES_TEST            = <Presentations Skill>/container_tools/slides_test.py
-RUNTIME_NODE                    = Node.js executable
-RUNTIME_NODE_MODULES            = Node.js packages
-RUNTIME_BIN_DIR                 = Override binaries
+PptxGenJS                       = 可编辑 PPTX 生成（项目锁定依赖）
+LibreOffice                     = 真实 Office 渲染为 PDF（安装器检测/安装）
+PDF.js + @napi-rs/canvas        = 逐页 PNG 与拼图（项目锁定依赖）
+JSZip + 项目 QA                 = 页数、notes、来源、边界、重叠和文本容量检查
+WORKFLOW_LIBREOFFICE_PATH       = 可选的 soffice 明确绝对路径
 WORKFLOW_CJK_FONT               = platform native CJK font
 WORKFLOW_LATIN_FONT             = Latin font
 ```
 
-Windows 默认使用 `Microsoft YaHei`，macOS 默认使用 `PingFang SC`；两者的拉丁字体默认是 `Arial`。启动入口通过 `python -m agent_platform launch` 每次重新核验路径，并只向本次 Pi 子进程注入运行时环境；不会生成或执行包含路径的 shell 脚本。缺少任一 PPT 依赖时，`artifact.deck.write` 会停止并指出缺项；不会回退到 `python-pptx` 或生成伪 `.pptx`。
+Windows 默认使用 `Microsoft YaHei`，macOS 默认使用 `PingFang SC`；两者的拉丁字体默认是 `Arial`。启动入口通过 `python -m agent_platform launch` 每次重新核验路径，并只向本次 Pi 子进程注入 LibreOffice 路径和字体；不会生成或执行包含路径的 shell 脚本。缺少任一项目依赖或 LibreOffice 时，`artifact.deck.write` 会停止并指出缺项；不会生成伪 `.pptx`。
 
 ## 选择岗位
 
@@ -127,7 +124,7 @@ PPT 工作室首版的资料范围固定为“公开网页 + 当前 Profile 知�
 - `pdf.read`：只读取 `inputs/` 或 `data/inbox/` 下明确的普通 `.pdf`，最大 32 MiB，返回稳定来源 ID、文本、可靠度、截断状态和实际返回页码证据；文本层不足时失败停止。
 - `weekly.snapshot`：按北京时间聚合当前 Profile 的任务/审计、知识新增和受管任务登记的产物；只有市场总监读取销售三张表，产品总监不会跨 Profile 读取销售数据。每类数据都返回命中数、返回数和截断标记。
 - `presentation.plan.write`：按任务保存 outline/final 两阶段 plan，使用连续版本、证据上下文 SHA-256 和 plan SHA-256 防止跨任务接管或静默修改。final 必须延续已确认 brief、大纲、周期和来源上下文；要改大纲需创建新任务重新确认。
-- `artifact.deck.write`：接收已冻结并批准的 4–10 页结构化载荷；周报绑定当前 `weekly.snapshot`，PPT 工作室绑定当前 final plan 与证据 registry。经营管理、政企合作、前沿研究三套设计令牌确定配色、标签与视觉语气，逐页 `layout_intent` 决定几何版式；两者都随冻结载荷进入构建器。在 task/intent 私有目录中使用 `@oai/artifact-tool` 构建，逐页生成 PNG/layout、检查 speaker notes 来源并运行官方 `slides_test.py`；QA 通过后才独占提交到 `outputs/`，不覆盖已有文件。
+- `artifact.deck.write`：接收已冻结并批准的 4–10 页结构化载荷；周报绑定当前 `weekly.snapshot`，PPT 工作室绑定当前 final plan 与证据 registry。经营管理、政企合作、前沿研究三套设计令牌确定配色、标签与视觉语气，逐页 `layout_intent` 决定几何版式；两者都随冻结载荷进入构建器。在 task/intent 私有目录中使用 PptxGenJS 构建可编辑 PPTX，经 LibreOffice 转为真实渲染 PDF，再由 PDF.js 逐页生成 PNG；项目 QA 同时检查 layout、文本容量、画布边界、文本框重叠、页数和 speaker notes 来源。全部通过后才独占提交到 `outputs/`，不覆盖已有文件。
 - 所有结构化数据文件继续位于本地 `data/`；适配器采用独占锁、同目录临时文件原子替换和 `.pi/director-runtime/commits/` 提交日志。若数据已替换但任务快照尚未推进，重试会按提交前后哈希完成恢复；哈希两边都不匹配时停止并要求人工核对。
 - 网页/PDF 工具生成的 URL allow-set 与精确 `knowledge.write` mutation 按任务写入 `.pi/director-runtime/evidence/`。Pi 重启后会重新加载该 registry；工具来源 ID 不在本任务 registry 中、或 mutation 内容发生变化时，写入会被拒绝。
 
@@ -138,7 +135,7 @@ PPT 工作室首版的资料范围固定为“公开网页 + 当前 Profile 知�
 - 默认行业研究按 `web.search` → `web.open` → `knowledge.search` 顺序执行：先发现和读取外部来源，再读取内部知识，避免把内部资料带入外部查询。仓库另有 `shared.research.frontier-subagent` 契约，但在安装隔离 Subagent 执行器前不会作为默认服务运行，也不能被模型静默完成。
 - `web.open` 只处理公开、无需登录的 HTML、纯文本和 PDF，不执行 JavaScript、不保留登录态、不绕过反爬或访问控制。`user_provided=true` 只允许用于用户在当前任务中直接给出的 URL；该语义依赖主 Agent 遵守工具契约。
 - PDF 只提取已有文本层，不做 OCR。在线 PDF 的 PDF.js 解析失败时直接安全停止；本地受控目录文件可在同一受限子进程中使用标为 `limited` 的文本层兜底。主 Agent 进程不解析 PDF 数据流。扫描版、复杂字体映射或损坏 PDF 可能需要用户转换为可检索 PDF 后重试。
-- Windows 下 Codex 附带的画布运行时可能在全部 PNG 写完后返回原生清理状态 `0xC0000409`。兼容运行器只接受这个精确状态，并同时校验渲染清单路径仍在私有 QA 目录、页数与 PNG 名称/数量/非空/唯一性一致、PPTX 内 notes 页数量正确且每页恰有一个 `[Sources]` 块，然后才继续执行官方 `slides_test.py`；正文构建失败、缺页、空页或来源备注异常仍会失败停止，结果中会明确标注降级 QA。
+- PPT 视觉 QA 以当前电脑上的 LibreOffice 渲染为准；不同平台字体度量可能造成换行或文件哈希差异，因此每次生成都重新渲染全部页面。LibreOffice 转换失败、页数不符、预览缺失、来源备注异常、元素越界、预计文本溢出或文本框重叠都会失败停止，不提供“仅结构通过”的降级提交。
 - HTML 与 PDF 正文都属于不可信输入；Agent 不执行其中的指令。当前网页正文抽取不是浏览器渲染器，复杂 JavaScript 页面可能需要用户另行导出资料。
 - 产品总监周报当前聚合任务、知识来源和本 Profile 产物，不读取市场销售台账；更细的产品指标/路线图业务快照仍需后续专用适配器。
 - 不读取个人微信聊天；需要分析的信息由用户上传或从已授权的结构化数据源提供。
@@ -154,7 +151,8 @@ python -m unittest discover -s tests -p "test_agent_platform.py"
 pnpm install --frozen-lockfile
 pnpm check:types
 pnpm test:runtime
+pnpm test:ppt-e2e
 python -m unittest ui.test_server
 ```
 
-macOS 将上述 `python` 改为 `python3`。若 Windows 的 `python` 指向 Microsoft Store 占位程序，请改用已安装的 Python 3.11+ 可执行文件运行相同命令。公共 CI 在 Windows 与 macOS 上执行相同的校验；真实 PPT 仍需目标电脑具备 Codex Desktop 演示运行时。
+macOS 将上述 `python` 改为 `python3`。若 Windows 的 `python` 指向 Microsoft Store 占位程序，请改用已安装的 Python 3.11+ 可执行文件运行相同命令。公共 CI 在 Windows 与 macOS 上执行相同的校验，并在两端真实生成、渲染和检查 PPT；不需要 Codex Desktop。

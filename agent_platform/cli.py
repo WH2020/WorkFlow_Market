@@ -27,9 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan-workflow")
     plan.add_argument("workflow_id")
     plan.add_argument("--profile")
-    doctor = subparsers.add_parser("doctor", help="Check Windows/macOS runtime readiness")
-    doctor.add_argument("--require-ppt", action="store_true", help="Fail unless the PPT runtime is complete")
-    launch = subparsers.add_parser("launch", help="Start Pi with an auto-discovered, process-local PPT runtime")
+    doctor = subparsers.add_parser("doctor", help="Check Windows/macOS toolchain readiness")
+    doctor.add_argument("--require-ppt", action="store_true", help="Fail unless the independent PPT toolchain is complete")
+    launch = subparsers.add_parser("launch", help="Start Pi with the validated project-local PPT toolchain")
     launch.add_argument("pi_args", nargs=argparse.REMAINDER)
     return parser
 
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         if not runtime["ready"]:
             print(
                 "Warning: PPT runtime is incomplete; Pi will start with non-PPT services. "
-                "Run 'python -m agent_platform doctor --require-ppt' for details.",
+                "Run the platform setup script, then 'python -m agent_platform doctor --require-ppt'.",
                 file=sys.stderr,
             )
         try:

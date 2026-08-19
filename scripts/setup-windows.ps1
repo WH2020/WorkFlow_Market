@@ -2,7 +2,7 @@
 param(
     [switch]$SkipDependencies,
     [switch]$SkipPiInstall,
-    [switch]$RequirePpt
+    [switch]$SkipLibreOfficeInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,6 +44,41 @@ if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
 if (-not $SkipDependencies) {
     Invoke-Checked -FilePath (Get-Command pnpm).Source -Arguments @("install", "--frozen-lockfile")
 }
+$LibreOfficeCandidates = @(
+    (Join-Path ${env:ProgramFiles} "LibreOffice\program\soffice.com"),
+    (Join-Path ${env:ProgramFiles} "LibreOffice\program\soffice.exe")
+)
+$LibreOfficePath = $LibreOfficeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $LibreOfficePath) {
+    $LibreOfficeCommand = Get-Command soffice -ErrorAction SilentlyContinue
+    if ($LibreOfficeCommand) { $LibreOfficePath = $LibreOfficeCommand.Source }
+}
+if (-not $LibreOfficePath) {
+    if ($SkipLibreOfficeInstall) {
+        throw "LibreOffice was not found. Remove -SkipLibreOfficeInstall or install LibreOffice first."
+    }
+    $WingetCommand = Get-Command winget -ErrorAction SilentlyContinue
+    $ChocolateyCommand = Get-Command choco -ErrorAction SilentlyContinue
+    if ($WingetCommand) {
+        try {
+            Invoke-Checked -FilePath $WingetCommand.Source -Arguments @(
+                "install", "--id", "TheDocumentFoundation.LibreOffice", "--exact", "--silent",
+                "--accept-package-agreements", "--accept-source-agreements"
+            )
+        } catch {
+            if (-not $ChocolateyCommand) { throw }
+            Write-Warning "winget could not install LibreOffice; retrying with Chocolatey."
+            Invoke-Checked -FilePath $ChocolateyCommand.Source -Arguments @("install", "libreoffice-fresh", "-y", "--no-progress")
+        }
+    } elseif ($ChocolateyCommand) {
+        Invoke-Checked -FilePath $ChocolateyCommand.Source -Arguments @("install", "libreoffice-fresh", "-y", "--no-progress")
+    } else {
+        throw "LibreOffice is required for independent PPT rendering. Install it from libreoffice.org and retry."
+    }
+    $LibreOfficePath = $LibreOfficeCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $LibreOfficePath) { throw "LibreOffice installation completed but soffice was not found in the standard location." }
+}
+$env:WORKFLOW_LIBREOFFICE_PATH = $LibreOfficePath
 $PiCommand = Get-Command pi -ErrorAction SilentlyContinue
 if (-not $PiCommand) {
     $LocalPi = Join-Path $ProjectRoot "node_modules\.bin\pi.cmd"
@@ -67,17 +102,11 @@ if (-not $PiCommand) {
 Invoke-ProjectPython @("plugin/market-director-copilot/scripts/init_local_data.py", "--project", ".")
 Invoke-ProjectPython @("-m", "agent_platform", "validate")
 Invoke-Checked -FilePath $PiPath -Arguments @("install", "-l", ".", "--approve")
-$DoctorJson = @(Invoke-ProjectPython @("-m", "agent_platform", "doctor"))
+$DoctorJson = @(Invoke-ProjectPython @("-m", "agent_platform", "doctor", "--require-ppt"))
 $DoctorJson | ForEach-Object { Write-Output $_ }
 $DoctorResult = ($DoctorJson -join [Environment]::NewLine) | ConvertFrom-Json
-$PptReady = [bool]$DoctorResult.ppt.ready
-if ($PptReady) {
-    Write-Host "PPT runtime detected. The start script will inject it only into the Pi process." -ForegroundColor Green
-} elseif ($RequirePpt) {
-    Invoke-ProjectPython @("-m", "agent_platform", "doctor", "--require-ppt")
-} else {
-    Write-Warning "Core Agent is ready, but the Codex PPT runtime was not detected. Run 'python -m agent_platform doctor --require-ppt' after installing or opening Codex Desktop."
-}
+if (-not [bool]$DoctorResult.ppt.ready) { throw "Independent PPT runtime validation failed." }
+Write-Host "Independent PPT runtime detected: PptxGenJS + LibreOffice + PDF.js." -ForegroundColor Green
 
 Write-Host "Setup complete. Start the Agent with: .\scripts\start-windows.ps1" -ForegroundColor Green
 Write-Host "Start the local workbench in another terminal with: python ui/server.py"
