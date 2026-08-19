@@ -67,16 +67,10 @@ if (-not $PiCommand) {
 Invoke-ProjectPython @("plugin/market-director-copilot/scripts/init_local_data.py", "--project", ".")
 Invoke-ProjectPython @("-m", "agent_platform", "validate")
 Invoke-Checked -FilePath $PiPath -Arguments @("install", "-l", ".", "--approve")
-Invoke-ProjectPython @("-m", "agent_platform", "doctor")
-
-$PreviousErrorActionPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-try {
-    & $PythonCommand.Source @PythonPrefix -m agent_platform doctor --require-ppt *> $null
-    $PptReady = $LASTEXITCODE -eq 0
-} finally {
-    $ErrorActionPreference = $PreviousErrorActionPreference
-}
+$DoctorJson = @(Invoke-ProjectPython @("-m", "agent_platform", "doctor"))
+$DoctorJson | ForEach-Object { Write-Output $_ }
+$DoctorResult = ($DoctorJson -join [Environment]::NewLine) | ConvertFrom-Json
+$PptReady = [bool]$DoctorResult.ppt.ready
 if ($PptReady) {
     Write-Host "PPT runtime detected. The start script will inject it only into the Pi process." -ForegroundColor Green
 } elseif ($RequirePpt) {
@@ -87,3 +81,4 @@ if ($PptReady) {
 
 Write-Host "Setup complete. Start the Agent with: .\scripts\start-windows.ps1" -ForegroundColor Green
 Write-Host "Start the local workbench in another terminal with: python ui/server.py"
+exit 0
