@@ -14,3 +14,6 @@
 @media(max-width:760px){.welcome-actions{width:100%;align-items:flex-end}}
 .status.interrupted{background:#fbe8ea;color:var(--danger)}
 .status.cancelling{background:#fff1df;color:var(--orange)}
+.task-actions{flex-wrap:wrap}.action.resume{background:#dcf3e9;color:#126c4c}.action.restart{background:#e8effd;color:#315fae}.task-history-panel{margin-top:2px}.task-history-panel .task{opacity:.88}
+.status.resuming,.status.restarting{background:#eaf0ff;color:var(--blue)}
+.status.superseded{background:#eef0f4;color:#667085}

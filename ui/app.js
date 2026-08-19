@@ -104,6 +104,9 @@
     requested: "等待 Pi 接手",
     interrupted: "已中断",
     cancelling: "正在取消",
+    resuming: "正在恢复",
+    restarting: "正在重新开始",
+    superseded: "已替代",
     completed: "已完成",
     cancelled: "已取消",
     rejected: "已驳回",
@@ -130,6 +133,7 @@
   function currentService() { return currentProfile()?.services.find((service) => service.id === selectedService); }
   function serviceById(serviceId) { return currentProfile()?.services.find((service) => service.id === serviceId); }
   function displayStatus(task) { return task.display_status || task.status || ""; }
+  function isHistoricalTask(task) { return ["completed", "cancelled", "rejected", "failed", "superseded"].includes(displayStatus(task)); }
   function projectById(projectId) { return model?.projects?.find((project) => project.project_id === projectId); }
   function selectedProjectRecord() { return projectById(selectedProject) || model?.projects?.[0]; }
   function isPresentationStudio(service = currentService()) { return service?.id === "presentation-studio" || service?.workflow === "shared.presentation.studio"; }
@@ -457,10 +461,16 @@
   }
 
   function renderTasks() {
-    const box = $("tasks");
-    box.replaceChildren();
-    if (!model.tasks.length) { box.textContent = "还没有任务。先选择服务并写下任务说明。"; renderWorkflow(); return; }
-    model.tasks.forEach((task, index) => {
+    const activeTasks = model.tasks.filter((task) => !isHistoricalTask(task));
+    const historyTasks = model.tasks.filter(isHistoricalTask);
+    const renderTaskCards = (box, tasks, historical) => {
+      box.replaceChildren();
+      box.classList.toggle("empty", tasks.length === 0);
+      if (!tasks.length) {
+        box.textContent = historical ? "暂无历史任务。" : "当前没有待处理任务。";
+        return;
+      }
+      tasks.forEach((task) => {
       const template = $("task-template").content.cloneNode(true);
       const serviceName = currentProfile()?.services.find((service) => service.id === task.service_id)?.display_name;
       template.querySelector("strong").textContent = serviceName || task.service_id || "销售任务";
@@ -469,7 +479,8 @@
       badge.textContent = label[effectiveStatus] || effectiveStatus || "未知";
       if (Object.hasOwn(label, effectiveStatus)) badge.classList.add(effectiveStatus);
       const scheduleMeta = task.schedule_id ? ` · 每日任务 ${task.scheduled_for || ""}` : "";
-      template.querySelector(".task-meta").textContent = `项目：${projectById(task.project_id)?.name || "日常工作"}${scheduleMeta} · 节点：${task.waiting_node || task.current_node || "等待 Pi 接手"} · 版本 ${task.version ?? "-"}`;
+      const nodeLabel = historical ? "任务已结束" : (task.waiting_node || task.current_node || "等待 Pi 接手");
+      template.querySelector(".task-meta").textContent = `项目：${projectById(task.project_id)?.name || "日常工作"}${scheduleMeta} · 节点：${nodeLabel} · 版本 ${task.version ?? "-"}`;
       template.querySelector(".task-request").textContent = task.request || "";
       const actions = template.querySelector(".task-actions");
       const article = template.querySelector("article");
@@ -477,12 +488,18 @@
       renderRawWriteIntent(article, task, presentationRendered);
       if (task.status === "waiting_approval") addAction(actions, task, "approve", task.pending_write ? "批准并生成" : "确认并继续");
       if (task.status === "waiting_approval") addAction(actions, task, "reject", "驳回");
-      if (task.status === "waiting_approval") addAction(actions, task, "cancel", "取消任务");
-      if (effectiveStatus === "interrupted") addAction(actions, task, "cancel", "取消中断任务");
+      if (task.status === "waiting_approval") addAction(actions, task, "cancel", "结束任务");
+      if (effectiveStatus === "interrupted") addAction(actions, task, "resume", "继续任务");
+      if (effectiveStatus === "interrupted") addRestartAction(actions, task, "重新开始");
+      if (effectiveStatus === "interrupted") addAction(actions, task, "cancel", "结束任务");
+      if (historical) addRestartAction(actions, task, "再次创建");
       article.onclick = (event) => { if (!event.target.closest("button,summary,input,textarea,select")) renderWorkflow(task); };
       box.append(template);
-      if (index === 0) renderWorkflow(task);
-    });
+      });
+    };
+    renderTaskCards($("tasks"), activeTasks, false);
+    renderTaskCards($("task-history"), historyTasks, true);
+    renderWorkflow(activeTasks[0] || historyTasks[0]);
   }
 
   function addAction(box, task, decision, text) {
@@ -496,6 +513,24 @@
       if (decision === "approve" && task.pending_write) { body.intent_id = task.pending_write.intent_id; body.payload_sha256 = task.pending_write.payload_sha256; }
       try {
         const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        note(reply.message);
+        await load();
+      } catch (error) { note(error.message, true); await load(); }
+    };
+    box.append(button);
+  }
+
+  function addRestartAction(box, task, text) {
+    const button = document.createElement("button");
+    button.className = "action restart";
+    button.textContent = text;
+    button.onclick = async () => {
+      if (!confirm(`确认${text}？\n\n将复用原任务的说明、项目和服务创建一个全新任务，不会复用旧审批。`)) return;
+      try {
+        const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/restart`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ version: task.version }),
+        });
         note(reply.message);
         await load();
       } catch (error) { note(error.message, true); await load(); }
@@ -662,11 +697,13 @@
 
   function renderDashboard() {
     const tasks = model.tasks || [];
+    const activeTasks = tasks.filter((task) => !isHistoricalTask(task));
     const period = currentWeek();
     const inWeek = tasks.filter((task) => String(task.updated_at || task.created_at || "") >= period.start);
     const pending = tasks.filter((task) => task.status === "waiting_approval");
     const running = tasks.filter((task) => displayStatus(task) === "running");
     const queued = tasks.filter((task) => displayStatus(task) === "requested");
+    const interrupted = tasks.filter((task) => displayStatus(task) === "interrupted");
     const completed = inWeek.filter((task) => task.status === "completed");
     $("home-pending").textContent = pending.length;
     $("home-running").textContent = running.length;
@@ -674,7 +711,7 @@
     $("approval-total").textContent = pending.length;
     $("nav-task-count").textContent = pending.length ? String(pending.length) : "";
     const hour = new Date().getHours();
-    $("greeting").textContent = `${hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好"}，今天有 ${pending.length + running.length + queued.length} 项需要处理`;
+    $("greeting").textContent = `${hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好"}，今天有 ${pending.length + running.length + queued.length + interrupted.length} 项需要处理`;
     $("week-label").textContent = `${period.start} 至 ${period.end}`;
     const denominator = inWeek.length;
     const progress = denominator ? Math.round(completed.length / denominator * 100) : 0;
@@ -695,7 +732,7 @@
       }));
     };
     renderCompactTasks($("home-approvals"), pending.slice(0, 6), "暂无待确认事项");
-    renderCompactTasks($("home-recent"), tasks.slice(0, 5), "暂无任务");
+    renderCompactTasks($("home-recent"), activeTasks.slice(0, 5), "当前没有待处理任务");
   }
 
   function render() {

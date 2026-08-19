@@ -1,8 +1,8 @@
 """Local-only control centre for the vertical director agents.
 
 This is deliberately a small, dependency-free HTTP server.  It is a control
-surface, not an agent executor: task requests are picked up by Pi, and the UI
-can only submit an approval decision for a task already waiting for approval.
+surface, not an agent executor: task and lifecycle requests are picked up by
+Pi, while the UI only records version-bound user decisions.
 """
 from __future__ import annotations
 
@@ -162,13 +162,21 @@ def live_agent_task_leases(reference: datetime | None = None) -> dict[str, dict[
 
 def task_display_state(task: dict[str, Any], leases: dict[str, dict[str, Any]] | None = None) -> tuple[str, str]:
     status = str(task.get("status") or "")
+    if status in {"completed", "rejected", "cancelled", "failed"}:
+        if status == "cancelled" and isinstance(task.get("superseded_by_task_id"), str):
+            return "superseded", "historical"
+        return status, "historical"
     if status == "requested":
         return "requested", "queued"
     if status != "running":
         return status, status
     approval = task.get("approval_request")
-    if isinstance(approval, dict) and approval.get("decision") == "cancel":
-        return "cancelling", "interrupted"
+    if isinstance(approval, dict):
+        if approval.get("decision") == "resume":
+            return "resuming", "interrupted"
+        if approval.get("decision") == "cancel":
+            requested_by = str(approval.get("requested_by") or "")
+            return ("restarting" if requested_by.startswith("local-workbench-restart:") else "cancelling"), "interrupted"
     lease = (leases if leases is not None else live_agent_task_leases()).get(str(task.get("task_id") or ""))
     if (
         lease and lease.get("profile_id") == task.get("profile_id") and
@@ -630,8 +638,48 @@ def recover_prepared_presentation_revisions() -> None:
             continue
 
 
+def recover_prepared_task_restarts() -> None:
+    """Publish a prepared restart only after its source task records the matching replacement."""
+    if REQUESTS.is_symlink() or not REQUESTS.is_dir():
+        return
+    for path in sorted(REQUESTS.glob("request-restart-*.json"))[:500]:
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 16_384:
+                continue
+            record = load_json(path)
+            request_id = safe_id(str(record.get("request_id", "")))
+            task_id = safe_id(str(record.get("restart_of_task_id", "")))
+            if (
+                request_id != path.stem or record.get("status") != "prepared" or
+                record.get("source") != "local-workbench" or record.get("request_kind") != "task-restart"
+            ):
+                continue
+            task_path = TASKS / f"{task_id}.json"
+            if task_path.is_symlink() or not task_path.is_file():
+                continue
+            with exclusive_task(task_path):
+                task = load_json(task_path)
+                requested_by = f"local-workbench-restart:{request_id}"
+                approval = task.get("approval_request")
+                linked_pending = (
+                    isinstance(approval, dict) and approval.get("decision") == "cancel" and
+                    approval.get("requested_by") == requested_by and task.get("superseded_by_task_id") == request_id
+                )
+                linked_terminal = (
+                    task.get("status") == "cancelled" and task.get("superseded_by_task_id") == request_id
+                )
+                if not linked_pending and not linked_terminal:
+                    continue
+                record["status"] = "requested"
+                record["published_at"] = now()
+                atomic_json(path, record)
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            continue
+
+
 def task_summaries() -> list[dict[str, Any]]:
     recover_prepared_presentation_revisions()
+    recover_prepared_task_restarts()
     result: list[dict[str, Any]] = []
     if not TASKS.exists():
         return result
@@ -643,7 +691,7 @@ def task_summaries() -> list[dict[str, Any]]:
             summary = {key: task.get(key) for key in (
                 "task_id", "project_id", "schedule_id", "scheduled_for", "profile_id", "service_id", "workflow_id", "status", "current_stage",
                 "current_node", "waiting_node", "completed_nodes", "version", "created_at", "updated_at",
-                "approval_request", "pending_write", "artifacts", "request"
+                "approval_request", "pending_write", "artifacts", "request", "restarted_from_task_id", "superseded_by_task_id"
             )}
             if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
                 continue
@@ -718,7 +766,7 @@ def project_summaries(tasks: list[dict[str, Any]] | None = None) -> list[dict[st
         result.append({
             **project,
             "task_count": len(project_tasks),
-            "active_task_count": sum(task.get("status") in {"running", "requested", "waiting_approval"} for task in project_tasks),
+            "active_task_count": sum(task.get("runtime_state") != "historical" for task in project_tasks),
             "approval_count": sum(task.get("status") == "waiting_approval" for task in project_tasks),
             "file_count": sum(item["project_id"] == project["project_id"] for item in files),
             "artifact_count": len(artifacts),
@@ -1018,6 +1066,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.reset_model()
             elif route.startswith("/api/tasks/") and route.endswith("/decision"):
                 self.decide(route.split("/")[3], payload)
+            elif route.startswith("/api/tasks/") and route.endswith("/restart"):
+                self.restart_task(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/presentation-revision"):
                 self.create_presentation_revision(route.split("/")[3], payload)
             else:
@@ -1099,7 +1149,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         expected_version = payload.get("version")
         intent_id = payload.get("intent_id")
         payload_sha256 = payload.get("payload_sha256")
-        if decision not in {"approve", "reject", "cancel"}:
+        if decision not in {"approve", "reject", "cancel", "resume"}:
             raise ValueError("无效操作")
         if not isinstance(expected_version, int):
             raise ValueError("缺少任务版本")
@@ -1128,6 +1178,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     if isinstance(pending_write, dict) and pending_write.get("status") == "committing":
                         self.send_json(HTTPStatus.CONFLICT, {"error": "任务正在提交写入，请先完成恢复，不能取消"})
                         return
+                if decision == "resume":
+                    display_status, _runtime_state = task_display_state(task)
+                    if display_status != "interrupted":
+                        self.send_json(HTTPStatus.CONFLICT, {"error": "只有已中断且没有其他处理请求的任务可以继续"})
+                        return
+                    if isinstance(pending_write, dict) and pending_write.get("status") == "committing":
+                        self.send_json(HTTPStatus.CONFLICT, {"error": "任务正在提交写入，请先完成恢复，不能继续"})
+                        return
                 if decision == "approve" and isinstance(pending_write, dict) and pending_write.get("status") == "prepared":
                     if intent_id != pending_write.get("intent_id") or payload_sha256 != pending_write.get("payload_sha256"):
                         self.send_json(HTTPStatus.CONFLICT, {"error": "审批内容与当前冻结变更不一致，请刷新后重试"})
@@ -1149,7 +1207,94 @@ class ControlHandler(SimpleHTTPRequestHandler):
         except RuntimeError as error:
             self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
             return
-        self.send_json(HTTPStatus.ACCEPTED, {"task": task, "message": "操作已提交，等待 Pi 工作流确认。"})
+        message = "正在从最后一个安全节点恢复；如有已批准但未提交的写入，将重新等待你确认。" if decision == "resume" else "操作已提交，等待 Pi 工作流确认。"
+        self.send_json(HTTPStatus.ACCEPTED, {"task": task, "message": message})
+
+    def restart_task(self, task_id: str, payload: dict[str, Any]) -> None:
+        task_id = safe_id(task_id)
+        expected_version = payload.get("version")
+        if not isinstance(expected_version, int):
+            raise ValueError("缺少任务版本")
+        task_path = TASKS / f"{task_id}.json"
+        if task_path.is_symlink() or not task_path.is_file():
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在"})
+            return
+        request_id = f"request-restart-{uuid.uuid4().hex[:12]}"
+        request_path = REQUESTS / f"{request_id}.json"
+        try:
+            with exclusive_task(task_path):
+                task = load_json(task_path)
+                if task.get("version") != expected_version:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务已更新，请刷新后重试", "task": task})
+                    return
+                display_status, runtime_state = task_display_state(task)
+                historical = runtime_state == "historical"
+                if display_status != "interrupted" and not historical:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "只有已中断或历史任务可以重新创建"})
+                    return
+                if task.get("approval_request") is not None:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "已有操作正在等待 Pi 处理，请稍后刷新"})
+                    return
+                pending_write = task.get("pending_write")
+                if isinstance(pending_write, dict) and pending_write.get("status") == "committing":
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务正在提交写入，请先完成恢复，不能重新创建"})
+                    return
+                profile_id = safe_id(str(task.get("profile_id", "")))
+                service_id = safe_id(str(task.get("service_id", "")))
+                workflow_id = str(task.get("workflow_id", ""))
+                project_id = safe_id(str(task.get("project_id") or DEFAULT_PROJECT_ID))
+                request_text = str(task.get("request", "")).strip()
+                profile = next((item for item in profiles() if item["id"] == profile_id), None)
+                service = next((item for item in (profile or {}).get("services", []) if item.get("id") == service_id), None)
+                if profile is None or service is None or service.get("workflow") != workflow_id:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "原任务对应的服务已不可用，不能重新创建"})
+                    return
+                active_project(project_id)
+                if not request_text or len(request_text) > 4000:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "原任务说明无效，不能重新创建"})
+                    return
+                if service_id in {"presentation-studio", "weekly-deck"}:
+                    validate_presentation_brief_request(request_text)
+                record = {
+                    "schema_version": "1.0", "request_id": request_id,
+                    "status": "requested" if historical else "prepared",
+                    "profile_id": profile_id, "service_id": service_id, "workflow_id": workflow_id,
+                    "request": request_text, "created_at": now(), "source": "local-workbench",
+                    "project_id": project_id, "request_kind": "task-restart",
+                    "restart_of_task_id": task_id, "source_task_version": expected_version,
+                }
+                atomic_json(request_path, record)
+                if not historical:
+                    task["approval_request"] = {
+                        "decision": "cancel", "requested_at": now(),
+                        "requested_by": f"local-workbench-restart:{request_id}",
+                        "expected_version": expected_version,
+                    }
+                    task["superseded_by_task_id"] = request_id
+                    task["updated_at"] = now()
+                    task["version"] = expected_version + 1
+                    try:
+                        atomic_json(task_path, task)
+                    except Exception:
+                        request_path.unlink(missing_ok=True)
+                        raise
+                    try:
+                        record["status"] = "requested"
+                        record["published_at"] = now()
+                        atomic_json(request_path, record)
+                    except Exception:
+                        self.send_json(HTTPStatus.ACCEPTED, {
+                            "request_id": request_id,
+                            "message": "重新开始请求已安全保存，将在下次刷新时继续发布。",
+                        })
+                        return
+        except RuntimeError as error:
+            self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
+            return
+        self.send_json(HTTPStatus.CREATED, {
+            "request_id": request_id,
+            "message": "已复用原任务内容创建新任务；原中断任务将移入历史。" if not historical else "已复用历史任务内容创建新任务。",
+        })
 
     def create_presentation_revision(self, task_id: str, payload: dict[str, Any]) -> None:
         """Queue a new audited task instead of mutating an approved/frozen plan in place."""

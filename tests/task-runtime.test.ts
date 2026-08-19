@@ -16,6 +16,7 @@ import {
   completeModelNode,
   completeSubagentNode,
   consumeApprovalRequest,
+  consumeResumeRequest,
   createTask,
   currentNodes,
   rejectApproval,
@@ -117,6 +118,29 @@ test("reject and cancel are terminal and audited", () => {
 
   const cancelled = cancelTask(start(), start().version, "stop");
   assert.equal(cancelled.status, "cancelled");
+});
+
+test("resuming an interrupted approved write returns to the exact approval checkpoint", () => {
+  const waiting = readyForApproval();
+  const approved = approveNode(waiting, linearWorkflow, "approve", waiting.version);
+  const requested = {
+    ...approved,
+    version: approved.version + 1,
+    approval_request: {
+      decision: "resume" as const,
+      requested_at: "2026-08-19T00:00:00.000Z",
+      requested_by: "local-workbench",
+      expected_version: approved.version,
+    },
+  };
+  const resumed = consumeResumeRequest(requested, linearWorkflow, "session-b");
+  assert.equal(resumed.session_key, "session-b");
+  assert.equal(resumed.status, "waiting_approval");
+  assert.equal(resumed.pending_write?.status, "prepared");
+  assert.equal(resumed.approval_request, undefined);
+  assert.deepEqual(currentNodes(resumed, linearWorkflow).map((node) => node.id), ["approve"]);
+  assert.ok(resumed.audit.some((event) => event.action === "write_reapproval_required"));
+  assert.equal(resumed.audit.at(-1)?.action, "task_resumed");
 });
 
 test("parallel stage waits for every node and control nodes advance automatically", () => {

@@ -49,6 +49,8 @@ export type WorkflowTask = {
   project_id?: string;
   schedule_id?: string;
   scheduled_for?: string;
+  restarted_from_task_id?: string;
+  superseded_by_task_id?: string;
   profile_id: string;
   service_id: string;
   workflow_id: string;
@@ -63,7 +65,7 @@ export type WorkflowTask = {
   artifacts: string[];
   pending_write?: PendingWriteIntent;
   approval_request?: {
-    decision: "approve" | "reject" | "cancel";
+    decision: "approve" | "reject" | "cancel" | "resume";
     requested_at: string;
     requested_by: string;
     expected_version: number;
@@ -247,6 +249,7 @@ export function createTask(input: {
   projectId?: string;
   scheduleId?: string;
   scheduledFor?: string;
+  restartOfTaskId?: string;
 }): WorkflowTask {
   const timestamp = now();
   const state: WorkflowTask = {
@@ -256,6 +259,7 @@ export function createTask(input: {
     ...(input.projectId ? { project_id: input.projectId } : {}),
     ...(input.scheduleId ? { schedule_id: input.scheduleId } : {}),
     ...(input.scheduledFor ? { scheduled_for: input.scheduledFor } : {}),
+    ...(input.restartOfTaskId ? { restarted_from_task_id: input.restartOfTaskId } : {}),
     profile_id: input.profileId,
     service_id: input.serviceId,
     workflow_id: input.workflow.id,
@@ -604,12 +608,83 @@ export function cancelTask(
   return state;
 }
 
+export function resumeTask(
+  source: WorkflowTask,
+  workflow: RuntimeWorkflow,
+  expectedVersion: number,
+  sessionKey: string,
+  note?: string,
+): WorkflowTask {
+  assertExpectedVersion(source, expectedVersion);
+  if (isTerminal(source)) throw new TaskTransitionError(`Task ${source.task_id} is already ${source.status}`);
+  if (source.status !== "running") {
+    throw new TaskTransitionError(`Only an interrupted running task can resume; found ${source.status}`);
+  }
+  if (!sessionKey || sessionKey.length > 4096) throw new TaskTransitionError("Resume session identity is invalid");
+  if (source.pending_write?.status === "committing") {
+    throw new TaskTransitionError("A structured write is committing; reconcile it before resuming");
+  }
+  const state = clone(source);
+  state.session_key = sessionKey;
+  if (state.pending_write?.status === "approved") {
+    const toolNodes = currentNodes(state, workflow).filter(
+      (node) => node.type === "tool" && node.tool === state.pending_write?.logical_tool,
+    );
+    const approvalIds = toolNodes.flatMap((node) => node.depends_on).filter((dependency) => {
+      const candidate = workflow.nodes.find((node) => node.id === dependency);
+      return candidate?.type === "approval" && state.completed_nodes.includes(dependency);
+    });
+    if (toolNodes.length !== 1 || approvalIds.length !== 1) {
+      throw new TaskTransitionError("Approved write cannot be returned to a unique approval checkpoint");
+    }
+    state.completed_nodes = state.completed_nodes.filter((nodeId) => nodeId !== approvalIds[0]);
+    state.pending_write.status = "prepared";
+    delete state.pending_write.approved_at;
+    delete state.pending_write.approved_by_node;
+    appendAudit(state, "write_reapproval_required", "system", approvalIds[0], "Agent session changed before commit");
+  }
+  appendAudit(state, "task_resumed", "user", undefined, note);
+  refreshDerivedState(state, workflow);
+  return state;
+}
+
+export function consumeResumeRequest(
+  source: WorkflowTask,
+  workflow: RuntimeWorkflow,
+  sessionKey: string,
+): WorkflowTask {
+  const request = source.approval_request;
+  if (!request || request.decision !== "resume") {
+    throw new TaskTransitionError("Task has no external resume request");
+  }
+  if (source.version !== request.expected_version + 1) {
+    throw new VersionConflictError(
+      `External resume expected base version ${request.expected_version}, found ${source.version}`,
+    );
+  }
+  if (request.intent_id !== undefined || request.payload_sha256 !== undefined) {
+    throw new TaskTransitionError("External resume cannot approve a frozen write intent");
+  }
+  const clean: WorkflowTask = clone(source);
+  delete clean.approval_request;
+  return resumeTask(
+    clean,
+    workflow,
+    clean.version,
+    sessionKey,
+    `${request.requested_by} @ ${request.requested_at}`,
+  );
+}
+
 export function consumeApprovalRequest(
   source: WorkflowTask,
   workflow: RuntimeWorkflow,
 ): WorkflowTask {
   const request = source.approval_request;
   if (!request) throw new TaskTransitionError("Task has no external approval request");
+  if (request.decision === "resume") {
+    throw new TaskTransitionError("Resume requests require an explicit destination session");
+  }
   if (source.version !== request.expected_version + 1) {
     throw new VersionConflictError(
       `External decision expected base version ${request.expected_version}, found ${source.version}`,

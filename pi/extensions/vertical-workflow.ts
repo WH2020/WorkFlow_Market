@@ -27,6 +27,7 @@ import {
   completeModelNode,
   completeSubagentNode,
   consumeApprovalRequest,
+  consumeResumeRequest,
   createTask,
   currentNodes,
   isTerminal,
@@ -703,9 +704,11 @@ export type WorkbenchRequest = {
   project_id?: string;
   schedule_id?: string;
   scheduled_for?: string;
-  request_kind?: "presentation-plan-revision";
+  request_kind?: "presentation-plan-revision" | "task-restart";
   revision_of_task_id?: string;
   source_plan_sha256?: string;
+  restart_of_task_id?: string;
+  source_task_version?: number;
   task_id?: string;
   accepted_at?: string;
 };
@@ -739,11 +742,19 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
     (request.schedule_id !== undefined && !safe(request.schedule_id)) ||
     (request.scheduled_for !== undefined && !/^\d{4}-\d{2}-\d{2}$/u.test(request.scheduled_for)) ||
     ((request.schedule_id === undefined) !== (request.scheduled_for === undefined)) ||
-    (request.request_kind !== undefined && request.request_kind !== "presentation-plan-revision") ||
+    (request.request_kind !== undefined && !["presentation-plan-revision", "task-restart"].includes(request.request_kind)) ||
     (request.revision_of_task_id !== undefined && !safe(request.revision_of_task_id)) ||
     (request.source_plan_sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(request.source_plan_sha256)) ||
+    (request.restart_of_task_id !== undefined && !safe(request.restart_of_task_id)) ||
+    (request.source_task_version !== undefined && (!Number.isInteger(request.source_task_version) || request.source_task_version < 1)) ||
     (request.request_kind === "presentation-plan-revision" &&
       (!safe(request.revision_of_task_id) || !/^[a-f0-9]{64}$/u.test(request.source_plan_sha256 ?? ""))) ||
+    (request.request_kind === "task-restart" &&
+      (!safe(request.restart_of_task_id) || !Number.isInteger(request.source_task_version))) ||
+    (request.request_kind !== "presentation-plan-revision" &&
+      (request.revision_of_task_id !== undefined || request.source_plan_sha256 !== undefined)) ||
+    (request.request_kind !== "task-restart" &&
+      (request.restart_of_task_id !== undefined || request.source_task_version !== undefined)) ||
     (expectedRequestId !== undefined && request.request_id !== expectedRequestId)
   ) {
     throw new Error("工作台请求字段无效或与文件名不一致");
@@ -1058,6 +1069,11 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           request.project_id !== selectedRequest.project_id ||
           request.schedule_id !== selectedRequest.schedule_id ||
           request.scheduled_for !== selectedRequest.scheduled_for ||
+          request.request_kind !== selectedRequest.request_kind ||
+          request.revision_of_task_id !== selectedRequest.revision_of_task_id ||
+          request.source_plan_sha256 !== selectedRequest.source_plan_sha256 ||
+          request.restart_of_task_id !== selectedRequest.restart_of_task_id ||
+          request.source_task_version !== selectedRequest.source_task_version ||
           request.request !== selectedRequest.request ||
           request.request_id !== selectedRequest.request_id
         ) return;
@@ -1071,6 +1087,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             (existing.project_id ?? undefined) !== (request.project_id ?? undefined) ||
             (existing.schedule_id ?? undefined) !== (request.schedule_id ?? undefined) ||
             (existing.scheduled_for ?? undefined) !== (request.scheduled_for ?? undefined) ||
+            (existing.restarted_from_task_id ?? undefined) !== (request.restart_of_task_id ?? undefined) ||
             existing.request !== request.request.trim() ||
             isTerminal(existing))
         ) {
@@ -1088,6 +1105,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             projectId: request.project_id,
             scheduleId: request.schedule_id,
             scheduledFor: request.scheduled_for,
+            restartOfTaskId: request.restart_of_task_id,
           });
         if (!existing) persistNew(task);
         else activeTask = existing;
@@ -1131,7 +1149,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     return next;
   };
 
-  const consumeDetachedCancellations = (): void => {
+  const consumeDetachedLifecycleRequests = (): void => {
     if (!existsSync(taskStore.directory)) return;
     for (const name of readdirSync(taskStore.directory).filter((entry) => entry.endsWith(".json")).sort().slice(0, 500)) {
       const taskId = basename(name, ".json");
@@ -1139,15 +1157,31 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       try {
         const task = taskStore.load(taskId);
         const request = task?.approval_request;
+        if (!task || isTerminal(task) || !request || !profiles.has(task.profile_id)) continue;
+        if (request.decision === "cancel") {
+          if (
+            request.requested_by !== "local-workbench" &&
+            !request.requested_by.startsWith("local-workbench-restart:")
+          ) continue;
+          const next = consumeApprovalRequest(task, workflowFor(task) as RuntimeWorkflow);
+          taskStore.save(next, task.version);
+          continue;
+        }
         if (
-          !task ||
-          isTerminal(task) ||
-          request?.decision !== "cancel" ||
+          request.decision !== "resume" ||
           request.requested_by !== "local-workbench" ||
-          !profiles.has(task.profile_id)
+          (activeTask && !isTerminal(activeTask)) ||
+          task.profile_id !== activeProfile.id
         ) continue;
-        const next = consumeApprovalRequest(task, workflowFor(task) as RuntimeWorkflow);
+        const workflow = workflowFor(task);
+        const service = activeProfile.services.find((item) => item.id === task.service_id);
+        if (!service || service.workflow !== workflow.id) continue;
+        const next = consumeResumeRequest(task, workflow as RuntimeWorkflow, sessionKey);
         taskStore.save(next, task.version);
+        activeTask = next;
+        pi.appendEntry("director-task-state", next);
+        updateRuntimeLease();
+        sendTaskPrompt(next, service, workflow);
       } catch {
         // A concurrent transition or malformed task remains untouched for explicit recovery.
       }
@@ -1169,7 +1203,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           { deliverAs: "followUp" },
         );
       }
-      consumeDetachedCancellations();
+      consumeDetachedLifecycleRequests();
       await consumeWorkbenchRequest();
     } finally {
       updateRuntimeLease();

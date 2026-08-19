@@ -101,6 +101,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('api("/api/search"', javascript)
         self.assertIn("task.display_status", javascript)
         self.assertIn('effectiveStatus === "interrupted"', javascript)
+        self.assertIn('id="task-history"', html)
+        self.assertIn('addRestartAction(actions, task, "重新开始")', javascript)
+        self.assertIn('addAction(actions, task, "resume", "继续任务")', javascript)
 
     def test_project_space_is_created_and_task_summaries_default_to_general_project(self):
         project = server.create_project_record({"name": "江苏客户项目", "description": "试点机会"})
@@ -165,6 +168,109 @@ class ControlCentreTests(unittest.TestCase):
         self.assertEqual(saved["approval_request"]["decision"], "cancel")
         self.assertEqual(saved["version"], 2)
         self.assertEqual(server.task_summaries()[0]["display_status"], "cancelling")
+
+    def test_workbench_can_resume_an_interrupted_task(self):
+        task = {
+            "task_id": "task-resume", "profile_id": "sales-director", "service_id": "sales-review",
+            "workflow_id": "market.sales.pipeline-review", "status": "running", "session_key": "old-session",
+            "version": 4, "audit": [],
+        }
+        path = server.TASKS / "task-resume.json"
+        server.atomic_json(path, task)
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+
+        handler.decide("task-resume", {"decision": "resume", "version": 4})
+        saved = server.load_json(path)
+        self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
+        self.assertEqual(saved["approval_request"]["decision"], "resume")
+        self.assertEqual(saved["version"], 5)
+        self.assertEqual(server.task_summaries()[0]["display_status"], "resuming")
+
+    def test_interrupted_restart_supersedes_old_task_and_publishes_a_fresh_request(self):
+        task = {
+            "task_id": "task-restart", "profile_id": "sales-director", "service_id": "sales-review",
+            "workflow_id": "market.sales.pipeline-review", "project_id": server.DEFAULT_PROJECT_ID,
+            "request": "复盘客户推进情况", "status": "running", "session_key": "old-session",
+            "version": 2, "audit": [],
+        }
+        path = server.TASKS / "task-restart.json"
+        server.atomic_json(path, task)
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+
+        handler.restart_task("task-restart", {"version": 2})
+        self.assertEqual(replies[-1][0], HTTPStatus.CREATED)
+        request_id = replies[-1][1]["request_id"]
+        saved_task = server.load_json(path)
+        request = server.load_json(server.REQUESTS / f"{request_id}.json")
+        self.assertEqual(saved_task["approval_request"]["decision"], "cancel")
+        self.assertEqual(saved_task["approval_request"]["requested_by"], f"local-workbench-restart:{request_id}")
+        self.assertEqual(saved_task["superseded_by_task_id"], request_id)
+        self.assertEqual(server.task_summaries()[0]["display_status"], "restarting")
+        self.assertEqual(request["status"], "requested")
+        self.assertEqual(request["request_kind"], "task-restart")
+        self.assertEqual(request["restart_of_task_id"], "task-restart")
+        self.assertEqual(request["request"], task["request"])
+
+    def test_historical_task_can_be_recreated_without_mutating_the_old_record(self):
+        task = {
+            "task_id": "task-history", "profile_id": "sales-director", "service_id": "sales-review",
+            "workflow_id": "market.sales.pipeline-review", "project_id": server.DEFAULT_PROJECT_ID,
+            "request": "再次复盘客户", "status": "cancelled", "session_key": "old-session",
+            "version": 7, "audit": [],
+        }
+        path = server.TASKS / "task-history.json"
+        server.atomic_json(path, task)
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+
+        handler.restart_task("task-history", {"version": 7})
+        self.assertEqual(replies[-1][0], HTTPStatus.CREATED)
+        request_id = replies[-1][1]["request_id"]
+        self.assertEqual(server.load_json(path), task)
+        self.assertEqual(server.load_json(server.REQUESTS / f"{request_id}.json")["status"], "requested")
+
+    def test_cancelled_replacement_is_classified_as_historical_superseded(self):
+        display, runtime = server.task_display_state({
+            "task_id": "old", "status": "cancelled", "superseded_by_task_id": "new",
+        }, {})
+        self.assertEqual(display, "superseded")
+        self.assertEqual(runtime, "historical")
+
+    def test_prepared_restart_is_published_only_when_the_source_task_is_linked(self):
+        request_id = "request-restart-recover"
+        record = {
+            "schema_version": "1.0", "request_id": request_id, "status": "prepared",
+            "source": "local-workbench", "request_kind": "task-restart",
+            "restart_of_task_id": "task-old", "source_task_version": 3,
+        }
+        request_path = server.REQUESTS / f"{request_id}.json"
+        server.atomic_json(request_path, record)
+        server.atomic_json(server.TASKS / "task-old.json", {
+            "task_id": "task-old", "status": "running", "version": 4,
+            "superseded_by_task_id": request_id,
+            "approval_request": {
+                "decision": "cancel", "requested_by": f"local-workbench-restart:{request_id}",
+                "requested_at": server.now(), "expected_version": 3,
+            },
+        })
+        server.recover_prepared_task_restarts()
+        self.assertEqual(server.load_json(request_path)["status"], "requested")
+
+        orphan_id = "request-restart-orphan"
+        orphan_path = server.REQUESTS / f"{orphan_id}.json"
+        server.atomic_json(orphan_path, {
+            **record, "request_id": orphan_id, "restart_of_task_id": "task-unlinked",
+        })
+        server.atomic_json(server.TASKS / "task-unlinked.json", {
+            "task_id": "task-unlinked", "status": "running", "version": 1,
+        })
+        server.recover_prepared_task_restarts()
+        self.assertEqual(server.load_json(orphan_path)["status"], "prepared")
 
     def test_daily_schedule_enqueues_at_most_once_per_day(self):
         service = {"id": "sales-review", "workflow": "market.sales.review"}

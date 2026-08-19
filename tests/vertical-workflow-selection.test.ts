@@ -208,6 +208,40 @@ test("a scheduled sales workbench request preserves project and schedule provena
   }
 });
 
+test("a restarted workbench request creates a fresh task linked to its source", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-restart-request-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const requestId = "request-restart-new";
+  try {
+    const directory = join(root, ".pi", "director-runtime", "requests");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `${requestId}.json`), JSON.stringify({
+      ...request(requestId, "sales-director"),
+      service_id: "sales-review", workflow_id: "market.sales.pipeline-review",
+      request_kind: "task-restart", restart_of_task_id: "task-old", source_task_version: 7,
+    }), "utf8");
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const task = JSON.parse(readFileSync(
+      join(root, ".pi", "director-runtime", "tasks", `${requestId}.json`), "utf8",
+    )) as { restarted_from_task_id?: string };
+    assert.equal(task.restarted_from_task_id, "task-old");
+    const consumed = JSON.parse(readFileSync(join(directory, `${requestId}.json`), "utf8")) as { status: string };
+    assert.equal(consumed.status, "accepted");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a valid idle workbench request queues a command-context profile reload", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-profile-switch-"));
   const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
@@ -463,6 +497,70 @@ test("the runtime poll closes an interrupted task after a workbench cancellation
     };
     assert.equal(persisted.status, "cancelled");
     assert.equal(persisted.approval_request, undefined);
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the runtime poll safely rebinds an interrupted task to the current session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-detached-resume-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const workflow: RuntimeWorkflow = {
+    id: "market.sales.pipeline-review",
+    nodes: [
+      { id: "load_accounts", type: "tool", tool: "sales.read", depends_on: [] },
+      { id: "analyze", type: "agent", depends_on: ["load_accounts"] },
+      { id: "confirm", type: "approval", depends_on: ["analyze"] },
+      { id: "update", type: "tool", tool: "sales.write", depends_on: ["confirm"] },
+      { id: "validate_updates", type: "validator", depends_on: ["update"] },
+    ],
+  };
+  try {
+    const task = createTask({
+      sessionKey: "ended-session.jsonl",
+      profileId: "sales-director",
+      serviceId: "sales-review",
+      workflow,
+      request: "review",
+      taskId: "task-resume",
+    });
+    const disk = {
+      ...task,
+      version: task.version + 1,
+      approval_request: {
+        decision: "resume" as const,
+        requested_at: "2026-08-19T00:00:00.000Z",
+        requested_by: "local-workbench",
+        expected_version: task.version,
+      },
+    };
+    const taskDirectory = join(root, ".pi", "director-runtime", "tasks");
+    mkdirSync(taskDirectory, { recursive: true });
+    writeFileSync(join(taskDirectory, "task-resume.json"), JSON.stringify(disk), "utf8");
+
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const persisted = JSON.parse(readFileSync(join(taskDirectory, "task-resume.json"), "utf8")) as {
+      session_key: string; status: string; approval_request?: unknown; audit: Array<{ action: string }>;
+    };
+    assert.equal(persisted.session_key, join(root, "session.jsonl"));
+    assert.equal(persisted.status, "running");
+    assert.equal(persisted.approval_request, undefined);
+    assert.equal(persisted.audit.at(-1)?.action, "task_resumed");
+    assert.ok(runtime.messages.some((message) => message.includes("受管任务 task-resume")));
+    const lease = JSON.parse(readFileSync(
+      join(root, ".pi", "director-runtime", "agent-leases", `${process.pid}.json`), "utf8",
+    )) as { task_id: string };
+    assert.equal(lease.task_id, "task-resume");
     await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
