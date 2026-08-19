@@ -5,6 +5,7 @@
   let selectedService = null;
   let guidedRenderedService = null;
   let modelSettingsInitialized = false;
+  let searchSettingsInitialized = false;
   let runtimeSettingsInitialized = false;
   let taskRuntimeCatalogKey = "";
   let currentView = "home";
@@ -226,6 +227,42 @@
     $("model-api-key").value = "";
     $("model-api-key").placeholder = settings.has_api_key ? "已保存；留空则继续使用" : "请输入网关 API Key";
     populateModelOptions(settings.models || [], settings.selected_model || "");
+  }
+
+  function renderSearchSettings(force = false) {
+    const settings = model?.search || { configured: false, status: "unconfigured" };
+    const panel = $("search-settings-panel");
+    const ready = settings.status === "configured" && !settings.restart_required;
+    panel.classList.toggle("configured", ready);
+    panel.classList.toggle("error", settings.status === "error");
+    if (settings.status === "error") $("search-current").textContent = `配置异常：${settings.error}`;
+    else if (settings.restart_required) $("search-current").textContent = "配置已变更 · 关闭并重新打开应用后生效";
+    else if (ready) $("search-current").textContent = "Brave Search 已就绪 · 政策与行业检索可用";
+    else $("search-current").textContent = "尚未配置 · 政策检索和公开调研暂不可用";
+    $("public-search-status").textContent = ready
+      ? "公开检索服务已就绪。"
+      : settings.restart_required
+        ? "检索密钥已保存，请重启应用后使用。"
+        : "公开检索尚未配置，点击后将前往设置。";
+    $("start-public-search").textContent = ready ? "发起公开调研" : "配置公开检索";
+    if (searchSettingsInitialized && !force) return;
+    searchSettingsInitialized = true;
+    $("search-api-key").value = "";
+    $("search-api-key").placeholder = settings.has_api_key
+      ? "已安全保存；留空可重新验证"
+      : "粘贴 Brave Search API Key";
+  }
+
+  function publicSearchReady(serviceId, guide = false) {
+    if (!["industry-research", "government-proposal", "presentation-studio"].includes(serviceId)) return true;
+    const settings = model?.search || {};
+    if (settings.status === "configured" && !settings.restart_required) return true;
+    if (guide) {
+      switchView("settings");
+      $("search-settings-panel").open = true;
+      $("search-api-key").focus();
+    }
+    return false;
   }
 
   function renderTaskRuntimeOptions() {
@@ -947,11 +984,16 @@
   }
 
   function render() {
-    renderModelSettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
+    renderModelSettings(); renderSearchSettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); switchView(currentView);
   }
 
   async function createTask(request) {
+    if (!publicSearchReady(selectedService, true)) {
+      throw new Error(model?.search?.restart_required
+        ? "公开检索配置已保存，请关闭并重新打开 Agent4Market 后再创建该任务。"
+        : "该任务需要公开检索，请先在“设置 > 公开检索”配置 Brave Search API Key。");
+    }
     return api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, project_id: selectedProject, request, ...taskRuntimeSelection() }),
@@ -1151,6 +1193,10 @@
   $("start-public-search").onclick = async () => {
     const query = $("search-query").value.trim();
     if (query.length < 2) { note("请先输入至少 2 个字的公开调研主题。", true); return; }
+    if (!publicSearchReady("industry-research", true)) {
+      note(model?.search?.restart_required ? "请重启应用，让 AI 核心加载检索密钥。" : "请先配置公开检索服务。", true);
+      return;
+    }
     openService("industry-research");
     guidedDrafts["industry-research"] = { topic: query, purpose: "支持客户沟通与机会判断", period: "近 12 个月，并补充关键历史背景" };
     renderGuidedForm(true);
@@ -1247,6 +1293,52 @@
     } catch (error) {
       $("model-discovery-status").textContent = error.message;
     } finally { button.disabled = false; }
+  };
+
+  $("save-search-settings").onclick = async () => {
+    const button = $("save-search-settings");
+    button.disabled = true;
+    $("search-settings-status").textContent = "正在连接 Brave Search 验证密钥…";
+    try {
+      const response = await api("/api/search-settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: $("search-api-key").value.trim() }),
+      });
+      model.search = response;
+      renderSearchSettings(true);
+      $("search-settings-panel").open = true;
+      $("search-settings-status").textContent = response.message;
+      note("检索密钥已安全保存；关闭并重新打开 Agent4Market 后即可重试政策检索。");
+    } catch (error) {
+      $("search-settings-status").textContent = error.message;
+    } finally { button.disabled = false; }
+  };
+
+  document.querySelector(".external-link").onclick = async (event) => {
+    event.preventDefault();
+    try {
+      const response = await api("/api/search-settings/open-dashboard", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      note(response.message);
+    } catch (error) { note(error.message, true); }
+  };
+
+  $("reset-search-settings").onclick = async () => {
+    if (!confirm("删除已保存的公开检索密钥？重启应用后政策检索和公开调研将不可用。")) return;
+    const button = $("reset-search-settings");
+    button.disabled = true;
+    try {
+      const response = await api("/api/search-settings/reset", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      model.search = response;
+      renderSearchSettings(true);
+      $("search-settings-panel").open = true;
+      $("search-settings-status").textContent = response.message;
+      note(response.message);
+    } catch (error) { $("search-settings-status").textContent = error.message; }
+    finally { button.disabled = false; }
   };
 
   $("save-runtime-settings").onclick = async () => {

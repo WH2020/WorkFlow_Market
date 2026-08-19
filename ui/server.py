@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import uuid
+import webbrowser
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -39,6 +40,12 @@ from agent_platform.model_provider import (  # noqa: E402
     load_model_secret,
     model_settings_summary,
     normalize_base_url,
+)
+from agent_platform.search_provider import (  # noqa: E402
+    SearchProviderError,
+    clear_search_provider,
+    configure_search_provider,
+    search_settings_summary,
 )
 
 
@@ -66,6 +73,8 @@ MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".pptx"}
 AGENT_LEASE_FRESH_SECONDS = 15
 TASK_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+PUBLIC_SEARCH_SERVICES = {"industry-research", "government-proposal", "presentation-studio"}
+BRAVE_DASHBOARD_URL = "https://api-dashboard.search.brave.com/app/keys"
 
 
 def now() -> str:
@@ -1276,17 +1285,21 @@ class ControlHandler(SimpleHTTPRequestHandler):
             tasks = task_summaries()
             self.send_json(HTTPStatus.OK, {"profiles": profiles(), "workflows": workflows(), "tasks": tasks,
                                            "data": data_summary(), "outputs": output_summary(),
-                                           "projects": project_summaries(tasks), "project_files": project_files(),
-                                           "schedules": schedule_records(),
-                                           "model": model_settings_summary(ROOT),
-                                           "desktop_runtime": desktop_runtime_summary(),
-                                           "request_token": SERVER_TOKEN})
+                                            "projects": project_summaries(tasks), "project_files": project_files(),
+                                            "schedules": schedule_records(),
+                                            "model": model_settings_summary(ROOT),
+                                            "search": search_settings_summary(ROOT),
+                                            "desktop_runtime": desktop_runtime_summary(),
+                                            "request_token": SERVER_TOKEN})
             return
         if route == "/api/desktop-settings":
             self.send_json(HTTPStatus.OK, desktop_runtime_summary())
             return
         if route == "/api/model-settings":
             self.send_json(HTTPStatus.OK, model_settings_summary(ROOT))
+            return
+        if route == "/api/search-settings":
+            self.send_json(HTTPStatus.OK, search_settings_summary(ROOT))
             return
         if route == "/api/tasks":
             self.send_json(HTTPStatus.OK, task_summaries())
@@ -1337,6 +1350,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.configure_model(payload)
             elif route == "/api/model-settings/reset":
                 self.reset_model()
+            elif route == "/api/search-settings":
+                self.configure_search(payload)
+            elif route == "/api/search-settings/reset":
+                self.reset_search()
+            elif route == "/api/search-settings/open-dashboard":
+                if not webbrowser.open(BRAVE_DASHBOARD_URL, new=2):
+                    raise RuntimeError("无法打开系统浏览器；请手动访问 Brave Search API 控制台")
+                self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开 Brave Search API 控制台。"})
             elif route == "/api/desktop-settings":
                 self.send_json(HTTPStatus.OK, {
                     **save_desktop_settings(payload),
@@ -1352,7 +1373,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.create_presentation_revision(route.split("/")[3], payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
-        except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError) as error:
+        except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:
             self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
@@ -1400,6 +1421,25 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "message": "已恢复为 Pi 默认模型。请关闭并重新打开 Agent4Market 后生效。",
         })
 
+    def configure_search(self, payload: dict[str, Any]) -> None:
+        result = configure_search_provider(
+            ROOT,
+            api_key=str(payload.get("api_key", "")).strip() or None,
+        )
+        self.send_json(HTTPStatus.OK, {
+            **result,
+            "restart_required": True,
+            "message": "Brave Search 已验证并使用系统保护存储保存。请关闭并重新打开 Agent4Market 后重试检索任务。",
+        })
+
+    def reset_search(self) -> None:
+        result = clear_search_provider(ROOT)
+        self.send_json(HTTPStatus.OK, {
+            **result,
+            "restart_required": True,
+            "message": "公开检索密钥已删除。请关闭并重新打开 Agent4Market，使运行时停止使用旧密钥。",
+        })
+
     def create_request(self, payload: dict[str, Any]) -> None:
         profile_id = safe_id(str(payload.get("profile_id", "")))
         service_id = safe_id(str(payload.get("service_id", "")))
@@ -1414,6 +1454,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
         service = next((item for item in profile["services"] if item["id"] == service_id), None)
         if service is None:
             raise ValueError("该服务不属于当前角色")
+        if service_id in PUBLIC_SEARCH_SERVICES:
+            search = search_settings_summary(ROOT)
+            if search.get("status") != "configured":
+                raise ValueError("该任务需要公开检索；请先在“设置 > 公开检索”配置 Brave Search API Key")
+            if search.get("restart_required"):
+                raise ValueError("公开检索密钥已保存，但 AI 核心尚未加载；请关闭并重新打开 Agent4Market 后重试")
         if service_id in {"presentation-studio", "weekly-deck"}:
             validate_presentation_brief_request(request_text)
         runtime_selection = task_runtime_selection(payload)

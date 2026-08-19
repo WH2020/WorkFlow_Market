@@ -12,6 +12,12 @@ from typing import Any, Mapping, Sequence
 
 from .core import ManifestError, Platform, WorkflowError
 from .model_provider import ModelProviderError, model_runtime_configuration
+from .search_provider import (
+    SearchProviderError,
+    mark_search_runtime_applied,
+    search_runtime_environment,
+    search_settings_summary,
+)
 from .subagents import (
     ensure_subagent_configuration,
     subagent_doctor_check,
@@ -241,7 +247,7 @@ def doctor_report(
         "core": {"ready": core_ready, "checks": checks},
         "ppt": ppt,
         "optional": {
-            "brave_search_configured": bool(environment.get("BRAVE_SEARCH_API_KEY", "").strip()),
+            "brave_search_configured": bool(search_settings_summary(root, environ=environment).get("configured")),
             "local_data_initialized": local_data,
         },
     }
@@ -267,6 +273,16 @@ def launch_pi(
     if ppt_ready:
         environment.update(report["ppt"]["config"])
     launch_arguments = list(arguments)
+    utility_only = any(
+        argument in {"--version", "--help", "-h", "--list-models"}
+        for argument in launch_arguments
+    ) or (launch_arguments[:1] and launch_arguments[0] in {
+        "install", "remove", "uninstall", "update", "list", "config", "auth"
+    })
+    try:
+        environment.update(search_runtime_environment(root, environ=environment))
+    except SearchProviderError as error:
+        raise RuntimeError(f"Public search configuration is invalid: {error}") from error
     try:
         model_runtime = model_runtime_configuration(root)
     except (ModelProviderError, OSError):
@@ -278,14 +294,10 @@ def launch_pi(
         has_explicit_model = any(
             argument == "--model" or argument.startswith("--model=") for argument in launch_arguments
         )
-        utility_only = any(
-            argument in {"--version", "--help", "-h", "--list-models"}
-            for argument in launch_arguments
-        ) or (launch_arguments[:1] and launch_arguments[0] in {
-            "install", "remove", "uninstall", "update", "list", "config", "auth"
-        })
         if not has_explicit_model and not utility_only:
             launch_arguments = ["--model", selected_model, *launch_arguments]
+    if not utility_only:
+        mark_search_runtime_applied(root)
     completed = subprocess.run([str(pi_path), *launch_arguments], cwd=root, env=environment, check=False)
     return completed.returncode, ppt_ready
 

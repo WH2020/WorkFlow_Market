@@ -78,6 +78,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="guided-fields"', html)
         self.assertIn('id="quick-prompts"', html)
         self.assertIn('id="model-settings-panel"', html)
+        self.assertIn('id="search-settings-panel"', html)
+        self.assertIn('id="search-api-key"', html)
+        self.assertIn('id="save-search-settings"', html)
         self.assertIn('id="discover-models"', html)
         self.assertIn('id="model-select"', html)
         self.assertIn('id="task-model"', html)
@@ -99,6 +102,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function weeklyBrief()", javascript)
         self.assertIn("function guidedRequest()", javascript)
         self.assertIn("function renderModelSettings", javascript)
+        self.assertIn("function renderSearchSettings", javascript)
+        self.assertIn('api("/api/search-settings"', javascript)
+        self.assertIn('api("/api/search-settings/open-dashboard"', javascript)
         self.assertIn("function renderRuntimeSettings", javascript)
         self.assertIn("function taskRuntimeSelection", javascript)
         self.assertIn('api("/api/model-discovery"', javascript)
@@ -157,6 +163,23 @@ class ControlCentreTests(unittest.TestCase):
                 handler.create_request({**payload, "requested_model": "agent4market-newapi/not-allowed"})
         with self.assertRaises(ValueError):
             handler.create_request({**payload, "requested_thinking_level": "unlimited"})
+
+    def test_public_research_task_is_rejected_before_queueing_when_search_is_not_ready(self):
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        payload = {
+            "profile_id": "sales-director", "service_id": "government-proposal",
+            "project_id": server.DEFAULT_PROJECT_ID, "request": "制定地方政府合作方案",
+        }
+        with patch("ui.server.search_settings_summary", return_value={"status": "unconfigured"}):
+            with self.assertRaisesRegex(ValueError, "设置 > 公开检索"):
+                handler.create_request(payload)
+        with patch(
+            "ui.server.search_settings_summary",
+            return_value={"status": "configured", "restart_required": True},
+        ):
+            with self.assertRaisesRegex(ValueError, "关闭并重新打开"):
+                handler.create_request(payload)
+        self.assertFalse(list(server.REQUESTS.glob("*.json")))
 
     def test_running_task_requires_a_fresh_matching_agent_lease(self):
         task = {

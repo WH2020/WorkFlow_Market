@@ -44,7 +44,7 @@ Windows 桌面发行版固定加载 `sales-director`，保留销售、研究、�
 
 Pi 接手请求后会先切换模型，再设置思考等级，最后才创建受管任务并发送任务提示；切换或保存失败时会回滚本次运行配置。任务卡显示的是最终生效值，而不是只显示用户请求值。模型能力不足时 Pi 会自动降低等级，例如非推理模型显示为“关闭”。历史任务再次创建、中断任务重新开始以及 PPT 大纲修订会保留原任务的显式选择；“默认”不会固定某个模型，而是在每次任务开始时恢复应用启动时的默认配置。
 
-行业研究和政府合作方案需要公开检索。在本机环境变量中配置 `BRAVE_SEARCH_API_KEY` 后再启动 Pi；密钥不要放进 `.env`、JSON、截图或 Git。适配器先调用 Brave 正式 Web Search API 发现来源，再由受控 `web.open` 读取选中的正文；读取连接固定到已核验的公网地址，DNS 与连接空闲各限 10 秒，网页下载及在线 PDF 提取合计限 30 秒，并拒绝重定向。未配置、配额不足、私网目标或网络异常时会停在当前 DAG 节点。[官方认证说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
+行业研究、政府合作方案和需要公开资料的 PPT 需要公开检索。进入工作台“设置 > 公开检索”，在 Brave 官方页面申请 API Key，粘贴后点击“验证并保存”，再关闭并重新打开 Agent4Market。Windows 密钥由当前用户的 DPAPI 加密，macOS 密钥写入系统钥匙串；任务、日志和 Git 中均不保存明文密钥。已有自动化部署也可继续使用环境变量 `BRAVE_SEARCH_API_KEY`。未配置或配置变更尚未重启时，工作台会在任务入队前提示，不再让任务运行到政策检索节点才失败。适配器先调用 Brave 正式 Web Search API 发现来源，再由受控 `web.open` 读取选中的正文；读取连接固定到已核验的公网地址，DNS 与连接空闲各限 10 秒，网页下载及在线 PDF 提取合计限 30 秒，并拒绝重定向。配额不足、私网目标或网络异常时会停在当前 DAG 节点。[官方认证说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
 ### PDF 与 PPT 运行时
 
