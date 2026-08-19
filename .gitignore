@@ -26,3 +26,4 @@ outputs/
 library/templates/office-template-catalog.json
 library/templates/company/
 *.log
+/Agent4Market.exe

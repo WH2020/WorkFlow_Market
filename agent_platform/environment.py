@@ -206,6 +206,8 @@ def doctor_report(
         _command_check(root, "node", MIN_NODE, environment),
         _command_check(root, "pnpm", MIN_PNPM, environment),
         _command_check(root, "pi", MIN_PI, environment),
+        _command_check(root, "rg", None, environment),
+        _command_check(root, "fd", None, environment),
     ]
     try:
         validation = Platform(root).validate_all().as_dict()

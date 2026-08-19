@@ -35,15 +35,20 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     throw "Node.js 22.19+ was not found. Install Node.js and run this script again."
 }
 
+$CodexPrivatePathPattern = '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/]|[\\/]OpenAI\.Codex_)'
+function Update-ProcessPathFromSystem {
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $env:Path = @($UserPath, $MachinePath) -join [IO.Path]::PathSeparator
+}
+
 function Get-IndependentPnpm {
     $Candidate = Get-Command pnpm -ErrorAction SilentlyContinue
-    if ($Candidate -and $Candidate.Source -match '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/])') {
-        $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-        $env:Path = @($UserPath, $MachinePath) -join [IO.Path]::PathSeparator
+    if ($Candidate -and $Candidate.Source -match $CodexPrivatePathPattern) {
+        Update-ProcessPathFromSystem
         $Candidate = Get-Command pnpm -ErrorAction SilentlyContinue
     }
-    if ($Candidate -and $Candidate.Source -notmatch '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/])') {
+    if ($Candidate -and $Candidate.Source -notmatch $CodexPrivatePathPattern) {
         return $Candidate
     }
 
@@ -58,16 +63,14 @@ function Get-IndependentPnpm {
             "install", "--id", "pnpm.pnpm", "--exact", "--silent",
             "--accept-package-agreements", "--accept-source-agreements"
         )
-        $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-        $env:Path = @($UserPath, $MachinePath) -join [IO.Path]::PathSeparator
+        Update-ProcessPathFromSystem
     } elseif ($Npm) {
         Invoke-Checked -FilePath $Npm.Source -Arguments @("install", "-g", "pnpm@10")
     } else {
         throw "Independent pnpm was not found. Install pnpm 9+ with winget or the official Node.js installer, then retry."
     }
     $Candidate = Get-Command pnpm -ErrorAction SilentlyContinue
-    if (-not $Candidate -or $Candidate.Source -match '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/])') {
+    if (-not $Candidate -or $Candidate.Source -match $CodexPrivatePathPattern) {
         throw "Independent pnpm installation finished, but a non-Codex pnpm command is still unavailable. Restart PowerShell and retry."
     }
     return $Candidate
@@ -76,6 +79,41 @@ $PnpmCommand = Get-IndependentPnpm
 if (-not $SkipDependencies) {
     Invoke-Checked -FilePath $PnpmCommand.Source -Arguments @("install", "--frozen-lockfile", "--ignore-scripts")
 }
+
+function Install-IndependentCli {
+    param([string]$CommandName, [string]$WingetId, [string]$ChocolateyId)
+    $Candidate = Get-Command $CommandName -ErrorAction SilentlyContinue
+    if ($Candidate -and $Candidate.Source -match $CodexPrivatePathPattern) {
+        Update-ProcessPathFromSystem
+        $Candidate = Get-Command $CommandName -ErrorAction SilentlyContinue
+    }
+    if ($Candidate -and $Candidate.Source -notmatch $CodexPrivatePathPattern) { return }
+    $Winget = Get-Command winget -ErrorAction SilentlyContinue
+    $Chocolatey = Get-Command choco -ErrorAction SilentlyContinue
+    if ($Winget) {
+        try {
+            Invoke-Checked -FilePath $Winget.Source -Arguments @(
+                "install", "--id", $WingetId, "--exact", "--silent",
+                "--accept-package-agreements", "--accept-source-agreements"
+            )
+        } catch {
+            if (-not $Chocolatey) { throw }
+            Invoke-Checked -FilePath $Chocolatey.Source -Arguments @("install", $ChocolateyId, "-y", "--no-progress")
+        }
+    } elseif ($Chocolatey) {
+        Invoke-Checked -FilePath $Chocolatey.Source -Arguments @("install", $ChocolateyId, "-y", "--no-progress")
+    } else {
+        throw "$CommandName is required. Install $WingetId with winget and retry."
+    }
+    Update-ProcessPathFromSystem
+    $Candidate = Get-Command $CommandName -ErrorAction SilentlyContinue
+    if (-not $Candidate -or $Candidate.Source -match $CodexPrivatePathPattern) {
+        throw "$CommandName installation completed, but an independent executable is unavailable. Restart PowerShell and retry."
+    }
+}
+Install-IndependentCli -CommandName "rg" -WingetId "BurntSushi.ripgrep.MSVC" -ChocolateyId "ripgrep"
+Install-IndependentCli -CommandName "fd" -WingetId "sharkdp.fd" -ChocolateyId "fd"
+
 $LibreOfficeCandidates = @(
     (Join-Path ${env:ProgramFiles} "LibreOffice\program\soffice.com"),
     (Join-Path ${env:ProgramFiles} "LibreOffice\program\soffice.exe")
@@ -139,7 +177,10 @@ $DoctorJson | ForEach-Object { Write-Output $_ }
 $DoctorResult = ($DoctorJson -join [Environment]::NewLine) | ConvertFrom-Json
 if (-not [bool]$DoctorResult.ppt.ready) { throw "Independent PPT runtime validation failed." }
 Write-Host "Independent PPT runtime detected: PptxGenJS + LibreOffice + PDF.js." -ForegroundColor Green
+$LauncherBuild = Join-Path $ProjectRoot "scripts\build-windows-launcher.ps1"
+& $LauncherBuild
+if ($LASTEXITCODE -ne 0) { throw "Agent4Market.exe build failed." }
 
-Write-Host "Setup complete. Start the Agent with: .\scripts\start-windows.ps1" -ForegroundColor Green
+Write-Host "Setup complete. Double-click Agent4Market.exe or run: .\Agent4Market.exe" -ForegroundColor Green
 Write-Host "Start the local workbench in another terminal with: python ui/server.py"
 exit 0

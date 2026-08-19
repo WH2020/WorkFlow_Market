@@ -13,9 +13,14 @@ class EnvironmentTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         windows = (root / "scripts" / "setup-windows.ps1").read_text(encoding="utf-8")
         macos = (root / "scripts" / "setup-macos.sh").read_text(encoding="utf-8")
+        launcher_build = (root / "scripts" / "build-windows-launcher.ps1").read_text(encoding="utf-8")
         for script in (windows, macos):
             self.assertIn("codex-runtimes", script)
             self.assertIn("--ignore-scripts", script)
+        self.assertIn("build-windows-launcher.ps1", windows)
+        self.assertIn("--self-test", launcher_build)
+        self.assertIn("BurntSushi.ripgrep.MSVC", windows)
+        self.assertIn("sharkdp.fd", windows)
 
     def _project_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, Path]:
         temporary = tempfile.TemporaryDirectory()

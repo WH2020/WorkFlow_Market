@@ -60,6 +60,13 @@ esac
 if [ "$SKIP_DEPENDENCIES" -eq 0 ]; then
   "$PNPM_COMMAND" install --frozen-lockfile --ignore-scripts
 fi
+MISSING_CLI=()
+command -v rg >/dev/null 2>&1 || MISSING_CLI+=(ripgrep)
+command -v fd >/dev/null 2>&1 || MISSING_CLI+=(fd)
+if [ "${#MISSING_CLI[@]}" -gt 0 ]; then
+  command -v brew >/dev/null 2>&1 || { printf 'Homebrew is required to install ripgrep and fd.\n' >&2; exit 2; }
+  brew install "${MISSING_CLI[@]}"
+fi
 LIBREOFFICE_PATH=""
 for candidate in "/Applications/LibreOffice.app/Contents/MacOS/soffice" "$HOME/Applications/LibreOffice.app/Contents/MacOS/soffice" "/opt/homebrew/bin/soffice" "/usr/local/bin/soffice"; do
   if [ -x "$candidate" ]; then LIBREOFFICE_PATH="$candidate"; break; fi

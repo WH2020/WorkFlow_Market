@@ -39,8 +39,10 @@ Windows PowerShell：
 git clone https://github.com/WH2020/WorkFlow_Market.git
 cd WorkFlow_Market
 .\scripts\setup-windows.ps1
-.\scripts\start-windows.ps1
+.\Agent4Market.exe
 ```
+
+Windows 安装器会使用系统自带的 .NET Framework 编译器生成根目录下的单文件启动器 `Agent4Market.exe`。双击后会启动仅本机可访问的工作台、打开浏览器并在同一控制台运行交互式 Pi；退出 Pi 时会自动停止本次启动的工作台。EXE 不包含业务数据，也不会复制 Codex Desktop 运行时；移动 EXE 时必须连同整个已安装目录一起移动。
 
 macOS Terminal：
 
