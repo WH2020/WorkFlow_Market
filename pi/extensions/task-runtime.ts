@@ -328,6 +328,40 @@ export function completeModelNode(
   return state;
 }
 
+export function completeSubagentNode(
+  source: WorkflowTask,
+  workflow: RuntimeWorkflow,
+  nodeId: string,
+  expectedVersion: number,
+  receiptPath: string,
+  receiptSha256: string,
+  note?: string,
+): WorkflowTask {
+  assertExpectedVersion(source, expectedVersion);
+  const state = clone(source);
+  const node = assertCurrentNode(state, workflow, nodeId);
+  if (node.type !== "subagent") {
+    throw new TaskTransitionError(`Subagent completion is limited to subagent nodes; ${nodeId} is ${node.type}`);
+  }
+  if (!/^\.pi\/director-runtime\/subagent-results\/[a-f0-9-]{36}\.json$/u.test(receiptPath)) {
+    throw new TaskTransitionError("Subagent completion receipt path is invalid");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(receiptSha256)) {
+    throw new TaskTransitionError("Subagent completion receipt SHA-256 is invalid");
+  }
+  state.completed_nodes.push(node.id);
+  if (!state.artifacts.includes(receiptPath)) state.artifacts.push(receiptPath);
+  appendAudit(
+    state,
+    "subagent_completed",
+    "adapter",
+    node.id,
+    JSON.stringify({ receipt: receiptPath, sha256: receiptSha256, ...(note ? { note: note.slice(0, 1000) } : {}) }),
+  );
+  refreshDerivedState(state, workflow);
+  return state;
+}
+
 export function proposeWriteIntent(
   source: WorkflowTask,
   workflow: RuntimeWorkflow,

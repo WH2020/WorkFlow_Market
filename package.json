@@ -1,6 +1,6 @@
 {
   "name": "workflow-director-agent",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "description": "A single-role Sales Director AI Assistant with a Tauri desktop shell and governed Pi workflows.",
   "license": "MIT",
@@ -16,19 +16,27 @@
     "vertical-agent",
     "workflow",
     "sales-director",
-    "market-director",
-    "product-director"
+    "government-cooperation"
   ],
   "scripts": {
     "check:types": "tsc --noEmit",
-    "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/data-adapters.test.ts pi/tests/source-readers.test.ts pi/tests/deck-builder.test.mjs",
+    "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/data-adapters.test.ts pi/tests/source-readers.test.ts pi/tests/subagent-contracts.test.ts pi/tests/deck-builder.test.mjs",
     "test:ppt-e2e": "node pi/tests/standalone-deck-e2e.mjs"
   },
   "pi": {
     "extensions": [
-      "./pi/extensions/vertical-workflow.ts"
-    ]
+      "./pi/extensions/vertical-workflow.ts",
+      "./node_modules/pi-subagents/index.ts"
+    ],
+    "subagents": {
+      "agents": [
+        "./pi/subagents/agents"
+      ]
+    }
   },
+  "bundledDependencies": [
+    "pi-subagents"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.84.2",
     "typebox": ">=1.3.15 <2"
@@ -42,6 +50,7 @@
     "@napi-rs/canvas": "1.0.7",
     "jszip": "3.10.1",
     "pdfjs-dist": "6.2.108",
+    "pi-subagents": "0.51.0",
     "pptxgenjs": "4.0.1"
   }
 }

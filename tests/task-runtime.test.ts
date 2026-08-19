@@ -14,6 +14,7 @@ import {
   cancelTask,
   completeLogicalTool,
   completeModelNode,
+  completeSubagentNode,
   consumeApprovalRequest,
   createTask,
   currentNodes,
@@ -279,4 +280,32 @@ test("write intent preparation selects its direct predecessor inside a parallel 
   assert.deepEqual(currentNodes(task, workflow).map((node) => node.id), ["other", "prepare"]);
   const prepared = proposeWriteIntent(task, workflow, "knowledge.write", writePayload, task.version);
   assert.equal(prepared.pending_write?.proposed_by_node, "prepare");
+});
+
+test("only an adapter receipt can complete a current subagent node", () => {
+  const workflow: RuntimeWorkflow = {
+    id: "test.subagent",
+    nodes: [
+      { id: "scope", type: "agent", depends_on: [] },
+      { id: "research", type: "subagent", depends_on: ["scope"] },
+      { id: "synthesize", type: "agent", depends_on: ["research"] },
+    ],
+  };
+  let task = start(workflow);
+  task = completeModelNode(task, workflow, "scope", task.version);
+  assert.throws(() => completeModelNode(task, workflow, "research", task.version), /limited to agent\/validator/);
+  task = completeSubagentNode(
+    task,
+    workflow,
+    "research",
+    task.version,
+    ".pi/director-runtime/subagent-results/123e4567-e89b-42d3-a456-426614174000.json",
+    "a".repeat(64),
+    "one verified source",
+  );
+  assert.equal(task.current_node, "synthesize");
+  assert.deepEqual(task.artifacts, [
+    ".pi/director-runtime/subagent-results/123e4567-e89b-42d3-a456-426614174000.json",
+  ]);
+  assert.equal(task.audit.at(-1)?.action, "subagent_completed");
 });

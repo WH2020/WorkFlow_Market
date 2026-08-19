@@ -9,7 +9,19 @@
     {"id": "policy_search", "type": "tool", "tool": "web.search", "depends_on": ["clarify"], "permissions": ["web.read"]},
     {"id": "open_policy_sources", "type": "tool", "tool": "web.open", "depends_on": ["policy_search"], "permissions": ["web.read"]},
     {"id": "draft", "type": "agent", "skill": "draft-government-program", "depends_on": ["open_policy_sources"], "permissions": ["artifact.write"]},
-    {"id": "validate", "type": "validator", "check": "policy_source_and_commitment_boundary", "depends_on": ["draft"], "permissions": []},
+    {
+      "id": "independent_review",
+      "type": "subagent",
+      "depends_on": ["draft"],
+      "permissions": [],
+      "boundary": {
+        "objective": "只读复核当前政府合作方案的政策依据、事实与分析区分、承诺边界、关键风险和待确认事项，不编辑方案或替用户批准",
+        "allowed_tools": [],
+        "max_turns": 6,
+        "write_scope": []
+      }
+    },
+    {"id": "validate", "type": "validator", "check": "policy_source_and_commitment_boundary", "depends_on": ["independent_review"], "permissions": []},
     {"id": "approval", "type": "approval", "policy": "owner_approves_commitments", "depends_on": ["validate"], "permissions": []}
   ]
 }

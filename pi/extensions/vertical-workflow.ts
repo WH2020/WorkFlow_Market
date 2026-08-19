@@ -24,6 +24,7 @@ import {
   cancelTask,
   completeLogicalTool,
   completeModelNode,
+  completeSubagentNode,
   consumeApprovalRequest,
   createTask,
   currentNodes,
@@ -35,6 +36,15 @@ import {
   type RuntimeWorkflow,
   type WorkflowTask,
 } from "./task-runtime.ts";
+import {
+  cleanupExpiredSubagentContracts,
+  createGovernedSubagentContract,
+  loadGovernedSubagentContract,
+  removeGovernedSubagentContract,
+  writeGovernedSubagentResult,
+  type GovernedSubagentContract,
+  type GovernedSubagentRole,
+} from "./subagent-contracts.ts";
 
 type Service = {
   id: string;
@@ -115,6 +125,10 @@ const SUBAGENT_TOOL_PERMISSIONS = new Map([
   ["web.search", "web.read"],
   ["web.open", "web.read"],
 ]);
+const SUBAGENT_AGENT_NAMES: Record<GovernedSubagentRole, string> = {
+  "research-scout": "director-research-scout",
+  "readonly-reviewer": "director-readonly-reviewer",
+};
 
 function loadProfiles(): Map<string, Profile> {
   const profiles = new Map<string, Profile>();
@@ -466,7 +480,7 @@ function profileContext(profile: Profile): string {
     `当前垂直角色：${profile.display_name}（${profile.id}）。`,
     profile.description,
     "你是主 Agent：先识别用户意图并选择服务，随后必须调用 get_vertical_workflow_plan 取得对应 DAG，再按阶段推进。只有可独立研究、只读检查或独立复核才使用 subagent；审批、数据写入和正式文件生成必须保留为确定性节点或人工关口。",
-    "到达 approval 节点时必须停止并请求用户确认；未确认前不得执行后续阶段。subagent 必须遵守计划中的 objective、allowed_tools、max_turns 和 write_scope；当前运行时没有隔离 subagent 执行器时必须停在该节点并如实报告，不能把它当作普通 agent 或静默完成。",
+    "到达 approval 节点时必须停止并请求用户确认；未确认前不得执行后续阶段。到达 subagent 节点时只调用一次 subagent 工具，运行时会强制绑定只读角色、工具、上下文、轮次和证据回执；不得自行选择 Agent、后台运行或管理 Subagent。",
     "启动任务时使用逐项核对：一次只提出一个会显著改变方向、范围、接口、风险或交付物的问题；记录已确认、暂定和待确认项，发现矛盾时直接指出并继续核对。信息已足够时不要机械追问。",
     "DAG 中的 tool 字段是逻辑能力 ID。使用当前已安装的 Pi 工具和对应 Skill 实现；若没有可用适配器，停在该节点并明确报告，不得声称已调用不存在的工具。",
     "信息必须区分已证实事实、分析判断、待验证假设和未知信息。缺失信息只有会显著改变方向、接口、风险或交付物时才提问。",
@@ -506,8 +520,132 @@ const MANAGED_ALLOWED_TOOLS = new Set([
   "get_vertical_workflow_plan",
   "director_complete_node",
   "director_propose_write_intent",
+  "subagent",
   ...ADAPTER_TO_LOGICAL_TOOL.keys(),
 ]);
+
+type PendingGovernedSubagent = {
+  tool_call_id: string;
+  task_id: string;
+  task_version: number;
+  profile_id: string;
+  node_id: string;
+  role: GovernedSubagentRole;
+  agent: string;
+  context: "fresh" | "fork";
+  contract_id: string;
+  task_prompt: string;
+  allowed_tool_names: string[];
+};
+
+function authorizedUrlsFromRequest(request: string): string[] {
+  return [...new Set(
+    [...request.matchAll(/https?:\/\/[^\s<>()"']+/giu)]
+      .map((match) => {
+        try { return new URL(match[0].replace(/[，。；、,.;]+$/u, "")).toString(); } catch { return ""; }
+      })
+      .filter(Boolean),
+  )].sort();
+}
+
+function subagentRoleForNode(node: WorkflowNode): GovernedSubagentRole {
+  const allowed = node.boundary?.allowed_tools ?? [];
+  if (allowed.length === 0) return "readonly-reviewer";
+  if (allowed.every((tool) => tool === "web.search" || tool === "web.open")) return "research-scout";
+  throw new Error(`Subagent node ${node.id} has no governed role for tools: ${allowed.join(", ")}`);
+}
+
+function childToolNames(logicalTools: string[]): string[] {
+  return logicalTools.map((tool) => {
+    if (tool === "web.search") return "director_child_web_search";
+    if (tool === "web.open") return "director_child_web_open";
+    throw new Error(`Unsupported governed child tool ${tool}`);
+  });
+}
+
+export function buildGovernedSubagentLaunchForTests(input: {
+  taskId: string;
+  profileId: string;
+  request: string;
+  node: WorkflowNode;
+  contractId: string;
+}): { agent: string; context: "fresh" | "fork"; task: string; allowedToolNames: string[] } {
+  if (!input.node.boundary) throw new Error("Subagent node has no boundary");
+  const role = subagentRoleForNode(input.node);
+  const agent = SUBAGENT_AGENT_NAMES[role];
+  const context = role === "readonly-reviewer" ? "fork" : "fresh";
+  const allowedToolNames = childToolNames(input.node.boundary.allowed_tools);
+  const task = [
+    `受管任务：${input.taskId}`,
+    `受管节点：${input.node.id}`,
+    `contract_id：${input.contractId}`,
+    `节点目标：${input.node.boundary.objective}`,
+    `用户原始任务：${input.request.slice(0, 8000)}`,
+    role === "research-scout"
+      ? `仅可调用：${allowedToolNames.join(", ")}。每次调用必须传入上述 contract_id；先检索后打开正文，至少登记一个正文来源。`
+      : "这是从父会话分叉的只读复核。不得调用任何工具、编辑材料、批准节点或替用户作决定。",
+    "输出必须区分已核验事实、分析判断、待验证假设和未知信息。",
+  ].join("\n");
+  return { agent, context, task, allowedToolNames };
+}
+
+function replaceToolInput(target: Record<string, unknown>, next: Record<string, unknown>): void {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, next);
+}
+
+export function validateGovernedSubagentResultForTests(
+  details: unknown,
+  pending: Pick<PendingGovernedSubagent, "agent" | "context" | "role" | "allowed_tool_names">,
+  contract: GovernedSubagentContract,
+): { output: string; model?: string; runId?: string } {
+  if (!details || typeof details !== "object") throw new Error("Subagent result is missing structured details");
+  const value = details as { mode?: unknown; runId?: unknown; results?: unknown };
+  if (value.mode !== "single" || !Array.isArray(value.results) || value.results.length !== 1) {
+    throw new Error("Governed Subagent must return exactly one foreground child result");
+  }
+  const result = value.results[0] as Record<string, unknown>;
+  if (
+    result.agent !== pending.agent ||
+    result.context !== pending.context ||
+    result.exitCode !== 0 ||
+    result.detached === true ||
+    result.interrupted === true ||
+    result.timedOut === true ||
+    result.stopped === true
+  ) throw new Error("Subagent result does not match the frozen governed launch");
+  const toolCalls = Array.isArray(result.toolCalls) ? result.toolCalls : [];
+  const observedNames = toolCalls.flatMap((call) => {
+    if (!call || typeof call !== "object") return [];
+    const record = call as Record<string, unknown>;
+    const summary = typeof record.text === "string" ? record.text.trim() : "";
+    const summaryName = summary && !summary.startsWith("$") ? summary.split(/\s+/u, 1)[0] ?? "" : "";
+    const name = typeof record.name === "string"
+      ? record.name
+      : typeof record.toolName === "string"
+        ? record.toolName
+        : summaryName;
+    return name ? [name] : [];
+  });
+  if (pending.role === "readonly-reviewer" && observedNames.length > 0) {
+    throw new Error("Reviewer Subagent unexpectedly called a tool");
+  }
+  if (observedNames.some((name) => !pending.allowed_tool_names.includes(name))) {
+    throw new Error("Subagent used a tool outside the frozen allowlist");
+  }
+  if (pending.role === "research-scout" && contract.sources.length === 0) {
+    throw new Error("Research Subagent returned without a registered opened source");
+  }
+  const output = typeof result.finalOutput === "string" ? result.finalOutput.trim() : "";
+  if (!output || Buffer.byteLength(output, "utf8") > 256 * 1024) {
+    throw new Error("Subagent final output is missing or exceeds 256 KiB");
+  }
+  return {
+    output,
+    ...(typeof result.model === "string" && result.model ? { model: result.model } : {}),
+    ...(typeof value.runId === "string" && value.runId ? { runId: value.runId } : {}),
+  };
+}
 
 type StoredEntry = { type?: string; customType?: string; data?: unknown };
 export type WorkbenchRequest = {
@@ -603,7 +741,7 @@ function renderRuntimeState(state: WorkflowTask, workflow: Workflow): string {
         ]
       : []),
     ...(pendingNodes.some((node) => node.type === "subagent")
-      ? ["阻塞说明：当前版本尚未安装隔离 subagent 执行器；该节点不会被静默完成。"]
+      ? ["执行说明：当前节点必须通过受控 subagent 工具执行；结果由运行时核验并自动登记，不能用普通节点完成工具替代。"]
       : []),
   ].join("\n");
 }
@@ -751,6 +889,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   let initialPoller: ReturnType<typeof setTimeout> | undefined;
   let requestPollBusy = false;
   let profileSwitchQueued = false;
+  const pendingSubagentCalls = new Map<string, PendingGovernedSubagent>();
+  const inFlightSubagentNodes = new Set<string>();
 
   const workflowFor = (state: WorkflowTask): Workflow => {
     const workflow = workflows.get(state.workflow_id);
@@ -772,7 +912,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow) => {
     pi.sendUserMessage(
-      `/skill:${service.skill} 当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
+      `/skill:${service.skill} 当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
       { expandPromptTemplates: true },
     );
   };
@@ -943,9 +1083,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     projectRoot: () => projectRoot,
     beforeLogicalTool: (logicalTool, params) => {
       const { state, workflow } = requireLogicalTool(logicalTool);
-      const authorizedUrls = [...state.request.matchAll(/https?:\/\/[^\s<>()"']+/giu)].map((match) => {
-        try { return new URL(match[0].replace(/[，。；、,.;]+$/u, "")).toString(); } catch { return ""; }
-      }).filter(Boolean);
+      const authorizedUrls = authorizedUrlsFromRequest(state.request);
       if (logicalTool === "knowledge.write" || logicalTool === "sales.write" || logicalTool === "artifact.deck.write") {
         assertApprovedWriteIntent(state, logicalTool, params);
         if (state.pending_write?.status === "approved") {
@@ -1001,6 +1139,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     profileSwitchQueued = false;
     projectRoot = resolve(ctx.cwd);
+    pendingSubagentCalls.clear();
+    inFlightSubagentNodes.clear();
+    cleanupExpiredSubagentContracts(projectRoot);
     taskStore = new TaskStore(projectRoot);
     const entries = ctx.sessionManager.getEntries() as StoredEntry[];
     const storedSessionKey = [...entries]
@@ -1059,6 +1200,11 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     if (initialPoller) clearTimeout(initialPoller);
     requestPoller = undefined;
     initialPoller = undefined;
+    for (const pending of pendingSubagentCalls.values()) {
+      try { removeGovernedSubagentContract(projectRoot, pending.contract_id); } catch { /* Preserve unverified files. */ }
+    }
+    pendingSubagentCalls.clear();
+    inFlightSubagentNodes.clear();
   });
 
   pi.on("resources_discover", () => ({
@@ -1168,6 +1314,94 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     if ((toolName === "write" || toolName === "edit") && inputTargetsPptx(input)) {
       return { block: true, reason: "受管任务禁止用通用 write/edit 伪造 PPTX；必须走冻结载荷、Approval 和 director_artifact_deck_write。" };
     }
+    if (toolName === "subagent") {
+      if (!activeTask || isTerminal(activeTask)) {
+        return { block: true, reason: "受控 Subagent 只能在运行中的受管任务 subagent 节点调用。" };
+      }
+      if (activeTask.status === "waiting_approval") {
+        return { block: true, reason: "任务正在等待用户审批，不能启动 Subagent。" };
+      }
+      const workflow = workflowFor(activeTask);
+      const subagentNodes = currentNodes(activeTask, workflow as RuntimeWorkflow).filter((node) => node.type === "subagent");
+      if (subagentNodes.length !== 1) {
+        return { block: true, reason: `当前 DAG 必须恰有一个待执行 Subagent 节点；实际为 ${subagentNodes.length} 个。` };
+      }
+      const node = workflow.nodes.find((candidate) => candidate.id === subagentNodes[0]!.id);
+      if (!node?.boundary) return { block: true, reason: "当前 Subagent 节点缺少受管边界。" };
+      const nodeKey = `${activeTask.task_id}:${node.id}`;
+      if (inFlightSubagentNodes.has(nodeKey)) {
+        return { block: true, reason: "当前 Subagent 节点已有执行中的只读子任务。" };
+      }
+      let createdContractId: string | undefined;
+      try {
+        const role = subagentRoleForNode(node);
+        const contract = createGovernedSubagentContract(projectRoot, {
+          task_id: activeTask.task_id,
+          profile_id: activeTask.profile_id,
+          node_id: node.id,
+          task_version: activeTask.version,
+          role,
+          objective: node.boundary.objective,
+          allowed_tools: node.boundary.allowed_tools,
+          authorized_urls: authorizedUrlsFromRequest(activeTask.request),
+        });
+        createdContractId = contract.contract_id;
+        const launch = buildGovernedSubagentLaunchForTests({
+          taskId: activeTask.task_id,
+          profileId: activeTask.profile_id,
+          request: activeTask.request,
+          node,
+          contractId: contract.contract_id,
+        });
+        const pending: PendingGovernedSubagent = {
+          tool_call_id: event.toolCallId,
+          task_id: activeTask.task_id,
+          task_version: activeTask.version,
+          profile_id: activeTask.profile_id,
+          node_id: node.id,
+          role,
+          agent: launch.agent,
+          context: launch.context,
+          contract_id: contract.contract_id,
+          task_prompt: launch.task,
+          allowed_tool_names: launch.allowedToolNames,
+        };
+        pendingSubagentCalls.set(event.toolCallId, pending);
+        inFlightSubagentNodes.add(nodeKey);
+        const controlledInput: Record<string, unknown> = {
+          agent: launch.agent,
+          task: launch.task,
+          async: false,
+          context: launch.context,
+          isolation: "none",
+          mission: false,
+          clarify: false,
+          chatProgress: "off",
+          timeoutMs: role === "research-scout" ? 600_000 : 360_000,
+          turnBudget: { maxTurns: node.boundary.max_turns, graceTurns: 1 },
+          acceptance: { level: "none", reason: "受管只读节点由主 Agent DAG 和本地证据回执验收" },
+          suppressRoutineResultIntercom: true,
+          share: false,
+          ...(role === "research-scout"
+            ? {
+                toolTimeoutMs: 120_000,
+                toolBudget: {
+                  soft: Math.max(2, node.boundary.max_turns),
+                  hard: Math.min(40, node.boundary.max_turns * 2 + 2),
+                  block: "*",
+                },
+              }
+            : {}),
+        };
+        replaceToolInput(event.input as Record<string, unknown>, controlledInput);
+        return;
+      } catch (error) {
+        if (createdContractId) {
+          try { removeGovernedSubagentContract(projectRoot, createdContractId); } catch { /* Preserve an unverified path. */ }
+        }
+        return { block: true, reason: `无法建立受管 Subagent 合同：${(error as Error).message}` };
+      }
+    }
     if (!activeTask || isTerminal(activeTask)) return;
     const activeNodes = currentNodes(activeTask, workflowFor(activeTask) as RuntimeWorkflow);
     if (!MANAGED_ALLOWED_TOOLS.has(toolName)) {
@@ -1237,6 +1471,74 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       } catch (error) {
         return { block: true, reason: (error as Error).message };
       }
+    }
+  });
+
+  pi.on("tool_result", (event) => {
+    if (event.toolName !== "subagent") return;
+    const pending = pendingSubagentCalls.get(event.toolCallId);
+    if (!pending) return;
+    const nodeKey = `${pending.task_id}:${pending.node_id}`;
+    const clearPending = () => {
+      pendingSubagentCalls.delete(event.toolCallId);
+      inFlightSubagentNodes.delete(nodeKey);
+    };
+    if (event.isError) {
+      try { removeGovernedSubagentContract(projectRoot, pending.contract_id); } catch { /* Expiry cleanup will inspect it. */ }
+      clearPending();
+      return;
+    }
+    try {
+      if (
+        !activeTask ||
+        isTerminal(activeTask) ||
+        activeTask.task_id !== pending.task_id ||
+        activeTask.profile_id !== pending.profile_id ||
+        activeTask.version !== pending.task_version
+      ) throw new Error("父任务在 Subagent 执行期间发生变化，结果不能自动合并");
+      const workflow = workflowFor(activeTask);
+      const current = currentNodes(activeTask, workflow as RuntimeWorkflow).find((node) => node.id === pending.node_id);
+      if (!current || current.type !== "subagent") throw new Error("Subagent 结果不再对应当前 DAG 节点");
+      const contract = loadGovernedSubagentContract(projectRoot, pending.contract_id);
+      if (
+        contract.task_id !== pending.task_id ||
+        contract.profile_id !== pending.profile_id ||
+        contract.node_id !== pending.node_id ||
+        contract.task_version !== pending.task_version ||
+        contract.role !== pending.role
+      ) throw new Error("Subagent 合同与父任务冻结上下文不一致");
+      const validated = validateGovernedSubagentResultForTests(event.details, pending, contract);
+      const receipt = writeGovernedSubagentResult(projectRoot, contract, {
+        agent: pending.agent,
+        output: validated.output,
+        ...(validated.model ? { model: validated.model } : {}),
+        ...(validated.runId ? { run_id: validated.runId } : {}),
+      });
+      const previous = activeTask;
+      const next = completeSubagentNode(
+        previous,
+        workflow as RuntimeWorkflow,
+        pending.node_id,
+        previous.version,
+        receipt.path,
+        receipt.result.receipt_sha256,
+        `agent=${pending.agent}; sources=${contract.sources.length}; output_sha256=${receipt.result.output_sha256}`,
+      );
+      persistTransition(previous, next);
+      try { removeGovernedSubagentContract(projectRoot, pending.contract_id); } catch { /* Receipt and task state are already committed. */ }
+      return {
+        content: [
+          ...event.content,
+          { type: "text" as const, text: `受管 Subagent 结果已核验并登记：${receipt.path}` },
+        ],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: `受管 Subagent 结果未被 DAG 接受：${(error as Error).message}` }],
+      };
+    } finally {
+      clearPending();
     }
   });
 

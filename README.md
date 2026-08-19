@@ -6,7 +6,7 @@
 
 用户直接选择销售服务，不需要再选择岗位或理解底层插件。仓库仍保留 Profile 插件框架，供开发者维护既有兼容组合，但销售总监发行版会在界面和 Pi 运行时同时锁定 `sales-director`。
 
-> 新的 Pi Agent 不接入微信或 WeFlow。仓库中原有 WeFlow 代码只为旧版 Codex 工作台兼容保留，不会被 Pi 包及两个新 Profile 加载。
+> 新的 Pi Agent 不接入微信或 WeFlow。仓库中原有 WeFlow 代码只为旧版 Codex 工作台兼容保留，不会被销售总监桌面发行版加载。
 
 ## 架构
 
@@ -105,7 +105,7 @@ python -m agent_platform resolve-profile product-director
 python -m agent_platform list-services --profile product-director
 ```
 
-校验会阻止缺失或循环依赖、重复插件、DAG 环路、未知节点、节点权限越界、未约束 Subagent，以及新 Profile 中的微信/WeFlow 引用。
+校验会阻止缺失或循环依赖、重复插件、DAG 环路、未知节点、节点权限越界、未约束 Subagent，以及新 Profile 中的微信/WeFlow 引用。安装器同时写入受控 Subagent 配置并关闭内置通用角色、后台任务、定时任务、Missions 和跨 Agent 通信。
 
 ## 知识库
 
@@ -118,7 +118,7 @@ agent_platform/                   轻本体加载、校验、组合与 DAG 规�
 contracts/                        插件、Profile、Workflow JSON 契约
 profiles/                         Profile 源码；桌面发行版锁定销售总监
 vertical_plugins/                 shared / market / product 插件
-pi/                               Pi 扩展与产品总监/共享 Skills
+pi/                               Pi 扩展、销售总监 Skills 与受控 Subagent
 ui/                               销售总监桌面窗口的本地工作台内容
 desktop/src-tauri/                Tauri 2 桌面壳与进程生命周期管理
 plugin/market-director-copilot/   既有 Codex 兼容插件
@@ -129,7 +129,11 @@ docs/                             架构、开发和操作说明
 
 ## 当前范围
 
-当前版本是可安装、可受管执行的双平台本地原型：已包含 Windows/macOS 安装与启动入口、NewAPI 动态模型接入与选择、统一 `doctor`、项目自带 PPT 引擎、LibreOffice 真实渲染、平台中文字体和双平台真实 PPT CI，以及按 Profile 隔离的 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售适配器、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT、通用 PPT 工作室和本地工作台。PPT 工作室首版覆盖周报、行业研究、政府方案和自定义演示，输出 4–10 页可编辑 PPTX，并提供经营管理、政企合作、前沿研究三套确定性视觉令牌。它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器、企业母版自动解析，也未内置隔离 Subagent 执行器。默认行业研究按 `web.search` → `web.open` → `knowledge.search` 执行，避免把内部材料带入外部查询；仓库保留可选的有边界 Subagent Workflow，安装隔离执行器前不会被默认服务调用。
+当前版本是可安装、可受管执行的双平台本地原型：已包含 Windows/macOS 安装与启动入口、NewAPI 动态模型接入与选择、统一 `doctor`、项目自带 PPT 引擎、LibreOffice 真实渲染、平台中文字体和双平台真实 PPT CI，以及销售总监 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售适配器、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT、通用 PPT 工作室和本地工作台。PPT 工作室首版覆盖周报、行业研究、政府方案和自定义演示，输出 4–10 页可编辑 PPTX，并提供经营管理、政企合作、前沿研究三套确定性视觉令牌。
+
+行业研究会在受管 DAG 中自动调用“公开研究员”Subagent，政府合作方案会在初稿后自动调用“只读复核员”Subagent。两者均以前台独立 Pi 子进程运行：公开研究员只能使用受控网页检索和正文读取；复核员没有任何工具；二者都不能读取任意本地文件、修改知识库/销售台账、生成正式文件、审批或外发。Subagent 输出只作为主 Agent 的证据或复核意见，所有正式写入和 PPT 仍由主任务在硬 Approval 后执行。内置通用角色、后台运行、定时任务、Missions 和跨 Agent 通信默认关闭。
+
+它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器或企业母版自动解析。公开研究需要用户配置 Brave Search API；任何正文、PDF 与 Subagent 输出都视为不可信资料，不能越过现有来源校验和人工审批。
 
 本地 PDF 只从 `inputs/` 或 `data/inbox/` 读取明确文件，两处目录默认被 Git 忽略。随包安装的 PDF.js 和本地受限文本层兜底都在独立子进程中运行，限制为 45 秒和 256 MiB；不可靠兜底结果只能保持 `pending`，在线 PDF 不执行兜底。周报和 PPT 工作室都先形成可审阅的 plan/精确载荷并等待 Approval，批准后才用 PptxGenJS 构建，在 task/intent 私有目录调用 LibreOffice、PDF.js 和本地 QA 完成逐页渲染、来源备注、文本容量、边界与重叠检查，最后独占提交到 `outputs/`。缺少依赖时工作流会停在确定性工具节点，不会把结构化文本伪装成 PPT。
 

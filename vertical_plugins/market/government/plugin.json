@@ -1,7 +1,7 @@
 {
   "api_version": "1.0",
   "id": "market.government",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "display_name": "政府合作方案",
   "description": "依据地方条件、公开政策和企业能力形成可核验的合作方案。",
   "category": "market",

@@ -12,6 +12,11 @@ from typing import Any, Mapping, Sequence
 
 from .core import ManifestError, Platform, WorkflowError
 from .model_provider import ModelProviderError, model_runtime_configuration
+from .subagents import (
+    ensure_subagent_configuration,
+    subagent_doctor_check,
+    subagent_environment,
+)
 
 
 MIN_NODE = (22, 19, 0)
@@ -209,6 +214,7 @@ def doctor_report(
         _command_check(root, "pi", MIN_PI, environment),
         _command_check(root, "rg", None, environment),
         _command_check(root, "fd", None, environment),
+        subagent_doctor_check(root, environ=environment, home=home),
     ]
     try:
         validation = Platform(root).validate_all().as_dict()
@@ -249,6 +255,8 @@ def launch_pi(
 ) -> tuple[int, bool]:
     root = Path(project_root).resolve()
     environment = dict(os.environ if environ is None else environ)
+    environment.update(subagent_environment())
+    ensure_subagent_configuration(root, environ=environment)
     report = doctor_report(root, environ=environment)
     if not report["core"]["ready"]:
         raise RuntimeError("Core environment check failed; run agent_platform doctor for details")

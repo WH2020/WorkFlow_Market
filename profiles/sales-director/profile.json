@@ -13,7 +13,7 @@
   "default_service": "sales-review",
   "services": [
     {"id": "sales-review", "display_name": "客户推进与销售复盘", "description": "跟进客户阶段、关键人、风险、下一步动作和销售复盘。", "workflow": "market.sales.pipeline-review", "skill": "manage-market-pipeline"},
-    {"id": "industry-research", "display_name": "客户与行业研究", "description": "研究客户所在行业、脑机、具身、数采等方向并沉淀证据。", "workflow": "shared.research.frontier", "skill": "research-frontier-markets"},
+    {"id": "industry-research", "display_name": "客户与行业研究", "description": "由受控只读研究员核验公开来源，主助手综合内部资料并经确认沉淀证据。", "workflow": "shared.research.frontier-subagent", "skill": "research-frontier-markets"},
     {"id": "pdf-import", "display_name": "PDF 资料入库", "description": "读取受控目录中的 PDF，按页提取证据并经审批写入知识库。", "workflow": "shared.research.pdf-import", "skill": "research-frontier-markets"},
     {"id": "government-proposal", "display_name": "政府合作方案", "description": "结合地方条件、公开政策与项目资源形成政府合作方案。", "workflow": "market.government.proposal", "skill": "draft-government-program"},
     {"id": "office-document", "display_name": "销售文件与方案", "description": "编写销售方案、客户材料和常见办公文件。", "workflow": "shared.documents.create", "skill": "create-director-documents"},

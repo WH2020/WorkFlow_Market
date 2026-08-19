@@ -1,7 +1,7 @@
 {
   "api_version": "1.0",
   "id": "shared.research",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "display_name": "专题研究",
   "description": "将研究问题拆解为有边界的并行检索，并形成可追溯结论。",
   "category": "shared",

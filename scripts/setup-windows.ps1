@@ -194,6 +194,7 @@ if (-not $PiCommand) {
     $PiPath = $PiCommand.Source
 }
 Invoke-ProjectPython @("plugin/market-director-copilot/scripts/init_local_data.py", "--project", ".")
+Invoke-ProjectPython @("-m", "agent_platform", "configure-subagents")
 Invoke-ProjectPython @("-m", "agent_platform", "validate")
 Invoke-Checked -FilePath $PiPath -Arguments @("install", "-l", ".", "--approve")
 $DoctorJson = @(Invoke-ProjectPython @("-m", "agent_platform", "doctor", "--require-ppt"))

@@ -98,6 +98,7 @@ if [ -z "$PI_COMMAND" ]; then
   PI_COMMAND="$(command -v pi)"
 fi
 python3 plugin/market-director-copilot/scripts/init_local_data.py --project .
+python3 -m agent_platform configure-subagents
 python3 -m agent_platform validate
 "$PI_COMMAND" install -l . --approve
 python3 -m agent_platform doctor --require-ppt

@@ -13,6 +13,7 @@ from .environment import (
     json_text,
     launch_pi,
 )
+from .subagents import ensure_subagent_configuration
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate")
+    subparsers.add_parser("configure-subagents", help="Install governed project and extension settings for pi-subagents")
     resolve = subparsers.add_parser("resolve-profile")
     resolve.add_argument("profile_id")
     services = subparsers.add_parser("list-services")
@@ -41,6 +43,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json_text(result))
         if not result["core"]["ready"] or (args.require_ppt and not result["ppt"]["ready"]):
             return 3
+        return 0
+    if args.command == "configure-subagents":
+        try:
+            result = ensure_subagent_configuration(args.root)
+        except (OSError, RuntimeError) as error:
+            print(json_text({"status": "error", "error": str(error)}), file=sys.stderr)
+            return 3
+        print(json_text({"status": "ok", **result}))
         return 0
     if args.command == "launch":
         runtime = discover_ppt_runtime(args.root)
