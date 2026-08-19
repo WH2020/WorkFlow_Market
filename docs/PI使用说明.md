@@ -2,16 +2,27 @@
 
 ## 安装
 
-先安装 Pi `0.84.2` 或更高版本，再克隆仓库并把它作为实际工作 Project。这样本地知识库、销售台账、模板和输出目录都在当前目录：
+支持 Windows 10/11 与 macOS 13+ 本机部署。先安装 Git、Python 3.11+ 和 Node.js 22.19+，再克隆仓库并运行对应平台安装器；安装器负责 pnpm、Pi 0.84.2+、锁定依赖、本地数据、项目 Package、环境体检和 PPT 路径发现。
+
+Windows PowerShell：
 
 ```powershell
 git clone https://github.com/WH2020/WorkFlow_Market.git
 cd WorkFlow_Market
-python -m agent_platform validate
-python plugin\market-director-copilot\scripts\init_local_data.py --project .
-pi install -l .
-pi
+.\scripts\setup-windows.ps1
+.\scripts\start-windows.ps1
 ```
+
+macOS Terminal：
+
+```bash
+git clone https://github.com/WH2020/WorkFlow_Market.git
+cd WorkFlow_Market
+bash scripts/setup-macos.sh
+bash scripts/start-macos.sh
+```
+
+完整的参数、权限和故障处理见 [Windows / macOS 安装部署](双平台安装部署.md)。安装后可运行 `python -m agent_platform doctor`（macOS 使用 `python3`）；需要强制核验 PPT 时增加 `--require-ppt`。
 
 Pi Package 会按当前 Profile 动态加载所需 Skills；切换 Profile 时自动重载资源。产品总监不会加载市场/销售 Skill，市场总监也不会加载产品 Skill。未进入 Profile 的旧版邮箱与聊天 Skill 不会加载。第三方 Pi Package 具备本机执行权限，安装前应先审阅来源。
 
@@ -21,7 +32,7 @@ Pi Package 会按当前 Profile 动态加载所需 Skills；切换 Profile 时�
 
 本地 PDF 放在 Project 的 `inputs/` 或 `data/inbox/` 下，并在任务中写明精确相对路径。这两个目录不会提交到 Git。项目依赖中已包含 `pdfjs-dist`，解析器和本地文本层兜底都在同一个隔离子进程中运行，单次最多 45 秒、256 MiB、32 MiB 输入和指定页数/字符预算；兜底另有限制对象、引用、数据流和解压总量。`WORKFLOW_PDFJS_MODULE` 只用于显式覆盖解析模块；通常不需要设置。PDF.js 无法解析时的兜底结果会标为 `extraction_reliability=limited`，只能以 `pending` 待核验来源入库；扫描件仍需先转换为可检索 PDF。
 
-周报 PPT 需要 Codex 工作区附带的演示文稿运行时。先通过 Codex 的工作区依赖加载器取得路径，再在启动 Pi 的同一终端设置：
+周报和 PPT 工作室需要 Codex Desktop 附带的演示文稿运行时。setup/start 脚本会优先使用用户已显式设置且有效的路径，否则在当前用户的 Codex runtime/cache 中自动发现以下配置：
 
 ```text
 WORKFLOW_ARTIFACT_NODE          = Node.js executable
@@ -32,9 +43,11 @@ WORKFLOW_SLIDES_TEST            = <Presentations Skill>/container_tools/slides_t
 RUNTIME_NODE                    = Node.js executable
 RUNTIME_NODE_MODULES            = Node.js packages
 RUNTIME_BIN_DIR                 = Override binaries
+WORKFLOW_CJK_FONT               = platform native CJK font
+WORKFLOW_LATIN_FONT             = Latin font
 ```
 
-这些值必须是本机绝对路径，不要提交到仓库。缺少任一 PPT 依赖时，`artifact.deck.write` 会停止并指出缺项；不会回退到 `python-pptx` 或生成伪 `.pptx`。
+Windows 默认使用 `Microsoft YaHei`，macOS 默认使用 `PingFang SC`；两者的拉丁字体默认是 `Arial`。启动入口通过 `python -m agent_platform launch` 每次重新核验路径，并只向本次 Pi 子进程注入运行时环境；不会生成或执行包含路径的 shell 脚本。缺少任一 PPT 依赖时，`artifact.deck.write` 会停止并指出缺项；不会回退到 `python-pptx` 或生成伪 `.pptx`。
 
 ## 选择岗位
 
@@ -74,6 +87,12 @@ RUNTIME_BIN_DIR                 = Override binaries
 
 ```powershell
 python ui/server.py
+```
+
+macOS 使用：
+
+```bash
+python3 ui/server.py
 ```
 
 浏览器打开 `http://127.0.0.1:8765`。工作台只监听 `127.0.0.1`，提供岗位/服务选择、任务提交、阶段查看、审批、驳回、取消、台账状态摘要和最近产物入口。选择“PPT 工作室”或“周五工作汇报”时，页面会切换为结构化表单，收集主题、场景、模式、受众、目的、使用场合、语言、时长、4–10 页、保密等级、输出名和设计风格。任务请求由 Pi 接手，页面本身不会执行模型、改客户阶段或发送文件。
@@ -138,4 +157,4 @@ pnpm test:runtime
 python -m unittest ui.test_server
 ```
 
-若本机 `python` 指向 Microsoft Store 占位程序，请改用已安装的 Python 3.11+ 可执行文件运行相同命令。
+macOS 将上述 `python` 改为 `python3`。若 Windows 的 `python` 指向 Microsoft Store 占位程序，请改用已安装的 Python 3.11+ 可执行文件运行相同命令。公共 CI 在 Windows 与 macOS 上执行相同的校验；真实 PPT 仍需目标电脑具备 Codex Desktop 演示运行时。

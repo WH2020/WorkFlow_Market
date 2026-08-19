@@ -1,0 +1,51 @@
+name: Cross-platform validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: pnpm
+      - name: Install reviewed dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Exercise Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/setup-windows.ps1 -SkipDependencies -SkipPiInstall
+      - name: Exercise macOS installer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/setup-macos.sh --skip-dependencies --skip-pi-install
+      - name: Validate platform and runtime
+        run: |
+          python -m agent_platform validate
+          python -m agent_platform doctor
+          pnpm check:types
+          pnpm test:runtime
+      - name: Run Python and workbench tests
+        run: |
+          python -m unittest discover -s tests -v
+          python -m unittest ui.test_server -v

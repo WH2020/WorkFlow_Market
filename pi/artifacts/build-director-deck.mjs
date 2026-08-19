@@ -6,6 +6,20 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
+export function fontFamilies(os = process.platform, environment = process.env) {
+  const defaults = os === "win32"
+    ? { cjk: "Microsoft YaHei", latin: "Arial" }
+    : os === "darwin"
+      ? { cjk: "PingFang SC", latin: "Arial" }
+      : { cjk: "Noto Sans CJK SC", latin: "Arial" };
+  return {
+    cjk: environment.WORKFLOW_CJK_FONT?.trim() || defaults.cjk,
+    latin: environment.WORKFLOW_LATIN_FONT?.trim() || defaults.latin,
+  };
+}
+
+const FONTS = fontFamilies();
+
 const THEMES = {
   "ceo-weekly": {
     name: "管理周报",
@@ -162,14 +176,14 @@ function addFooter(slide, period, pageNumber, totalPages, theme, onDark = false)
     `footer-period-${pageNumber}`,
     `${period.start} 至 ${period.end}`,
     { left: 72, top: y, width: 360, height: 22 },
-    { fontSize: 12, color: onDark ? "#D9E4EC" : theme.muted, fontFamily: "Microsoft YaHei" },
+    { fontSize: 12, color: onDark ? "#D9E4EC" : theme.muted, fontFamily: FONTS.cjk },
   );
   addText(
     slide,
     `footer-page-${pageNumber}`,
     `${pageNumber} / ${totalPages}`,
     { left: 1080, top: y, width: 128, height: 22 },
-    { fontSize: 12, color: onDark ? "#D9E4EC" : theme.muted, alignment: "right", fontFamily: "Microsoft YaHei" },
+    { fontSize: 12, color: onDark ? "#D9E4EC" : theme.muted, alignment: "right", fontFamily: FONTS.cjk },
   );
 }
 
@@ -202,28 +216,28 @@ function addCover(presentation, payload, slideData, pageNumber, theme) {
     "cover-kicker",
     `${payload.profile_id === "product-director" ? "产品总监" : "市场总监"} · ${theme.name}`,
     { left: 120, top: 96, width: 520, height: 40 },
-    { fontSize: 20, bold: true, color: theme.highlight, fontFamily: "Microsoft YaHei" },
+    { fontSize: 20, bold: true, color: theme.highlight, fontFamily: FONTS.cjk },
   );
   addText(
     slide,
     "cover-title",
     slideData.title,
     { left: 120, top: 184, width: 850, height: 190 },
-    { fontSize: titleSize(slideData.title, 54, 38), bold: true, color: "#FFFFFF", fontFamily: "Microsoft YaHei" },
+    { fontSize: titleSize(slideData.title, 54, 38), bold: true, color: "#FFFFFF", fontFamily: FONTS.cjk },
   );
   addText(
     slide,
     "cover-subtitle",
     slideData.subtitle || `${payload.period.start} 至 ${payload.period.end}`,
     { left: 120, top: 410, width: 790, height: 72 },
-    { fontSize: 22, color: "#D9E4EC", fontFamily: "Microsoft YaHei" },
+    { fontSize: 22, color: "#D9E4EC", fontFamily: FONTS.cjk },
   );
   addText(
     slide,
     "cover-template",
     theme.eyebrow,
     { left: 120, top: 522, width: 500, height: 26 },
-    { fontSize: 11, bold: true, color: "#AFC1D0", letterSpacing: 1.4, fontFamily: "Arial" },
+    { fontSize: 11, bold: true, color: "#AFC1D0", letterSpacing: 1.4, fontFamily: FONTS.latin },
   );
   addFooter(slide, payload.period, pageNumber, payload.slides.length, theme, true);
   slide.speakerNotes.textFrame.setText(sourceNotes(slideData));
@@ -253,14 +267,14 @@ function addGridItems(slide, lines, pageNumber, theme, bodyTop, bodyHeight, colu
       `body-number-${pageNumber}-${number}`,
       String(number).padStart(2, "0"),
       { left, top, width: 38, height: 28 },
-      { fontSize: 12, bold: true, color: theme.accent, fontFamily: "Arial" },
+      { fontSize: 12, bold: true, color: theme.accent, fontFamily: FONTS.latin },
     );
     addText(
       slide,
       `body-${pageNumber}-${number}`,
       line,
       { left: left + 45, top: top - 2, width: width - 45, height: rowHeight - 13 },
-      { fontSize: columns === 3 ? 15 : 17, color: theme.ink, fontFamily: "Microsoft YaHei" },
+      { fontSize: columns === 3 ? 15 : 17, color: theme.ink, fontFamily: FONTS.cjk },
     );
   });
 }
@@ -287,7 +301,7 @@ function addBody(slide, slideData, pageNumber, theme, bodyTop) {
         `body-hero-text-${pageNumber}`,
         lines[0],
         { left: 102, top: bodyTop + 24, width: 1006, height: 48 },
-        { fontSize: 23, bold: true, color: theme.ink, fontFamily: "Microsoft YaHei" },
+        { fontSize: 23, bold: true, color: theme.ink, fontFamily: FONTS.cjk },
       );
       remaining = lines.slice(1);
       gridTop += 112;
@@ -309,7 +323,7 @@ function addBody(slide, slideData, pageNumber, theme, bodyTop) {
       `body-mixed-hero-text-${pageNumber}`,
       lines[0],
       { left: 102, top: bodyTop + 18, width: 1006, height: 40 },
-      { fontSize: 20, bold: true, color: theme.ink, fontFamily: "Microsoft YaHei" },
+      { fontSize: 20, bold: true, color: theme.ink, fontFamily: FONTS.cjk },
     );
     addGridItems(slide, lines.slice(1), pageNumber, theme, bodyTop + 96, bodyHeight - 96, 2, 2);
     return;
@@ -327,14 +341,14 @@ function addBody(slide, slideData, pageNumber, theme, bodyTop) {
       `body-feature-number-${pageNumber}`,
       "01",
       { left: 102, top: bodyTop + 28, width: 50, height: 30 },
-      { fontSize: 13, bold: true, color: theme.accent, fontFamily: "Arial" },
+      { fontSize: 13, bold: true, color: theme.accent, fontFamily: FONTS.latin },
     );
     addText(
       slide,
       `body-feature-text-${pageNumber}`,
       lines[0],
       { left: 102, top: bodyTop + 78, width: 590, height: bodyHeight - 110 },
-      { fontSize: 25, bold: true, color: theme.ink, fontFamily: "Microsoft YaHei" },
+      { fontSize: 25, bold: true, color: theme.ink, fontFamily: FONTS.cjk },
     );
     const remaining = lines.slice(1);
     const rightHeight = Math.max(52, Math.floor(bodyHeight / remaining.length));
@@ -345,14 +359,14 @@ function addBody(slide, slideData, pageNumber, theme, bodyTop) {
         `body-number-${pageNumber}-${index + 2}`,
         String(index + 2).padStart(2, "0"),
         { left: 770, top, width: 38, height: 28 },
-        { fontSize: 12, bold: true, color: theme.accent, fontFamily: "Arial" },
+        { fontSize: 12, bold: true, color: theme.accent, fontFamily: FONTS.latin },
       );
       addText(
         slide,
         `body-${pageNumber}-${index + 2}`,
         line,
         { left: 816, top: top - 2, width: 322, height: rightHeight - 8 },
-        { fontSize: 16, color: theme.ink, fontFamily: "Microsoft YaHei" },
+        { fontSize: 16, color: theme.ink, fontFamily: FONTS.cjk },
       );
     });
     return;
@@ -378,7 +392,7 @@ function addBody(slide, slideData, pageNumber, theme, bodyTop) {
         `body-${pageNumber}-${index + 1}`,
         line,
         { left: 106, top, width: 1018, height: Math.max(42, lineHeight - 5) },
-        { fontSize: 20, color: theme.ink, fontFamily: "Microsoft YaHei" },
+        { fontSize: 20, color: theme.ink, fontFamily: FONTS.cjk },
       );
     });
     return;
@@ -402,14 +416,14 @@ function addBody(slide, slideData, pageNumber, theme, bodyTop) {
       `body-number-${pageNumber}-${index + 1}`,
       String(index + 1).padStart(2, "0"),
       { left, top, width: 38, height: 28 },
-      { fontSize: 12, bold: true, color: theme.accent, fontFamily: "Arial" },
+      { fontSize: 12, bold: true, color: theme.accent, fontFamily: FONTS.latin },
     );
     addText(
       slide,
       `body-${pageNumber}-${index + 1}`,
       line,
       { left: left + 45, top: top - 2, width: 455, height: rowHeight - 13 },
-      { fontSize: 17, color: theme.ink, fontFamily: "Microsoft YaHei" },
+      { fontSize: 17, color: theme.ink, fontFamily: FONTS.cjk },
     );
   });
 }
@@ -436,21 +450,21 @@ function addContentSlide(presentation, payload, slideData, pageNumber, theme) {
     `page-watermark-text-${pageNumber}`,
     String(pageNumber).padStart(2, "0"),
     { left: 1145, top: 50, width: 55, height: 44 },
-    { fontSize: 25, bold: true, color: theme.accent, alignment: "center", fontFamily: "Arial" },
+    { fontSize: 25, bold: true, color: theme.accent, alignment: "center", fontFamily: FONTS.latin },
   );
   addText(
     slide,
     `eyebrow-${pageNumber}`,
     slideData.eyebrow || theme.eyebrow,
     { left: 72, top: 48, width: 320, height: 28 },
-    { fontSize: 13, bold: true, color: theme.accent, letterSpacing: 1.1, fontFamily: "Arial" },
+    { fontSize: 13, bold: true, color: theme.accent, letterSpacing: 1.1, fontFamily: FONTS.latin },
   );
   addText(
     slide,
     `title-${pageNumber}`,
     slideData.title,
     { left: 72, top: 88, width: 1000, height: 82 },
-    { fontSize: titleSize(slideData.title, 36, 29), bold: true, color: theme.ink, fontFamily: "Microsoft YaHei" },
+    { fontSize: titleSize(slideData.title, 36, 29), bold: true, color: theme.ink, fontFamily: FONTS.cjk },
   );
   const lead = slideData.lead?.trim() || slideData.subtitle?.trim();
   if (lead) {
@@ -466,7 +480,7 @@ function addContentSlide(presentation, payload, slideData, pageNumber, theme) {
       `lead-${pageNumber}`,
       lead,
       { left: 96, top: 204, width: 1018, height: 48 },
-      { fontSize: 21, bold: true, color: theme.ink, fontFamily: "Microsoft YaHei" },
+      { fontSize: 21, bold: true, color: theme.ink, fontFamily: FONTS.cjk },
     );
   }
   addBody(slide, slideData, pageNumber, theme, lead ? 292 : 198);
@@ -483,7 +497,7 @@ function addContentSlide(presentation, payload, slideData, pageNumber, theme) {
       `callout-${pageNumber}`,
       slideData.callout,
       { left: 96, top: 584, width: 1018, height: 40 },
-      { fontSize: 18, bold: true, color: theme.ink, fontFamily: "Microsoft YaHei" },
+      { fontSize: 18, bold: true, color: theme.ink, fontFamily: FONTS.cjk },
     );
   }
   addFooter(slide, payload.period, pageNumber, payload.slides.length, theme);

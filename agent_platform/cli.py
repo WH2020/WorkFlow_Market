@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 from .core import ManifestError, Platform, WorkflowError
+from .environment import (
+    discover_ppt_runtime,
+    doctor_report,
+    json_text,
+    launch_pi,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,11 +27,38 @@ def build_parser() -> argparse.ArgumentParser:
     plan = subparsers.add_parser("plan-workflow")
     plan.add_argument("workflow_id")
     plan.add_argument("--profile")
+    doctor = subparsers.add_parser("doctor", help="Check Windows/macOS runtime readiness")
+    doctor.add_argument("--require-ppt", action="store_true", help="Fail unless the PPT runtime is complete")
+    launch = subparsers.add_parser("launch", help="Start Pi with an auto-discovered, process-local PPT runtime")
+    launch.add_argument("pi_args", nargs=argparse.REMAINDER)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "doctor":
+        result = doctor_report(args.root)
+        print(json_text(result))
+        if not result["core"]["ready"] or (args.require_ppt and not result["ppt"]["ready"]):
+            return 3
+        return 0
+    if args.command == "launch":
+        runtime = discover_ppt_runtime(args.root)
+        if not runtime["ready"]:
+            print(
+                "Warning: PPT runtime is incomplete; Pi will start with non-PPT services. "
+                "Run 'python -m agent_platform doctor --require-ppt' for details.",
+                file=sys.stderr,
+            )
+        try:
+            pi_args = list(args.pi_args)
+            if pi_args[:1] == ["--"]:
+                pi_args = pi_args[1:]
+            return_code, _ppt_ready = launch_pi(args.root, pi_args)
+            return return_code
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            print(json_text({"status": "error", "error": str(error)}), file=sys.stderr)
+            return 3
     platform = Platform(args.root)
     try:
         report = platform.validate_all()

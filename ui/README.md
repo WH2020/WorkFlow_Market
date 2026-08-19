@@ -10,6 +10,8 @@
 python ui/server.py
 ```
 
+macOS 使用 `python3 ui/server.py`。首次安装请先运行仓库根目录的 `scripts/setup-windows.ps1` 或 `scripts/setup-macos.sh`；完整说明见 `docs/双平台安装部署.md`。
+
 浏览器打开 `http://127.0.0.1:8765`。可用 `--port 8766` 更换端口。服务只绑定 `127.0.0.1`，不会暴露到局域网或互联网。
 
 ## 使用方式

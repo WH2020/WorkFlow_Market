@@ -785,9 +785,11 @@ function runMontage(
 function artifactEnvironment(): NodeJS.ProcessEnv {
   const allowed = new Set([
     "PATH", "Path", "PATHEXT", "SystemRoot", "SYSTEMROOT", "WINDIR", "windir", "COMSPEC",
-    "TEMP", "TMP", "TMPDIR", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA",
+    "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA",
+    "LANG", "LC_ALL", "LC_CTYPE", "XDG_CACHE_HOME",
     "NODE_PATH", "RUNTIME_NODE", "RUNTIME_NODE_MODULES", "RUNTIME_BIN_DIR",
     "WORKFLOW_ARTIFACT_TOOL_PATH", "WORKFLOW_PRESENTATIONS_MARKER",
+    "WORKFLOW_CJK_FONT", "WORKFLOW_LATIN_FONT",
   ]);
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key)));
 }

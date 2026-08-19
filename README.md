@@ -29,18 +29,36 @@ flowchart LR
 
 详见 [轻本体插件架构](docs/轻本体插件架构.md) 和 [插件开发指南](docs/插件开发指南.md)。
 
-## Pi 快速开始
+## Pi 快速开始（Windows / macOS）
 
-要求 Pi `0.84.2` 或更高版本。建议把仓库作为实际工作 Project 使用，以便知识库、台账、模板和输出目录都位于当前工作目录：
+正式支持 Windows 10/11 与 macOS 13+ 的本机部署。基础要求为 Python 3.11+、Node.js 22.19+、Git；安装器会检查或配置 pnpm 10、Pi 0.84.2+、项目依赖、本地数据和项目级 Pi Package。建议把仓库作为实际工作 Project 使用，以便知识库、台账、模板和输出目录都位于当前工作目录。
+
+Windows PowerShell：
 
 ```powershell
 git clone https://github.com/WH2020/WorkFlow_Market.git
 cd WorkFlow_Market
-python -m agent_platform validate
-python plugin\market-director-copilot\scripts\init_local_data.py --project .
-pi install -l .
-pi
+.\scripts\setup-windows.ps1
+.\scripts\start-windows.ps1
 ```
+
+macOS Terminal：
+
+```bash
+git clone https://github.com/WH2020/WorkFlow_Market.git
+cd WorkFlow_Market
+bash scripts/setup-macos.sh
+bash scripts/start-macos.sh
+```
+
+安装前后都可以运行环境体检；要求 PPT 能力同时就绪时增加 `--require-ppt`：
+
+```text
+python -m agent_platform doctor
+python -m agent_platform doctor --require-ppt
+```
+
+安装器不会把密钥或本机绝对路径写入仓库或可执行配置文件。启动脚本每次重新核验 Codex Desktop 演示运行时，并仅向本次 Pi 子进程注入 PPT 路径和平台字体。未检测到 PPT 运行时时，研究、知识库、方案和工作台仍可使用，PPT 服务会在确定性工具节点停止。完整步骤和故障处理见 [Windows / macOS 安装部署](docs/双平台安装部署.md)。
 
 如需公开资料检索，在本机环境中设置 `BRAVE_SEARCH_API_KEY`；密钥不要写入仓库。`web.search` 只发现来源，后续 `web.open` 才读取正文；正文读取固定到已核验的公网地址，拒绝重定向、本机/私网地址、危险协议、疑似带密钥 URL 和超限响应，并限制 DNS、连接空闲和总处理时间。[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
@@ -66,6 +84,8 @@ Pi 扩展会按当前 Profile 动态加载 Skills；产品总监不会加载市�
 ```powershell
 python ui/server.py
 ```
+
+macOS 使用 `python3 ui/server.py`。
 
 浏览器打开 `http://127.0.0.1:8765`，即可选择岗位与服务、提交任务、查看 DAG，并在人工关口批准、驳回或取消。选择“PPT 工作室”后会出现结构化需求表单；大纲以便利贴呈现，允许改标题和拖拽排序。修订不会直接改写已确认 plan，而是创建一个新的受管任务并重新走证据、确认和生成审批。服务只监听本机，不会自动发送文件。完整说明见 [Pi 使用说明](docs/PI使用说明.md)。
 
@@ -103,7 +123,7 @@ docs/                             架构、开发和操作说明
 
 ## 当前范围
 
-当前版本是可安装、可受管执行的本地原型：已包含按 Profile 隔离的 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售适配器、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT 和通用 PPT 工作室、本地工作台。PPT 工作室首版覆盖周报、行业研究、政府方案和自定义演示，输出 4–10 页可编辑 PPTX，并提供经营管理、政企合作、前沿研究三套确定性视觉令牌。它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器、企业母版自动解析，也未内置隔离 Subagent 执行器。默认行业研究按 `web.search` → `web.open` → `knowledge.search` 执行，避免把内部材料带入外部查询；仓库保留可选的有边界 Subagent Workflow，安装隔离执行器前不会被默认服务调用。
+当前版本是可安装、可受管执行的双平台本地原型：已包含 Windows/macOS 安装与启动入口、统一 `doctor`、Codex PPT 依赖自动发现、平台中文字体和双平台 CI，以及按 Profile 隔离的 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、知识/销售适配器、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT、通用 PPT 工作室和本地工作台。PPT 工作室首版覆盖周报、行业研究、政府方案和自定义演示，输出 4–10 页可编辑 PPTX，并提供经营管理、政企合作、前沿研究三套确定性视觉令牌。它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器、企业母版自动解析，也未内置隔离 Subagent 执行器。默认行业研究按 `web.search` → `web.open` → `knowledge.search` 执行，避免把内部材料带入外部查询；仓库保留可选的有边界 Subagent Workflow，安装隔离执行器前不会被默认服务调用。
 
 本地 PDF 只从 `inputs/` 或 `data/inbox/` 读取明确文件，两处目录默认被 Git 忽略。随包安装的 PDF.js 和本地受限文本层兜底都在独立子进程中运行，限制为 45 秒和 256 MiB；不可靠兜底结果只能保持 `pending`，在线 PDF 不执行兜底。周报和 PPT 工作室都先形成可审阅的 plan/精确载荷并等待 Approval，批准后才使用 Codex 工作区附带的 `@oai/artifact-tool` 构建、逐页渲染、检查来源备注和运行 `slides_test.py`，最后独占提交到 `outputs/`。首次使用前需按 [Pi 使用说明](docs/PI使用说明.md) 配置对应绝对路径。缺少依赖时工作流会停在确定性工具节点，不会把结构化文本伪装成 PPT。
 
