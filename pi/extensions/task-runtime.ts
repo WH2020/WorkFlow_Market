@@ -46,6 +46,9 @@ export type WorkflowTask = {
   schema_version: "1.0";
   task_id: string;
   session_key: string;
+  project_id?: string;
+  schedule_id?: string;
+  scheduled_for?: string;
   profile_id: string;
   service_id: string;
   workflow_id: string;
@@ -241,12 +244,18 @@ export function createTask(input: {
   workflow: RuntimeWorkflow;
   request: string;
   taskId?: string;
+  projectId?: string;
+  scheduleId?: string;
+  scheduledFor?: string;
 }): WorkflowTask {
   const timestamp = now();
   const state: WorkflowTask = {
     schema_version: "1.0",
     task_id: input.taskId ?? randomUUID(),
     session_key: input.sessionKey,
+    ...(input.projectId ? { project_id: input.projectId } : {}),
+    ...(input.scheduleId ? { schedule_id: input.scheduleId } : {}),
+    ...(input.scheduledFor ? { scheduled_for: input.scheduledFor } : {}),
     profile_id: input.profileId,
     service_id: input.serviceId,
     workflow_id: input.workflow.id,

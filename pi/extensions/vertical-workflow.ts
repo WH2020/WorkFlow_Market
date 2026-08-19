@@ -658,6 +658,9 @@ export type WorkbenchRequest = {
   request: string;
   created_at: string;
   source: "local-workbench";
+  project_id?: string;
+  schedule_id?: string;
+  scheduled_for?: string;
   request_kind?: "presentation-plan-revision";
   revision_of_task_id?: string;
   source_plan_sha256?: string;
@@ -690,6 +693,10 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
     request.request.trim().length < 1 ||
     request.request.length > 4000 ||
     typeof request.created_at !== "string" ||
+    (request.project_id !== undefined && !safe(request.project_id)) ||
+    (request.schedule_id !== undefined && !safe(request.schedule_id)) ||
+    (request.scheduled_for !== undefined && !/^\d{4}-\d{2}-\d{2}$/u.test(request.scheduled_for)) ||
+    ((request.schedule_id === undefined) !== (request.scheduled_for === undefined)) ||
     (request.request_kind !== undefined && request.request_kind !== "presentation-plan-revision") ||
     (request.revision_of_task_id !== undefined && !safe(request.revision_of_task_id)) ||
     (request.source_plan_sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(request.source_plan_sha256)) ||
@@ -912,7 +919,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow) => {
     pi.sendUserMessage(
-      `/skill:${service.skill} 当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
+      `/skill:${service.skill} 当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
       { expandPromptTemplates: true },
     );
   };
@@ -981,6 +988,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           request.profile_id !== activeProfile.id ||
           request.service_id !== selectedRequest.service_id ||
           request.workflow_id !== selectedRequest.workflow_id ||
+          request.project_id !== selectedRequest.project_id ||
+          request.schedule_id !== selectedRequest.schedule_id ||
+          request.scheduled_for !== selectedRequest.scheduled_for ||
           request.request !== selectedRequest.request ||
           request.request_id !== selectedRequest.request_id
         ) return;
@@ -991,6 +1001,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             existing.profile_id !== request.profile_id ||
             existing.service_id !== request.service_id ||
             existing.workflow_id !== request.workflow_id ||
+            (existing.project_id ?? undefined) !== (request.project_id ?? undefined) ||
+            (existing.schedule_id ?? undefined) !== (request.schedule_id ?? undefined) ||
+            (existing.scheduled_for ?? undefined) !== (request.scheduled_for ?? undefined) ||
             existing.request !== request.request.trim() ||
             isTerminal(existing))
         ) {
@@ -1005,6 +1018,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             workflow: workflow as RuntimeWorkflow,
             request: request.request.trim(),
             taskId: request.request_id,
+            projectId: request.project_id,
+            scheduleId: request.schedule_id,
+            scheduledFor: request.scheduled_for,
           });
         if (!existing) persistNew(task);
         else activeTask = existing;

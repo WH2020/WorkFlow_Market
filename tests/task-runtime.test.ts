@@ -45,6 +45,17 @@ function start(workflow = linearWorkflow) {
   });
 }
 
+test("a workbench project id stays attached to the governed task", () => {
+  const task = createTask({
+    sessionKey: "session-project", profileId: "sales-director", serviceId: "sales-review",
+    projectId: "project-customer-a", scheduleId: "schedule-daily-a", scheduledFor: "2026-08-19",
+    workflow: linearWorkflow, request: "review customer A", taskId: "task-project-a",
+  });
+  assert.equal(task.project_id, "project-customer-a");
+  assert.equal(task.schedule_id, "schedule-daily-a");
+  assert.equal(task.scheduled_for, "2026-08-19");
+});
+
 const writePayload = {
   mutations: [{ operation: "insert", record_id: "src-2", changes: { title: "来源", status: "new" } }],
 };

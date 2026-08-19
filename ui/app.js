@@ -5,8 +5,19 @@
   let selectedService = null;
   let guidedRenderedService = null;
   let modelSettingsInitialized = false;
+  let currentView = "home";
+  let selectedProject = "project-default";
+  let noticeTimer = null;
+  let schedulePanelInitialized = false;
   const guidedDrafts = {};
   const guidedNotes = {};
+
+  const viewTitles = {
+    home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
+    knowledge: "知识库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
+    schedules: "每日定时任务", search: "自定义搜索", settings: "设置",
+  };
+  if (viewTitles[window.location.hash.slice(1)]) currentView = window.location.hash.slice(1);
 
   const guidedServices = {
     "sales-review": {
@@ -100,6 +111,8 @@
   const note = (message, error = false) => {
     $("notice").textContent = message;
     $("notice").style.color = error ? "#a12b32" : "#066b62";
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => { $("notice").textContent = ""; }, 5000);
   };
 
   async function api(path, options = {}) {
@@ -113,8 +126,38 @@
 
   function currentProfile() { return model.profiles.find((profile) => profile.id === selectedProfile); }
   function currentService() { return currentProfile()?.services.find((service) => service.id === selectedService); }
+  function serviceById(serviceId) { return currentProfile()?.services.find((service) => service.id === serviceId); }
+  function projectById(projectId) { return model?.projects?.find((project) => project.project_id === projectId); }
+  function selectedProjectRecord() { return projectById(selectedProject) || model?.projects?.[0]; }
   function isPresentationStudio(service = currentService()) { return service?.id === "presentation-studio" || service?.workflow === "shared.presentation.studio"; }
   function isWeeklyService(service = currentService()) { return service?.id === "weekly-deck" || service?.workflow?.startsWith("shared.reporting.weekly-deck"); }
+
+  function switchView(view) {
+    if (!viewTitles[view]) return;
+    currentView = view;
+    if (window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
+    document.querySelectorAll("[data-page]").forEach((page) => page.classList.toggle("active", page.dataset.page === view));
+    document.querySelectorAll(".nav-item[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
+    $("page-title").textContent = viewTitles[view];
+    $("sidebar").classList.remove("open");
+    if (view === "weekly") {
+      const service = serviceById("weekly-deck");
+      if (service) selectedService = service.id;
+      renderTaskForm();
+    }
+    if (view === "work") renderServices();
+  }
+
+  function openService(serviceId) {
+    if (!serviceById(serviceId)) { note("当前销售总监版本未启用该服务。", true); return; }
+    selectedService = serviceId;
+    guidedRenderedService = null;
+    if (serviceId === "weekly-deck") switchView("weekly");
+    else switchView("work");
+    renderWorkflow();
+    renderServices();
+    renderTaskForm();
+  }
 
   function choice(title, description, selected) {
     const button = document.createElement("button");
@@ -129,9 +172,10 @@
 
   function renderServices() {
     const box = $("services");
-    box.replaceChildren(...currentProfile().services.map((service) => {
+    const services = currentProfile()?.services || [];
+    box.replaceChildren(...services.map((service) => {
       const button = choice(service.display_name, service.description, service.id === selectedService);
-      button.onclick = () => { selectedService = service.id; renderWorkflow(); renderServices(); renderTaskForm(); };
+      button.onclick = () => openService(service.id);
       return button;
     }));
   }
@@ -420,7 +464,8 @@
       const badge = template.querySelector(".status");
       badge.textContent = label[task.status] || task.status || "未知";
       if (Object.hasOwn(label, task.status)) badge.classList.add(task.status);
-      template.querySelector(".task-meta").textContent = `节点：${task.waiting_node || task.current_node || "等待 Pi 接手"} · 版本 ${task.version ?? "-"}`;
+      const scheduleMeta = task.schedule_id ? ` · 每日任务 ${task.scheduled_for || ""}` : "";
+      template.querySelector(".task-meta").textContent = `项目：${projectById(task.project_id)?.name || "日常工作"}${scheduleMeta} · 节点：${task.waiting_node || task.current_node || "等待 Pi 接手"} · 版本 ${task.version ?? "-"}`;
       template.querySelector(".task-request").textContent = task.request || "";
       const actions = template.querySelector(".task-actions");
       const article = template.querySelector("article");
@@ -463,22 +508,199 @@
   }
 
   function renderData() {
-    const box = $("data-summary");
-    const all = [...model.data.knowledge, ...model.data.sales];
-    box.replaceChildren(...all.map((item) => summaryRow("summary-row", item.path.split("/").pop(), item.exists ? `${item.records ?? "?"} 条 · ${item.updated_at || "未知时间"}` : "尚未创建")));
+    const renderGroup = (box, items) => {
+      box.replaceChildren(...items.map((item) => summaryRow("summary-row", item.path.split("/").pop(), item.exists ? `${item.records ?? "?"} 条 · ${item.updated_at || "未知时间"}` : "尚未创建")));
+    };
+    renderGroup($("knowledge-summary"), model.data.knowledge || []);
+    renderGroup($("sales-summary"), model.data.sales || []);
+    const recentFiles = (model.project_files || []).slice(0, 8);
+    const filesBox = $("knowledge-files");
+    filesBox.classList.toggle("empty", recentFiles.length === 0);
+    filesBox.replaceChildren(...recentFiles.map((item) => fileRow(item)));
   }
 
   function renderOutputs() {
     const box = $("outputs");
     box.replaceChildren();
     if (!model.outputs.length) { box.textContent = "暂无可显示的产物。"; return; }
-    model.outputs.forEach((item) => box.append(summaryRow("output-row", item.name, item.modified_at)));
+    model.outputs.forEach((item) => box.append(summaryRow("output-row", item.name, `${item.modified_at} · ${item.path}`)));
   }
 
-  function render() { renderModelSettings(); renderServices(); renderTaskForm(); renderTasks(); renderData(); renderOutputs(); }
+  function setSelectOptions(select, items, value) {
+    const previous = value || select.value;
+    select.replaceChildren(...items.map((item) => {
+      const option = document.createElement("option");
+      option.value = item.value; option.textContent = item.label; option.disabled = Boolean(item.disabled);
+      return option;
+    }));
+    if ([...select.options].some((option) => option.value === previous && !option.disabled)) select.value = previous;
+  }
+
+  function renderProjectSelectors() {
+    const active = (model.projects || []).filter((project) => project.status === "active");
+    if (!active.some((project) => project.project_id === selectedProject)) selectedProject = active[0]?.project_id || "project-default";
+    const options = active.map((project) => ({ value: project.project_id, label: project.name }));
+    setSelectOptions($("home-project"), options, selectedProject);
+    setSelectOptions($("task-project"), options, selectedProject);
+    setSelectOptions($("schedule-project"), options, selectedProject);
+  }
+
+  function fileSize(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function fileRow(item) {
+    const row = document.createElement("div"); row.className = "file-row";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong"); title.textContent = item.name;
+    const meta = document.createElement("small"); meta.textContent = `${item.path} · ${item.modified_at}`;
+    copy.append(title, meta);
+    const size = document.createElement("span"); size.className = "file-size"; size.textContent = fileSize(item.size || 0);
+    const use = document.createElement("button"); use.className = "secondary"; use.textContent = item.name.toLowerCase().endsWith(".pdf") ? "PDF 入库" : "用于任务";
+    use.onclick = () => {
+      selectedProject = item.project_id;
+      if (item.name.toLowerCase().endsWith(".pdf")) {
+        guidedDrafts["pdf-import"] = { path: item.path, goal: "提取可引用证据并写入知识库", focus: "" };
+        openService("pdf-import");
+      } else {
+        guidedDrafts["office-document"] ||= {};
+        guidedDrafts["office-document"].materials = `请结合项目资料：${item.path}`;
+        openService("office-document");
+      }
+    };
+    row.append(copy, size, use);
+    return row;
+  }
+
+  function projectCard(project) {
+    const card = document.createElement("article");
+    card.className = `project-card ${project.project_id === selectedProject ? "selected" : ""}`;
+    const header = document.createElement("header");
+    const titleBox = document.createElement("div");
+    const title = document.createElement("strong"); title.textContent = project.name;
+    const status = document.createElement("span"); status.className = `status ${project.status === "active" ? "completed" : "cancelled"}`; status.textContent = project.status === "active" ? "进行中" : "已归档";
+    titleBox.append(title); header.append(titleBox, status);
+    const description = document.createElement("p"); description.textContent = project.description || "尚未填写项目说明。";
+    const metrics = document.createElement("div"); metrics.className = "project-metrics";
+    [[project.task_count, "任务"], [project.file_count, "资料"], [project.artifact_count, "产物"]].forEach(([number, text]) => {
+      const item = document.createElement("span"); const strong = document.createElement("strong"); strong.textContent = String(number || 0); item.append(strong, text); metrics.append(item);
+    });
+    const actions = document.createElement("div"); actions.className = "project-actions";
+    const select = document.createElement("button"); select.className = "primary"; select.textContent = project.project_id === selectedProject ? "当前项目" : "进入项目"; select.disabled = project.status !== "active";
+    select.onclick = () => { selectedProject = project.project_id; renderProjectSelectors(); renderProjects(); note(`已切换到项目：${project.name}`); };
+    const task = document.createElement("button"); task.className = "secondary"; task.textContent = "发起工作"; task.disabled = project.status !== "active";
+    task.onclick = () => { selectedProject = project.project_id; switchView("work"); renderProjectSelectors(); };
+    actions.append(select, task);
+    if (project.project_id !== "project-default") {
+      const archive = document.createElement("button"); archive.className = "secondary"; archive.textContent = project.status === "active" ? "归档" : "恢复";
+      archive.onclick = async () => {
+        const target = project.status === "active" ? "archived" : "active";
+        if (target === "archived" && !confirm("归档后，该项目的每日任务会暂停。继续吗？")) return;
+        try { await api(`/api/projects/${encodeURIComponent(project.project_id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: target }) }); note(target === "active" ? "项目已恢复。" : "项目已归档，相关每日任务已暂停。"); await load(); } catch (error) { note(error.message, true); }
+      };
+      actions.append(archive);
+    }
+    card.append(header, description, metrics, actions);
+    return card;
+  }
+
+  function renderProjects() {
+    const list = $("project-list");
+    const projects = model.projects || [];
+    list.classList.toggle("empty", projects.length === 0);
+    list.replaceChildren(...projects.map(projectCard));
+    const files = (model.project_files || []).filter((item) => item.project_id === selectedProject);
+    const fileBox = $("project-files");
+    fileBox.classList.toggle("empty", files.length === 0);
+    if (files.length) fileBox.replaceChildren(...files.map(fileRow));
+    else { fileBox.replaceChildren(); fileBox.textContent = "当前项目还没有资料，可上传 PDF、Word、Excel、CSV、文本或 PPT。"; }
+    const artifactPaths = new Set((model.tasks || [])
+      .filter((task) => task.project_id === selectedProject)
+      .flatMap((task) => Array.isArray(task.artifacts) ? task.artifacts : [])
+      .filter((path) => typeof path === "string" && path.startsWith("outputs/")));
+    const projectOutputs = (model.outputs || []).filter((item) => artifactPaths.has(item.path));
+    const outputsBox = $("project-outputs");
+    outputsBox.classList.toggle("empty", projectOutputs.length === 0);
+    if (projectOutputs.length) outputsBox.replaceChildren(...projectOutputs.map((item) => summaryRow("output-row", item.name, item.modified_at)));
+    else { outputsBox.replaceChildren(); outputsBox.textContent = "当前项目还没有正式产物。"; }
+  }
+
+  function renderSchedules() {
+    const allowed = (currentProfile()?.services || []).filter((service) => !["presentation-studio", "weekly-deck", "pdf-import"].includes(service.id));
+    setSelectOptions($("schedule-service"), allowed.map((service) => ({ value: service.id, label: service.display_name })), $("schedule-service").value || "sales-review");
+    const list = $("schedule-list");
+    const schedules = model.schedules || [];
+    if (!schedulePanelInitialized) {
+      $("schedule-create-panel").hidden = schedules.length > 0;
+      schedulePanelInitialized = true;
+    }
+    list.classList.toggle("empty", schedules.length === 0);
+    if (!schedules.length) { list.replaceChildren(); list.textContent = "暂无定时任务。可从上方三个模板开始。"; return; }
+    list.replaceChildren(...schedules.map((schedule) => {
+      const row = document.createElement("div"); row.className = "schedule-row summary-row";
+      const time = document.createElement("span"); time.className = "schedule-time"; time.textContent = schedule.time_local;
+      const copy = document.createElement("div"); copy.className = "schedule-copy";
+      const title = document.createElement("strong"); title.textContent = schedule.name;
+      const meta = document.createElement("small"); meta.textContent = `${projectById(schedule.project_id)?.name || "默认项目"} · ${serviceById(schedule.service_id)?.display_name || schedule.service_id} · ${schedule.last_enqueued_date ? `最近排队 ${schedule.last_enqueued_date}` : "尚未执行"}`;
+      const request = document.createElement("p"); request.textContent = schedule.request;
+      copy.append(title, meta, request);
+      const actions = document.createElement("div"); actions.className = "schedule-actions";
+      const run = document.createElement("button"); run.className = "secondary"; run.textContent = "立即执行";
+      run.onclick = async () => { try { const reply = await api(`/api/schedules/${encodeURIComponent(schedule.schedule_id)}/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); note(`已排队：${reply.request_id}`); await load(); } catch (error) { note(error.message, true); } };
+      const toggle = document.createElement("button"); toggle.className = schedule.enabled ? "secondary" : "primary"; toggle.textContent = schedule.enabled ? "暂停" : "启用";
+      toggle.onclick = async () => { try { await api(`/api/schedules/${encodeURIComponent(schedule.schedule_id)}/enabled`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !schedule.enabled }) }); note(schedule.enabled ? "每日任务已暂停。" : "每日任务已启用。"); await load(); } catch (error) { note(error.message, true); } };
+      actions.append(run, toggle); row.append(time, copy, actions); return row;
+    }));
+  }
+
+  function renderDashboard() {
+    const tasks = model.tasks || [];
+    const period = currentWeek();
+    const inWeek = tasks.filter((task) => String(task.updated_at || task.created_at || "") >= period.start);
+    const pending = tasks.filter((task) => task.status === "waiting_approval");
+    const running = tasks.filter((task) => ["requested", "running"].includes(task.status));
+    const completed = inWeek.filter((task) => task.status === "completed");
+    $("home-pending").textContent = pending.length;
+    $("home-running").textContent = running.length;
+    $("home-completed").textContent = completed.length;
+    $("approval-total").textContent = pending.length;
+    $("nav-task-count").textContent = pending.length ? String(pending.length) : "";
+    const hour = new Date().getHours();
+    $("greeting").textContent = `${hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好"}，今天有 ${pending.length + running.length} 项需要处理`;
+    $("week-label").textContent = `${period.start} 至 ${period.end}`;
+    const denominator = inWeek.length;
+    const progress = denominator ? Math.round(completed.length / denominator * 100) : 0;
+    $("week-progress-label").textContent = `${progress}%`;
+    $("week-progress-bar").style.width = `${progress}%`;
+    const renderCompactTasks = (box, source, empty) => {
+      box.classList.toggle("empty", source.length === 0);
+      if (!source.length) { box.replaceChildren(); box.textContent = empty; return; }
+      box.replaceChildren(...source.map((task) => {
+        const row = document.createElement("button"); row.className = "compact-task";
+        const copy = document.createElement("span");
+        const title = document.createElement("strong"); title.textContent = serviceById(task.service_id)?.display_name || "销售任务";
+        const request = document.createElement("small"); request.textContent = String(task.request || "").replace(/\s+/gu, " ").slice(0, 60);
+        copy.append(title, request);
+        const status = document.createElement("i"); status.className = `status ${task.status}`; status.textContent = label[task.status] || task.status;
+        row.append(copy, status); row.onclick = () => { switchView("tasks"); renderWorkflow(task); }; return row;
+      }));
+    };
+    renderCompactTasks($("home-approvals"), pending.slice(0, 6), "暂无待确认事项");
+    renderCompactTasks($("home-recent"), tasks.slice(0, 5), "暂无任务");
+  }
+
+  function render() {
+    renderModelSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
+    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); switchView(currentView);
+  }
 
   async function createTask(request) {
-    return api("/api/task-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, request }) });
+    return api("/api/task-requests", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, project_id: selectedProject, request }),
+    });
   }
 
   function guidedRequest() {
@@ -547,8 +769,9 @@
   async function load() {
     model = await api("/api/bootstrap");
     requestToken = model.request_token;
-    if (!selectedProfile || !model.profiles.some((item) => item.id === selectedProfile)) { selectedProfile = model.profiles[0]?.id; selectedService = currentProfile()?.default_service; }
+    if (!selectedProfile || !model.profiles.some((item) => item.id === selectedProfile)) { selectedProfile = model.profiles.find((item) => item.id === "sales-director")?.id || model.profiles[0]?.id; selectedService = currentProfile()?.default_service; }
     if (!currentProfile()?.services.some((item) => item.id === selectedService)) selectedService = currentProfile()?.default_service;
+    if (!projectById(selectedProject) || projectById(selectedProject)?.status !== "active") selectedProject = model.projects?.find((item) => item.status === "active")?.project_id || "project-default";
     render();
   }
 
@@ -563,6 +786,134 @@
   };
 
   $("request-notes").addEventListener("input", () => { guidedNotes[selectedService] = $("request-notes").value; });
+
+  document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+  document.querySelectorAll("[data-service]").forEach((button) => button.addEventListener("click", () => openService(button.dataset.service)));
+  $("menu-toggle").onclick = () => $("sidebar").classList.toggle("open");
+  $("task-project").onchange = () => { selectedProject = $("task-project").value; $("schedule-project").value = selectedProject; };
+  $("home-project").onchange = () => { selectedProject = $("home-project").value; $("task-project").value = selectedProject; $("schedule-project").value = selectedProject; renderProjects(); };
+  $("schedule-project").onchange = () => { selectedProject = $("schedule-project").value; $("task-project").value = selectedProject; };
+
+  $("show-project-form").onclick = () => { $("project-create-panel").hidden = false; $("project-name").focus(); };
+  $("cancel-project").onclick = () => { $("project-create-panel").hidden = true; };
+  $("create-project").onclick = async () => {
+    try {
+      const project = await api("/api/projects", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: $("project-name").value.trim(), description: $("project-description").value.trim() }),
+      });
+      selectedProject = project.project_id;
+      $("project-name").value = ""; $("project-description").value = ""; $("project-create-panel").hidden = true;
+      note(`项目空间“${project.name}”已创建。`); await load();
+    } catch (error) { note(error.message, true); }
+  };
+
+  async function uploadProjectFile(file) {
+    if (!file) return;
+    if (file.size <= 0 || file.size > 32 * 1024 * 1024) throw new Error("单个资料必须为 1 字节至 32 MB。");
+    const response = await fetch("/api/project-files", {
+      method: "POST",
+      headers: {
+        "X-Director-Token": requestToken || "", "Content-Type": "application/octet-stream",
+        "X-Project-Id": selectedProject, "X-File-Name": encodeURIComponent(file.name),
+      },
+      body: file,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "资料上传失败");
+    return data;
+  }
+
+  [$("home-upload"), $("project-upload")].forEach((button) => { button.onclick = () => $("project-file-input").click(); });
+  $("project-file-input").onchange = async () => {
+    const file = $("project-file-input").files?.[0];
+    try { const reply = await uploadProjectFile(file); note(reply.message); await load(); switchView("projects"); }
+    catch (error) { note(error.message, true); }
+    finally { $("project-file-input").value = ""; }
+  };
+
+  const schedulePresets = {
+    morning: { name: "上午重点客户扫描", time: "09:00", service: "sales-review", request: "检查重点客户的下一步动作、到期事项、停滞风险和资源缺口，形成今日优先级清单。" },
+    resource: { name: "下午资源需求汇总", time: "16:30", service: "sales-review", request: "汇总当天新增或未解决的销售资源需求，按客户价值和紧迫程度排序，并给出协调建议。" },
+    review: { name: "下班前销售复盘", time: "18:00", service: "sales-review", request: "复盘当天客户推进、承诺事项和风险，列出次日必须完成的动作及责任人。" },
+  };
+  $("show-schedule-form").onclick = () => { $("schedule-create-panel").hidden = false; $("schedule-name").focus(); };
+  $("cancel-schedule").onclick = () => { $("schedule-create-panel").hidden = true; };
+  document.querySelectorAll("[data-schedule-preset]").forEach((button) => button.addEventListener("click", () => {
+    const preset = schedulePresets[button.dataset.schedulePreset];
+    $("schedule-create-panel").hidden = false; $("schedule-name").value = preset.name; $("schedule-time").value = preset.time;
+    $("schedule-service").value = preset.service; $("schedule-request").value = preset.request;
+  }));
+  $("create-schedule").onclick = async () => {
+    try {
+      const schedule = await api("/api/schedules", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: $("schedule-name").value.trim(), time_local: $("schedule-time").value,
+          project_id: $("schedule-project").value, service_id: $("schedule-service").value,
+          request: $("schedule-request").value.trim(),
+        }),
+      });
+      $("schedule-name").value = ""; $("schedule-request").value = ""; $("schedule-create-panel").hidden = true;
+      note(`每日任务“${schedule.name}”已保存。`); await load();
+    } catch (error) { note(error.message, true); }
+  };
+
+  function renderSearchResults(results, truncated = false) {
+    const box = $("search-results");
+    box.classList.toggle("empty", results.length === 0);
+    if (!results.length) { box.replaceChildren(); box.textContent = "没有找到匹配内容，可调整关键词或发起公开调研。"; return; }
+    box.replaceChildren(...results.map((item) => {
+      const card = document.createElement("article"); card.className = "search-result";
+      const header = document.createElement("header");
+      const title = document.createElement("strong"); title.textContent = item.title;
+      const kind = document.createElement("span"); kind.textContent = item.kind;
+      const meta = document.createElement("small"); meta.textContent = item.subtitle || item.reference;
+      const snippet = document.createElement("p"); snippet.textContent = item.snippet || item.reference;
+      header.append(title, kind); card.append(header, meta, snippet);
+      card.onclick = () => {
+        if (item.project_id && projectById(item.project_id)?.status === "active") selectedProject = item.project_id;
+        if (item.kind === "任务") switchView("tasks");
+        else if (["项目", "项目文件"].includes(item.kind)) switchView("projects");
+        else if (item.kind === "知识") switchView("knowledge");
+        else if (item.kind === "产物") switchView("outputs");
+        else switchView("sales");
+        renderProjectSelectors(); renderProjects();
+      };
+      return card;
+    }));
+    if (truncated) note("结果较多，目前显示前 60 条。", false);
+  }
+
+  async function runLocalSearch() {
+    const query = $("search-query").value.trim();
+    const scopes = [...document.querySelectorAll(".scope-row input:checked")].map((input) => input.value);
+    try { const response = await api("/api/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, scopes }) }); renderSearchResults(response.results, response.truncated); }
+    catch (error) { note(error.message, true); }
+  }
+  $("run-search").onclick = runLocalSearch;
+  $("search-query").onkeydown = (event) => { if (event.key === "Enter") runLocalSearch(); };
+  $("start-public-search").onclick = async () => {
+    const query = $("search-query").value.trim();
+    if (query.length < 2) { note("请先输入至少 2 个字的公开调研主题。", true); return; }
+    openService("industry-research");
+    guidedDrafts["industry-research"] = { topic: query, purpose: "支持客户沟通与机会判断", period: "近 12 个月，并补充关键历史背景" };
+    renderGuidedForm(true);
+    note("已带入公开调研主题；确认用途后即可开始。 ");
+  };
+
+  async function runQuickCommand() {
+    const request = $("quick-command").value.trim();
+    if (!request) { note("请先写下希望助手完成的工作。", true); return; }
+    if (/周报|周五|周总结/u.test(request)) { $("weekly-focus").value = request.slice(0, 120); openService("weekly-deck"); return; }
+    if (/PPT|演示|汇报材料/u.test(request)) { $("ppt-topic").value = request.slice(0, 240); openService("presentation-studio"); return; }
+    const serviceId = /政府|园区|政策合作/u.test(request) ? "government-proposal" : /研究|行业|竞品|公开资料|调研/u.test(request) ? "industry-research" : /文件|方案|纪要|邮件/u.test(request) ? "office-document" : "sales-review";
+    selectedService = serviceId;
+    try { const response = await createTask(`【工作台快速指令】\n${request}\n请根据当前项目空间、知识库和销售台账补齐必要背景；涉及写入或正式文件时先等待审批。`); $("quick-command").value = ""; note(`任务已登记（${response.request_id}）。`); await load(); switchView("tasks"); }
+    catch (error) { note(error.message, true); }
+  }
+  $("quick-command-start").onclick = runQuickCommand;
+  $("quick-command").onkeydown = (event) => { if (event.key === "Enter") runQuickCommand(); };
 
   const presentationPresets = {
     customer: { audience: "客户业务负责人、技术负责人和决策人", decision: "确认方案范围、验证计划和下一步商务安排", scene: "custom", style: "management-report" },

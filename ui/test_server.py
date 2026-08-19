@@ -1,6 +1,8 @@
 import json
+import io
 import tempfile
 import unittest
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import patch
@@ -11,13 +13,15 @@ from ui import server
 class ControlCentreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_active_profile = (
-            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.ACTIVE_PROFILE_ID
+        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_active_profile = (
+            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.ACTIVE_PROFILE_ID
         )
         server.RUNTIME = Path(self.temporary.name)
         server.TASKS = server.RUNTIME / "tasks"
         server.REQUESTS = server.RUNTIME / "requests"
         server.PRESENTATION_PLANS = server.RUNTIME / "presentation-plans"
+        server.PROJECTS = server.RUNTIME / "projects.json"
+        server.SCHEDULES = server.RUNTIME / "schedules.json"
         server.ACTIVE_PROFILE_ID = None
 
     def write_plan(self, task_id="task-ppt", **changes):
@@ -35,8 +39,8 @@ class ControlCentreTests(unittest.TestCase):
         return plan
 
     def tearDown(self):
-        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.ACTIVE_PROFILE_ID = (
-            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_active_profile
+        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.ACTIVE_PROFILE_ID = (
+            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_active_profile
         )
         self.temporary.cleanup()
 
@@ -87,6 +91,86 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function guidedRequest()", javascript)
         self.assertIn("function renderModelSettings", javascript)
         self.assertIn('api("/api/model-discovery"', javascript)
+        for view in ("home", "projects", "schedules", "search"):
+            self.assertIn(f'data-page="{view}"', html)
+        self.assertIn('id="project-file-input"', html)
+        self.assertIn('id="quick-command"', html)
+        self.assertIn('id="schedule-request"', html)
+        self.assertIn('id="search-query"', html)
+        self.assertIn('api("/api/search"', javascript)
+
+    def test_project_space_is_created_and_task_summaries_default_to_general_project(self):
+        project = server.create_project_record({"name": "江苏客户项目", "description": "试点机会"})
+        self.assertEqual(project["status"], "active")
+        self.assertEqual(server.active_project(project["project_id"])["name"], "江苏客户项目")
+        server.atomic_json(server.TASKS / "task-old.json", {
+            "task_id": "task-old", "profile_id": "sales-director", "status": "requested",
+        })
+        self.assertEqual(server.task_summaries()[0]["project_id"], server.DEFAULT_PROJECT_ID)
+
+    def test_daily_schedule_enqueues_at_most_once_per_day(self):
+        service = {"id": "sales-review", "workflow": "market.sales.review"}
+        with patch("ui.server.sales_service", return_value=service):
+            schedule = server.create_schedule_record({
+                "name": "每日风险扫描", "project_id": server.DEFAULT_PROJECT_ID,
+                "service_id": "sales-review", "time_local": "09:00", "request": "检查重点客户风险与下一步动作。",
+            })
+        current = datetime.fromisoformat("2026-08-19T10:00:00+08:00")
+        self.assertEqual(server.process_due_schedules(current), 1)
+        self.assertEqual(server.process_due_schedules(current), 0)
+        requests = list(server.REQUESTS.glob("*.json"))
+        self.assertEqual(len(requests), 1)
+        record = server.load_json(requests[0])
+        self.assertEqual(record["schedule_id"], schedule["schedule_id"])
+        self.assertEqual(record["scheduled_for"], "2026-08-19")
+        self.assertEqual(record["project_id"], server.DEFAULT_PROJECT_ID)
+
+    def test_local_search_returns_structured_snippet_without_dumping_full_row(self):
+        previous_root, previous_inputs, previous_outputs = server.ROOT, server.INPUTS, server.OUTPUTS
+        try:
+            root = Path(self.temporary.name)
+            server.ROOT, server.INPUTS, server.OUTPUTS = root, root / "inputs", root / "outputs"
+            sales = root / "data" / "sales"
+            sales.mkdir(parents=True)
+            (sales / "customers.csv").write_text(
+                "customer_id,customer_name,region,sector,owner,stage,health,risks,next_action,private_field\n"
+                "c-1,江苏客户,江苏,制造,张三,方案,关注,预算待确认,周五回访,不应直接整行返回\n",
+                encoding="utf-8",
+            )
+            result = server.local_search({"query": "江苏客户", "scopes": ["sales"]})
+        finally:
+            server.ROOT, server.INPUTS, server.OUTPUTS = previous_root, previous_inputs, previous_outputs
+        self.assertEqual(result["results"][0]["title"], "江苏客户")
+        self.assertNotIn("private_field", json.dumps(result, ensure_ascii=False))
+        self.assertNotIn("不应直接整行返回", json.dumps(result, ensure_ascii=False))
+
+    def test_project_upload_is_confined_and_never_overwrites(self):
+        previous_root, previous_inputs = server.ROOT, server.INPUTS
+        try:
+            root = Path(self.temporary.name)
+            server.ROOT, server.INPUTS = root, root / "inputs"
+            project = server.create_project_record({"name": "上传测试", "description": ""})
+            payload = b"%PDF-1.7 test"
+            handler = object.__new__(server.ControlHandler)
+            replies = []
+            handler.headers = {
+                "X-Project-Id": project["project_id"], "X-File-Name": "evidence.pdf",
+                "Content-Length": str(len(payload)),
+            }
+            handler.rfile = io.BytesIO(payload)
+            handler.send_json = lambda status, value: replies.append((status, value))
+            handler.upload_project_file()
+            self.assertEqual(replies[-1][0], HTTPStatus.CREATED)
+            target = root / replies[-1][1]["path"]
+            self.assertEqual(target.read_bytes(), payload)
+
+            handler.rfile = io.BytesIO(b"replacement")
+            handler.headers["Content-Length"] = str(len(b"replacement"))
+            handler.upload_project_file()
+            self.assertEqual(replies[-1][0], HTTPStatus.CONFLICT)
+            self.assertEqual(target.read_bytes(), payload)
+        finally:
+            server.ROOT, server.INPUTS = previous_root, previous_inputs
 
     def test_exclusive_task_rejects_a_concurrent_writer(self):
         target = server.TASKS / "task-a.json"

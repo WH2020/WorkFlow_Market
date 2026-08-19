@@ -3,74 +3,91 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>销售总监 AI 助手</title>
+  <title>销售总监 AI 工作台</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header><div><p class="eyebrow">SALES DIRECTOR · LOCAL · APPROVAL FIRST</p><h1>销售总监 AI 助手</h1></div><span class="local">仅本机运行</span></header>
-  <main>
-    <section class="hero"><div><h2>客户推进、资源协调和销售复盘，都在一个工作台完成</h2><p>选择销售服务并提交任务；关键数据写入、方案和 PPT 生成仍由你确认。</p></div><div id="notice" aria-live="polite"></div></section>
-    <details id="model-settings-panel" class="panel model-panel">
-      <summary><div><span class="model-dot" aria-hidden="true"></span><div><strong>当前模型</strong><p id="model-current">正在读取模型配置…</p></div></div><span class="model-settings-action">接入或切换模型</span></summary>
-      <div class="model-form">
-        <div class="model-explainer"><strong>连接 NewAPI / OpenAI 兼容网关</strong><p>地址和模型选择保存在本机；API Key 使用系统保护存储，不进入 Git、任务记录或模型列表。</p></div>
-        <div class="model-grid">
-          <label>网关地址<input id="model-base-url" maxlength="500" placeholder="https://ai.example.com（不要填写 /v1）"></label>
-          <label>API Key<input id="model-api-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="留空则继续使用已保存的密钥"></label>
-          <label class="model-private"><input id="model-private-network" type="checkbox">允许本机或局域网网关</label>
-          <div class="model-discover"><button id="discover-models" type="button" class="secondary">获取可用模型</button><span id="model-discovery-status" class="hint"></span></div>
-          <label class="span-2">选择后续任务使用的模型<select id="model-select" disabled><option value="">请先获取模型</option></select></label>
-        </div>
-        <div class="form-actions"><button id="save-model-settings" type="button" class="primary" disabled>保存模型选择</button><button id="reset-model-settings" type="button" class="secondary">恢复默认模型</button><span class="hint">保存后关闭并重新打开应用生效；正在运行的任务不会被中途切换模型。</span></div>
-      </div>
-    </details>
-    <section class="panel"><h2>1. 选择要处理的销售工作</h2><div id="services" class="service-grid"></div></section>
-    <section id="generic-task-form" class="panel task-form">
-      <div class="form-heading"><div><p class="section-kicker">GUIDED TASK</p><h2 id="task-form-title">2. 创建任务</h2></div><p id="task-form-intro" class="hint"></p></div>
-      <div><strong class="field-heading">常用任务，一键带入</strong><div id="quick-prompts" class="quick-prompts"></div></div>
-      <div id="guided-fields" class="guided-grid"></div>
-      <details class="advanced-settings"><summary>补充说明（可选）</summary><label>还有哪些背景、限制或特殊要求？<textarea id="request-notes" maxlength="1200" placeholder="例如：只看华东区域；方案要供下周客户会议使用。"></textarea></label></details>
-      <div class="form-actions"><button id="create" class="primary">开始处理</button><span class="hint">助手会按当前服务自动组织任务；涉及台账写入和正式文件时仍由你审批。</span></div>
-    </section>
-    <section id="presentation-task-form" class="panel task-form presentation-form" hidden>
-      <div class="form-heading"><div><p class="section-kicker">SALES PRESENTATION</p><h2>2. 创建销售 PPT</h2></div><p class="hint">只有主题必填，其余内容可使用默认值。</p></div>
-      <div class="quick-prompts" id="ppt-quick-prompts">
-        <button type="button" class="prompt-chip" data-ppt-preset="customer">客户方案汇报</button>
-        <button type="button" class="prompt-chip" data-ppt-preset="review">销售复盘汇报</button>
-        <button type="button" class="prompt-chip" data-ppt-preset="government">政府合作汇报</button>
-      </div>
-      <div class="brief-grid brief-grid-primary">
-        <label class="span-2">要做什么 PPT？<textarea id="ppt-topic" maxlength="240" placeholder="例如：为 A 客户制作具身智能数据采集方案汇报，突出落地路径和合作价值。"></textarea></label>
-        <label>给谁看？<input id="ppt-audience" maxlength="120" value="客户决策人和销售管理层"></label>
-        <label>希望对方看完做什么？<input id="ppt-decision" maxlength="500" placeholder="默认：确认下一步行动与所需资源"></label>
-      </div>
-      <details class="advanced-settings"><summary>高级设置（页数、风格和文件名）</summary>
-        <div class="brief-grid advanced-grid">
-          <label>汇报场景<select id="ppt-scene"><option value="custom">客户方案与自定义演示</option><option value="industry">客户与行业研究</option><option value="government">政府合作方案</option><option value="weekly">周报与销售管理汇报</option></select></label>
-          <label>处理模式<select id="ppt-mode"><option value="standard">标准（推荐）</option><option value="quick">快速</option><option value="strict">严格</option></select></label>
-          <label>演示语言<select id="ppt-language"><option value="zh-CN">中文</option><option value="en">英文</option></select></label>
-          <label>演讲时长（分钟）<input id="ppt-duration" type="number" min="3" max="120" value="15"></label>
-          <label>目标页数<input id="ppt-pages" type="number" min="4" max="10" value="6"></label>
-          <label>设计风格<select id="ppt-style"><option value="management-report">销售管理汇报</option><option value="government-program">政府合作方案</option><option value="technology-research">客户与行业研究</option></select></label>
-          <label>保密等级<select id="ppt-confidentiality"><option value="internal">内部使用</option><option value="restricted">限制传播</option><option value="public">可公开</option></select></label>
-          <label>输出文件名（可选）<input id="ppt-output" maxlength="125" placeholder="不填则自动命名"><small>仅限字母、数字、点、连字符和下划线，以 .pptx 结尾。</small></label>
-          <div class="source-policy span-2"><strong>资料范围</strong><span>公开网页 + 当前销售知识库</span><small>本地 PDF 请先用“PDF 资料入库”；不要把秘密信息写进公开检索主题。</small></div>
-        </div>
-      </details>
-      <div class="form-actions"><button id="create-presentation" class="primary">开始制作 PPT</button><span class="hint">助手会自动补齐场景、结构和默认设计；大纲与正式文件仍由你确认。</span></div>
-    </section>
-    <section id="weekly-task-form" class="panel task-form weekly-form" hidden>
-      <div class="form-heading"><div><p class="section-kicker">ONE-CLICK WEEKLY REPORT</p><h2>2. 生成周五销售汇报</h2></div><span id="weekly-period" class="period-badge"></span></div>
-      <div class="weekly-summary">
-        <strong>助手将自动汇总本周已有记录</strong>
-        <ul><li>重点客户进展与停滞机会</li><li>资源需求、风险和待确认事项</li><li>本周完成情况与下周行动</li></ul>
-      </div>
-      <label>本周特别想强调什么？（可选）<textarea id="weekly-focus" maxlength="120" placeholder="例如：重点突出 A 客户停滞原因，以及需要技术团队支持的事项。"></textarea></label>
-      <div class="form-actions"><button id="create-weekly" class="primary">一键生成本周汇报</button><span class="hint">无需重复填写页数、风格和受众；正式 PPT 生成前仍会让你确认。</span></div>
-    </section>
-    <section class="split"><div class="panel"><h2>当前任务</h2><div id="tasks" class="empty">正在读取任务状态…</div></div><div class="panel"><h2>知识与销售台账</h2><div id="data-summary" class="summary"></div></div></section>
-    <section class="split"><div class="panel"><h2>工作流阶段</h2><div id="workflow" class="empty">选择服务或任务后显示。</div></div><div class="panel"><h2>最近产物</h2><div id="outputs" class="empty">暂无可显示的产物。</div></div></section>
-  </main>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><span class="brand-mark">S</span><div><strong>销售总监</strong><small>AI 工作台</small></div></div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-view="home"><span>⌂</span>工作台</button>
+        <button class="nav-item" data-view="work"><span>＋</span>发起工作</button>
+        <button class="nav-item" data-view="tasks"><span>☑</span>任务中心<i id="nav-task-count"></i></button>
+        <button class="nav-item" data-view="sales"><span>♙</span>客户与销售</button>
+        <button class="nav-item" data-view="knowledge"><span>▣</span>知识库</button>
+        <button class="nav-item" data-view="weekly"><span>▤</span>周报中心</button>
+        <button class="nav-item" data-view="outputs"><span>⇩</span>输出中心</button>
+        <div class="nav-divider"></div>
+        <button class="nav-item" data-view="projects"><span>□</span>项目空间</button>
+        <button class="nav-item" data-view="schedules"><span>◷</span>每日定时任务</button>
+        <button class="nav-item" data-view="search"><span>⌕</span>自定义搜索</button>
+      </nav>
+      <button class="nav-item sidebar-settings" data-view="settings"><span>⚙</span>设置</button>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button id="menu-toggle" class="icon-button mobile-only" aria-label="打开导航">☰</button>
+        <div><p class="section-kicker">SALES DIRECTOR · LOCAL</p><strong id="page-title">工作台</strong></div>
+        <div class="top-actions"><span class="runtime-status"><i></i>本地服务正常</span><button class="avatar" data-view="settings" aria-label="设置">销</button></div>
+      </header>
+      <div id="notice" class="notice" aria-live="polite"></div>
+
+      <main>
+        <section class="page active" data-page="home">
+          <div class="welcome-row"><div><h1 id="greeting">今天的销售工作已为你整理好</h1><p>先处理需要确认的事项，再从快捷入口发起工作。</p></div><div class="welcome-actions"><label class="project-picker">当前项目<select id="home-project"></select></label><button class="secondary" data-view="search">搜索全部资料</button></div></div>
+          <div class="dashboard-grid">
+            <div class="dashboard-main">
+              <div class="stat-grid">
+                <article class="stat-card orange"><span>▧</span><div><small>待我确认</small><strong id="home-pending">0</strong></div></article>
+                <article class="stat-card blue"><span>◷</span><div><small>进行中</small><strong id="home-running">0</strong></div></article>
+                <article class="stat-card green"><span>○</span><div><small>本周完成</small><strong id="home-completed">0</strong></div></article>
+              </div>
+              <section class="panel dashboard-panel"><div class="panel-heading"><h2>快速开始</h2><button class="text-button" data-view="work">全部服务 →</button></div>
+                <div class="quick-service-grid">
+                  <button data-service="industry-research"><span>⌁</span>行业专题研究<small>自动查证公开来源</small></button>
+                  <button data-service="government-proposal"><span>♜</span>政府合作方案<small>初稿后独立复核</small></button>
+                  <button data-service="office-document"><span>▤</span>销售文件处理<small>按用途生成初稿</small></button>
+                  <button data-service="sales-review"><span>♙</span>客户销售复盘<small>风险与行动建议</small></button>
+                  <button data-service="presentation-studio"><span>▥</span>PPT 工作室<small>主题必填，其余自动</small></button>
+                  <button data-service="weekly-deck"><span>▨</span>生成即时周报<small>自动汇总本周记录</small></button>
+                </div>
+              </section>
+              <div class="two-column">
+                <section class="panel dashboard-panel"><div class="panel-heading"><h2>本周进度</h2><span id="week-label" class="muted"></span></div><div class="progress-copy"><strong id="week-progress-label">0%</strong><span>任务完成率</span></div><div class="progress-track"><i id="week-progress-bar"></i></div><div class="inline-actions"><button class="primary" data-view="tasks">继续处理</button><button class="secondary" data-service="weekly-deck">生成周报</button></div></section>
+                <section class="panel dashboard-panel"><div class="panel-heading"><h2>最近任务</h2><button class="text-button" data-view="tasks">查看全部 →</button></div><div id="home-recent" class="compact-list empty">暂无任务</div></section>
+              </div>
+            </div>
+            <aside class="panel approval-panel"><div class="panel-heading"><h2>需要确认</h2><span id="approval-total" class="count-pill">0</span></div><div id="home-approvals" class="approval-list empty">暂无待确认事项</div></aside>
+          </div>
+          <section class="command-bar"><span>✦</span><input id="quick-command" maxlength="500" placeholder="输入希望完成的工作，例如：整理某客户最近两周进展"><button id="quick-command-start" class="primary">交给助手</button><button id="home-upload" class="upload-button">上传资料</button></section>
+        </section>
+
+        <section class="page" data-page="work">
+          <div class="page-heading"><div><p class="section-kicker">GUIDED WORK</p><h1>发起销售工作</h1><p>选择服务后只填写真正影响结果的信息。</p></div><label class="project-picker">归属项目<select id="task-project"></select></label></div>
+          <section class="panel"><h2>选择服务</h2><div id="services" class="service-grid"></div></section>
+          <section id="generic-task-form" class="panel task-form"><div class="form-heading"><div><p class="section-kicker">GUIDED TASK</p><h2 id="task-form-title">创建任务</h2></div><p id="task-form-intro" class="hint"></p></div><div><strong class="field-heading">常用任务，一键带入</strong><div id="quick-prompts" class="quick-prompts"></div></div><div id="guided-fields" class="guided-grid"></div><details class="advanced-settings"><summary>补充说明（可选）</summary><label>背景、限制或特殊要求<textarea id="request-notes" maxlength="1200" placeholder="例如：只看华东区域；方案供下周客户会议使用。"></textarea></label></details><div class="form-actions"><button id="create" class="primary">开始处理</button><span class="hint">涉及台账写入和正式文件时仍由你审批。</span></div></section>
+          <section id="presentation-task-form" class="panel task-form presentation-form" hidden><div class="form-heading"><div><p class="section-kicker">SALES PRESENTATION</p><h2>创建销售 PPT</h2></div><p class="hint">只有主题必填，其余内容可使用默认值。</p></div><div class="quick-prompts" id="ppt-quick-prompts"><button type="button" class="prompt-chip" data-ppt-preset="customer">客户方案汇报</button><button type="button" class="prompt-chip" data-ppt-preset="review">销售复盘汇报</button><button type="button" class="prompt-chip" data-ppt-preset="government">政府合作汇报</button></div><div class="brief-grid brief-grid-primary"><label class="span-2">要做什么 PPT？<textarea id="ppt-topic" maxlength="240" placeholder="例如：为 A 客户制作具身智能数据采集方案汇报，突出落地路径和合作价值。"></textarea></label><label>给谁看？<input id="ppt-audience" maxlength="120" value="客户决策人和销售管理层"></label><label>希望对方看完做什么？<input id="ppt-decision" maxlength="500" placeholder="默认：确认下一步行动与所需资源"></label></div><details class="advanced-settings"><summary>高级设置（页数、风格和文件名）</summary><div class="brief-grid advanced-grid"><label>汇报场景<select id="ppt-scene"><option value="custom">客户方案与自定义演示</option><option value="industry">客户与行业研究</option><option value="government">政府合作方案</option><option value="weekly">周报与销售管理汇报</option></select></label><label>处理模式<select id="ppt-mode"><option value="standard">标准（推荐）</option><option value="quick">快速</option><option value="strict">严格</option></select></label><label>演示语言<select id="ppt-language"><option value="zh-CN">中文</option><option value="en">英文</option></select></label><label>演讲时长（分钟）<input id="ppt-duration" type="number" min="3" max="120" value="15"></label><label>目标页数<input id="ppt-pages" type="number" min="4" max="10" value="6"></label><label>设计风格<select id="ppt-style"><option value="management-report">销售管理汇报</option><option value="government-program">政府合作方案</option><option value="technology-research">客户与行业研究</option></select></label><label>保密等级<select id="ppt-confidentiality"><option value="internal">内部使用</option><option value="restricted">限制传播</option><option value="public">可公开</option></select></label><label>输出文件名（可选）<input id="ppt-output" maxlength="125" placeholder="不填则自动命名"><small>安全英文文件名，以 .pptx 结尾。</small></label><div class="source-policy span-2"><strong>资料范围</strong><span>公开网页 + 当前销售知识库</span><small>本地 PDF 请先上传到项目空间并执行资料入库。</small></div></div></details><div class="form-actions"><button id="create-presentation" class="primary">开始制作 PPT</button><span class="hint">大纲与正式文件仍由你确认。</span></div></section>
+        </section>
+
+        <section class="page" data-page="tasks"><div class="page-heading"><div><p class="section-kicker">TASK CENTRE</p><h1>任务中心</h1><p>查看进度、处理审批并追踪工作流阶段。</p></div><button class="primary" data-view="work">发起新任务</button></div><div class="two-column task-layout"><section class="panel"><h2>全部任务</h2><div id="tasks" class="empty">正在读取任务状态…</div></section><section class="panel sticky-panel"><h2>工作流阶段</h2><div id="workflow" class="empty">选择任务后显示。</div></section></div></section>
+        <section class="page" data-page="sales"><div class="page-heading"><div><p class="section-kicker">CUSTOMERS & SALES</p><h1>客户与销售</h1><p>客户、跟进、资源请求和销售资料的本地台账概览。</p></div><button class="primary" data-service="sales-review">开始客户复盘</button></div><section class="panel"><div id="sales-summary" class="summary"></div></section></section>
+        <section class="page" data-page="knowledge"><div class="page-heading"><div><p class="section-kicker">KNOWLEDGE BASE</p><h1>知识库</h1><p>查看来源登记，上传资料并发起证据化研究。</p></div><button class="primary" data-service="industry-research">发起行业研究</button></div><section class="panel"><div id="knowledge-summary" class="summary"></div></section><section class="panel"><h2>最近项目资料</h2><div id="knowledge-files" class="file-list empty">暂无资料</div></section></section>
+        <section class="page" data-page="weekly"><div class="page-heading"><div><p class="section-kicker">WEEKLY REPORT</p><h1>周报中心</h1><p>自动汇总本周销售记录，只需补充一个重点。</p></div></div><section id="weekly-task-form" class="panel task-form weekly-form"><div class="form-heading"><div><h2>生成周五销售汇报</h2><p class="hint">客户进展、资源需求、风险和下周行动会自动汇总。</p></div><span id="weekly-period" class="period-badge"></span></div><div class="weekly-summary"><strong>自动读取本周已有记录</strong><ul><li>重点客户进展与停滞机会</li><li>资源需求、风险和待确认事项</li><li>本周完成情况与下周行动</li></ul></div><label>本周特别想强调什么？（可选）<textarea id="weekly-focus" maxlength="120" placeholder="例如：重点突出 A 客户停滞原因，以及需要技术团队支持的事项。"></textarea></label><div class="form-actions"><button id="create-weekly" class="primary">一键生成本周汇报</button><span class="hint">正式 PPT 生成前仍会让你确认。</span></div></section></section>
+        <section class="page" data-page="outputs"><div class="page-heading"><div><p class="section-kicker">OUTPUT CENTRE</p><h1>输出中心</h1><p>查看通过受控流程生成的方案、报告和 PPT。</p></div></div><section class="panel"><div id="outputs" class="empty">暂无可显示的产物。</div></section></section>
+
+        <section class="page" data-page="projects"><div class="page-heading"><div><p class="section-kicker">PROJECT SPACE</p><h1>项目空间</h1><p>把任务、资料和产物按客户或机会归在一起。</p></div><button id="show-project-form" class="primary">新建项目</button></div><section id="project-create-panel" class="panel compact-form" hidden><div class="guided-grid"><label>项目名称<input id="project-name" maxlength="80" placeholder="例如：江苏具身智能合作项目"></label><label>项目说明<input id="project-description" maxlength="500" placeholder="客户、目标和当前阶段"></label></div><div class="form-actions"><button id="create-project" class="primary">创建项目</button><button id="cancel-project" class="secondary">取消</button></div></section><div id="project-list" class="project-grid empty">暂无项目</div><div class="two-column"><section class="panel"><div class="panel-heading"><h2>项目资料</h2><button id="project-upload" class="secondary">上传资料</button></div><div id="project-files" class="file-list empty">暂无资料</div></section><section class="panel"><div class="panel-heading"><h2>项目产物</h2><button class="text-button" data-view="outputs">查看全部 →</button></div><div id="project-outputs" class="file-list empty">暂无产物</div></section></div></section>
+
+        <section class="page" data-page="schedules"><div class="page-heading"><div><p class="section-kicker">DAILY AUTOMATION</p><h1>每日定时任务</h1><p>应用运行时到点自动排队；业务写入和正式文件仍需确认。</p></div><button id="show-schedule-form" class="primary">新建定时任务</button></div><section id="schedule-create-panel" class="panel compact-form" hidden><div class="guided-grid"><label>任务名称<input id="schedule-name" maxlength="80" placeholder="例如：每日客户风险扫描"></label><label>每天几点执行<input id="schedule-time" type="time" value="09:00"></label><label>归属项目<select id="schedule-project"></select></label><label>使用服务<select id="schedule-service"></select></label><label class="span-2">每天要助手做什么？<textarea id="schedule-request" maxlength="3500" placeholder="例如：检查重点客户的下一步动作、到期事项和资源缺口，形成今日优先级清单。"></textarea></label></div><div class="quick-prompts"><button class="prompt-chip" data-schedule-preset="morning">上午重点客户扫描</button><button class="prompt-chip" data-schedule-preset="resource">下午资源需求汇总</button><button class="prompt-chip" data-schedule-preset="review">下班前销售复盘</button></div><div class="form-actions"><button id="create-schedule" class="primary">保存每日任务</button><button id="cancel-schedule" class="secondary">取消</button></div></section><div id="schedule-list" class="schedule-list empty">暂无定时任务</div><p class="safety-note">错过执行时间后，只要当天重新打开应用就会补排一次；同一计划每天最多自动创建一个任务。</p></section>
+
+        <section class="page" data-page="search"><div class="page-heading"><div><p class="section-kicker">CUSTOM SEARCH</p><h1>自定义搜索</h1><p>即时搜索本地项目、任务、知识和销售台账，或发起受控公开调研。</p></div></div><section class="panel search-panel"><div class="search-box"><span>⌕</span><input id="search-query" maxlength="100" placeholder="输入客户、地区、行业、项目或资料名称"><button id="run-search" class="primary">搜索本地</button></div><div class="scope-row"><label><input type="checkbox" value="projects" checked>项目</label><label><input type="checkbox" value="tasks" checked>任务</label><label><input type="checkbox" value="knowledge" checked>知识</label><label><input type="checkbox" value="sales" checked>销售台账</label><label><input type="checkbox" value="files" checked>资料</label><label><input type="checkbox" value="outputs" checked>产物</label></div><div class="public-search-action"><div><strong>需要搜索公开网络？</strong><p>将搜索词转成受控行业研究任务，由公开研究员核验正文和来源。</p></div><button id="start-public-search" class="secondary">发起公开调研</button></div></section><div id="search-results" class="search-results empty">输入至少 2 个字开始搜索。</div></section>
+
+        <section class="page" data-page="settings"><div class="page-heading"><div><p class="section-kicker">SETTINGS</p><h1>设置</h1><p>模型接入与本地运行配置。</p></div></div><details id="model-settings-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>当前模型</strong><p id="model-current">正在读取模型配置…</p></div></div><span class="model-settings-action">接入或切换模型</span></summary><div class="model-form"><div class="model-explainer"><strong>连接 NewAPI / OpenAI 兼容网关</strong><p>地址和模型选择保存在本机；API Key 使用系统保护存储。</p></div><div class="model-grid"><label>网关地址<input id="model-base-url" maxlength="500" placeholder="https://ai.example.com（不要填写 /v1）"></label><label>API Key<input id="model-api-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="留空则使用已保存密钥"></label><label class="model-private"><input id="model-private-network" type="checkbox">允许本机或局域网网关</label><div class="model-discover"><button id="discover-models" type="button" class="secondary">获取可用模型</button><span id="model-discovery-status" class="hint"></span></div><label class="span-2">选择后续任务使用的模型<select id="model-select" disabled><option value="">请先获取模型</option></select></label></div><div class="form-actions"><button id="save-model-settings" type="button" class="primary" disabled>保存模型选择</button><button id="reset-model-settings" type="button" class="secondary">恢复默认模型</button><span class="hint">保存后重启应用生效。</span></div></div></details></section>
+      </main>
+    </div>
+  </div>
+  <input id="project-file-input" type="file" accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.pptx" hidden>
   <template id="task-template"><article class="task"><div class="task-title"><strong></strong><span class="status"></span></div><p class="task-meta"></p><p class="task-request"></p><div class="task-actions"></div></article></template>
   <script src="/app.js"></script>
 </body>

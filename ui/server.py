@@ -16,6 +16,7 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,8 +50,15 @@ PRESENTATION_PLANS = RUNTIME / "presentation-plans"
 PROFILES = ROOT / "profiles"
 PLUGINS = ROOT / "vertical_plugins"
 OUTPUTS = ROOT / "outputs"
+INPUTS = ROOT / "inputs"
+PROJECTS = RUNTIME / "projects.json"
+SCHEDULES = RUNTIME / "schedules.json"
 SERVER_TOKEN = secrets.token_urlsafe(32)
 ACTIVE_PROFILE_ID: str | None = None
+
+DEFAULT_PROJECT_ID = "project-default"
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".pptx"}
 
 
 def now() -> str:
@@ -218,6 +226,278 @@ def workflows() -> dict[str, dict[str, Any]]:
     return result
 
 
+def default_project() -> dict[str, Any]:
+    return {
+        "project_id": DEFAULT_PROJECT_ID,
+        "name": "销售总监工作空间",
+        "description": "默认承接未单独归档的销售任务、资料和产物。",
+        "status": "active",
+        "created_at": now(),
+        "updated_at": now(),
+    }
+
+
+def _bounded_store(path: Path, key: str, maximum_bytes: int = 524_288) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    if path.is_symlink() or path.stat().st_size > maximum_bytes:
+        raise ValueError(f"{path.name} 不是有效的本地工作台数据文件")
+    value = load_json(path)
+    if value.get("schema_version") != "1.0" or not isinstance(value.get(key), list):
+        raise ValueError(f"{path.name} 数据结构无效")
+    return [item for item in value[key] if isinstance(item, dict)]
+
+
+def project_records() -> list[dict[str, Any]]:
+    projects = _bounded_store(PROJECTS, "projects")
+    if not projects:
+        projects = [default_project()]
+    elif not any(project.get("project_id") == DEFAULT_PROJECT_ID for project in projects):
+        projects.insert(0, default_project())
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for project in projects[:50]:
+        project_id = safe_id(str(project.get("project_id", "")))
+        name = str(project.get("name", "")).strip()
+        description = str(project.get("description", "")).strip()
+        status = project.get("status")
+        if project_id in seen or not name or len(name) > 80 or len(description) > 500 or status not in {"active", "archived"}:
+            raise ValueError("项目空间记录无效")
+        seen.add(project_id)
+        result.append({
+            "project_id": project_id,
+            "name": name,
+            "description": description,
+            "status": status,
+            "created_at": str(project.get("created_at", ""))[:40],
+            "updated_at": str(project.get("updated_at", ""))[:40],
+        })
+    return result
+
+
+def save_projects(projects: list[dict[str, Any]]) -> None:
+    atomic_json(PROJECTS, {"schema_version": "1.0", "projects": projects, "updated_at": now()})
+
+
+def create_project_record(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name", "")).strip()
+    description = str(payload.get("description", "")).strip()
+    if not name or len(name) > 80:
+        raise ValueError("项目名称必须为 1–80 字")
+    if len(description) > 500:
+        raise ValueError("项目说明不能超过 500 字")
+    with exclusive_task(PROJECTS):
+        projects = project_records()
+        if len(projects) >= 50:
+            raise ValueError("项目空间最多保留 50 个项目")
+        if any(project["name"].casefold() == name.casefold() and project["status"] == "active" for project in projects):
+            raise ValueError("已有同名的进行中项目")
+        timestamp = now()
+        project = {
+            "project_id": f"project-{uuid.uuid4().hex[:12]}",
+            "name": name,
+            "description": description,
+            "status": "active",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        projects.append(project)
+        save_projects(projects)
+        return project
+
+
+def active_project(project_id: str) -> dict[str, Any]:
+    project_id = safe_id(project_id)
+    project = next((item for item in project_records() if item["project_id"] == project_id), None)
+    if project is None:
+        raise ValueError("项目空间不存在")
+    if project["status"] != "active":
+        raise ValueError("归档项目不能创建新任务或上传资料")
+    return project
+
+
+def project_files() -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if INPUTS.is_symlink() or not INPUTS.is_dir():
+        return result
+    projects = {item["project_id"] for item in project_records()}
+    for index, item in enumerate(INPUTS.rglob("*")):
+        if index >= 2000:
+            break
+        try:
+            if item.name.startswith(".") or item.suffix.lower() not in ALLOWED_UPLOAD_SUFFIXES or item.is_symlink() or not item.is_file():
+                continue
+            relative = item.relative_to(ROOT).as_posix()
+            parts = item.relative_to(INPUTS).parts
+            project_id = parts[1] if len(parts) >= 3 and parts[0] == "projects" and parts[1] in projects else DEFAULT_PROJECT_ID
+            stat = item.stat()
+        except (OSError, ValueError):
+            continue
+        result.append({
+            "name": item.name,
+            "path": relative,
+            "project_id": project_id,
+            "size": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="minutes"),
+        })
+    return sorted(result, key=lambda entry: entry["modified_at"], reverse=True)[:200]
+
+
+def schedule_records() -> list[dict[str, Any]]:
+    schedules = _bounded_store(SCHEDULES, "schedules")
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for schedule in schedules[:50]:
+        schedule_id = safe_id(str(schedule.get("schedule_id", "")))
+        project_id = safe_id(str(schedule.get("project_id", "")))
+        service_id = safe_id(str(schedule.get("service_id", "")))
+        workflow_id = str(schedule.get("workflow_id", "")).strip()
+        name = str(schedule.get("name", "")).strip()
+        request = str(schedule.get("request", "")).strip()
+        time_local = str(schedule.get("time_local", ""))
+        if (
+            schedule_id in seen or not name or len(name) > 80 or not request or len(request) > 3500 or
+            re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", workflow_id) is None or
+            re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_local) is None or
+            not isinstance(schedule.get("enabled"), bool)
+        ):
+            raise ValueError("每日定时任务记录无效")
+        seen.add(schedule_id)
+        result.append({
+            "schedule_id": schedule_id,
+            "project_id": project_id,
+            "profile_id": "sales-director",
+            "service_id": service_id,
+            "workflow_id": workflow_id,
+            "name": name,
+            "request": request,
+            "time_local": time_local,
+            "enabled": schedule["enabled"],
+            "last_enqueued_date": schedule.get("last_enqueued_date"),
+            "last_enqueued_at": schedule.get("last_enqueued_at"),
+            "created_at": str(schedule.get("created_at", ""))[:40],
+            "updated_at": str(schedule.get("updated_at", ""))[:40],
+        })
+    return result
+
+
+def save_schedules(schedules: list[dict[str, Any]]) -> None:
+    atomic_json(SCHEDULES, {"schema_version": "1.0", "schedules": schedules, "updated_at": now()})
+
+
+def sales_service(service_id: str) -> dict[str, Any]:
+    profile = next((item for item in profiles() if item["id"] == "sales-director"), None)
+    service = next((item for item in (profile or {}).get("services", []) if item.get("id") == service_id), None)
+    if service is None:
+        raise ValueError("定时任务服务不属于销售总监")
+    return service
+
+
+def create_schedule_record(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name", "")).strip()
+    project_id = safe_id(str(payload.get("project_id", "")))
+    service_id = safe_id(str(payload.get("service_id", "")))
+    request = str(payload.get("request", "")).strip()
+    time_local = str(payload.get("time_local", ""))
+    if not name or len(name) > 80:
+        raise ValueError("定时任务名称必须为 1–80 字")
+    if not request or len(request) > 3500:
+        raise ValueError("定时任务说明必须为 1–3500 字")
+    if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_local) is None:
+        raise ValueError("执行时间必须为 00:00–23:59")
+    active_project(project_id)
+    service = sales_service(service_id)
+    if service_id in {"presentation-studio", "weekly-deck"}:
+        validate_presentation_brief_request(request)
+    with exclusive_task(SCHEDULES):
+        schedules = schedule_records()
+        if len(schedules) >= 50:
+            raise ValueError("每日定时任务最多保留 50 条")
+        timestamp = now()
+        schedule = {
+            "schedule_id": f"schedule-{uuid.uuid4().hex[:12]}",
+            "project_id": project_id,
+            "profile_id": "sales-director",
+            "service_id": service_id,
+            "workflow_id": service["workflow"],
+            "name": name,
+            "request": request,
+            "time_local": time_local,
+            "enabled": True,
+            "last_enqueued_date": None,
+            "last_enqueued_at": None,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        schedules.append(schedule)
+        save_schedules(schedules)
+        return schedule
+
+
+def _schedule_request(schedule: dict[str, Any], scheduled_date: str, *, manual: bool = False) -> dict[str, Any]:
+    suffix = uuid.uuid4().hex[:10] if manual else scheduled_date.replace("-", "")
+    request_id = f"request-{schedule['schedule_id']}-{suffix}"
+    request_path = REQUESTS / f"{request_id}.json"
+    if request_path.is_symlink():
+        raise ValueError("定时任务请求路径不能是符号链接")
+    request_text = (
+        f"【每日定时任务：{schedule['name']}】\n"
+        f"计划日期：{scheduled_date}\n"
+        f"项目空间：{schedule['project_id']}\n"
+        f"{schedule['request']}"
+    )
+    if len(request_text) > 4000:
+        raise ValueError("定时任务展开后超过 4000 字")
+    record = {
+        "schema_version": "1.0",
+        "request_id": request_id,
+        "status": "requested",
+        "profile_id": "sales-director",
+        "service_id": schedule["service_id"],
+        "workflow_id": schedule["workflow_id"],
+        "request": request_text,
+        "created_at": now(),
+        "source": "local-workbench",
+        "project_id": schedule["project_id"],
+        "schedule_id": schedule["schedule_id"],
+        "scheduled_for": scheduled_date,
+    }
+    if request_path.is_file():
+        existing = load_json(request_path)
+        if existing.get("schedule_id") != schedule["schedule_id"] or existing.get("scheduled_for") != scheduled_date:
+            raise ValueError("定时任务请求 ID 冲突")
+        return existing
+    atomic_json(request_path, record)
+    return record
+
+
+def process_due_schedules(current: datetime | None = None) -> int:
+    current = current or datetime.now().astimezone()
+    date_text = current.date().isoformat()
+    time_text = current.strftime("%H:%M")
+    if not SCHEDULES.is_file():
+        return 0
+    enqueued = 0
+    try:
+        with exclusive_task(SCHEDULES):
+            schedules = schedule_records()
+            changed = False
+            for schedule in schedules:
+                if not schedule["enabled"] or schedule["last_enqueued_date"] == date_text or time_text < schedule["time_local"]:
+                    continue
+                _schedule_request(schedule, date_text)
+                schedule["last_enqueued_date"] = date_text
+                schedule["last_enqueued_at"] = now()
+                schedule["updated_at"] = now()
+                changed = True
+                enqueued += 1
+            if changed:
+                save_schedules(schedules)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        return 0
+    return enqueued
+
+
 def presentation_plan(task_id: str) -> dict[str, Any] | None:
     """Return a task-bound planning view without scanning arbitrary paths."""
     task_id = safe_id(task_id)
@@ -301,12 +581,13 @@ def task_summaries() -> list[dict[str, Any]]:
         try:
             task = load_json(path)
             summary = {key: task.get(key) for key in (
-                "task_id", "profile_id", "service_id", "workflow_id", "status", "current_stage",
+                "task_id", "project_id", "schedule_id", "scheduled_for", "profile_id", "service_id", "workflow_id", "status", "current_stage",
                 "current_node", "waiting_node", "completed_nodes", "version", "created_at", "updated_at",
                 "approval_request", "pending_write", "artifacts", "request"
             )}
             if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
                 continue
+            summary["project_id"] = summary.get("project_id") or DEFAULT_PROJECT_ID
             if isinstance(task.get("task_id"), str):
                 summary["presentation_plan"] = presentation_plan(task["task_id"])
             result.append(summary)
@@ -341,7 +622,7 @@ def data_summary() -> dict[str, Any]:
 
 
 def output_summary() -> list[dict[str, Any]]:
-    if not OUTPUTS.exists():
+    if OUTPUTS.is_symlink() or not OUTPUTS.is_dir():
         return []
     result: list[tuple[float, dict[str, Any]]] = []
     for index, item in enumerate(OUTPUTS.rglob("*")):
@@ -355,9 +636,166 @@ def output_summary() -> list[dict[str, Any]]:
             continue
         result.append((modified, {
             "name": item.name,
+            "path": item.relative_to(ROOT).as_posix(),
             "modified_at": datetime.fromtimestamp(modified).astimezone().isoformat(timespec="minutes"),
         }))
     return [entry for _, entry in sorted(result, key=lambda pair: pair[0], reverse=True)[:20]]
+
+
+def project_summaries(tasks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    tasks = tasks if tasks is not None else task_summaries()
+    files = project_files()
+    result: list[dict[str, Any]] = []
+    for project in project_records():
+        project_tasks = [task for task in tasks if task.get("project_id", DEFAULT_PROJECT_ID) == project["project_id"]]
+        artifacts = {
+            str(path)
+            for task in project_tasks
+            for path in (task.get("artifacts") if isinstance(task.get("artifacts"), list) else [])
+            if isinstance(path, str) and path.startswith("outputs/")
+        }
+        result.append({
+            **project,
+            "task_count": len(project_tasks),
+            "active_task_count": sum(task.get("status") in {"running", "requested", "waiting_approval"} for task in project_tasks),
+            "approval_count": sum(task.get("status") == "waiting_approval" for task in project_tasks),
+            "file_count": sum(item["project_id"] == project["project_id"] for item in files),
+            "artifact_count": len(artifacts),
+        })
+    return result
+
+
+def set_project_status(project_id: str, status: str) -> dict[str, Any]:
+    project_id = safe_id(project_id)
+    if project_id == DEFAULT_PROJECT_ID:
+        raise ValueError("默认项目空间不能归档")
+    if status not in {"active", "archived"}:
+        raise ValueError("项目状态无效")
+    with exclusive_task(PROJECTS):
+        projects = project_records()
+        project = next((item for item in projects if item["project_id"] == project_id), None)
+        if project is None:
+            raise ValueError("项目空间不存在")
+        project["status"] = status
+        project["updated_at"] = now()
+        if status == "archived" and SCHEDULES.is_file():
+            with exclusive_task(SCHEDULES):
+                schedules = schedule_records()
+                for schedule in schedules:
+                    if schedule["project_id"] == project_id:
+                        schedule["enabled"] = False
+                        schedule["updated_at"] = now()
+                save_schedules(schedules)
+        save_projects(projects)
+        return project
+
+
+def set_schedule_enabled(schedule_id: str, enabled: bool) -> dict[str, Any]:
+    schedule_id = safe_id(schedule_id)
+    if not isinstance(enabled, bool):
+        raise ValueError("定时任务状态无效")
+    with exclusive_task(SCHEDULES):
+        schedules = schedule_records()
+        schedule = next((item for item in schedules if item["schedule_id"] == schedule_id), None)
+        if schedule is None:
+            raise ValueError("每日定时任务不存在")
+        if enabled:
+            active_project(schedule["project_id"])
+        schedule["enabled"] = enabled
+        schedule["updated_at"] = now()
+        save_schedules(schedules)
+        return schedule
+
+
+def run_schedule_now(schedule_id: str) -> dict[str, Any]:
+    schedule_id = safe_id(schedule_id)
+    with exclusive_task(SCHEDULES):
+        schedules = schedule_records()
+        schedule = next((item for item in schedules if item["schedule_id"] == schedule_id), None)
+        if schedule is None:
+            raise ValueError("每日定时任务不存在")
+        active_project(schedule["project_id"])
+        record = _schedule_request(schedule, datetime.now().astimezone().date().isoformat(), manual=True)
+        schedule["last_enqueued_at"] = now()
+        schedule["updated_at"] = now()
+        save_schedules(schedules)
+        return record
+
+
+def _match_text(query: str, values: list[Any]) -> bool:
+    haystack = "\n".join(str(value) for value in values if value is not None).casefold()
+    return query.casefold() in haystack
+
+
+def _snippet(values: list[Any], maximum: int = 220) -> str:
+    text = " · ".join(str(value).strip() for value in values if str(value or "").strip())
+    return text[:maximum]
+
+
+def _csv_rows(relative: str, limit: int = 5000) -> list[dict[str, str]]:
+    path = ROOT / relative
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+        return []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return [dict(row) for _, row in zip(range(limit), csv.DictReader(handle))]
+    except (OSError, UnicodeError, csv.Error):
+        return []
+
+
+def local_search(payload: dict[str, Any]) -> dict[str, Any]:
+    query = str(payload.get("query", "")).strip()
+    if len(query) < 2 or len(query) > 100:
+        raise ValueError("搜索词必须为 2–100 字")
+    requested_scopes = payload.get("scopes", ["projects", "tasks", "knowledge", "sales", "files", "outputs"])
+    allowed_scopes = {"projects", "tasks", "knowledge", "sales", "files", "outputs"}
+    if not isinstance(requested_scopes, list) or not requested_scopes or any(scope not in allowed_scopes for scope in requested_scopes):
+        raise ValueError("搜索范围无效")
+    scopes = set(requested_scopes)
+    results: list[dict[str, Any]] = []
+
+    def add(kind: str, title: str, subtitle: str, snippet: str, reference: str, project_id: str = DEFAULT_PROJECT_ID) -> None:
+        if len(results) >= 60:
+            return
+        results.append({
+            "kind": kind, "title": title[:160], "subtitle": subtitle[:200],
+            "snippet": snippet[:400], "reference": reference[:300], "project_id": project_id,
+        })
+
+    if "projects" in scopes:
+        for project in project_records():
+            if _match_text(query, [project["name"], project["description"]]):
+                add("项目", project["name"], project["status"], project["description"], project["project_id"], project["project_id"])
+    if "tasks" in scopes:
+        for task in task_summaries():
+            if _match_text(query, [task.get("service_id"), task.get("request"), task.get("status")]):
+                add("任务", str(task.get("service_id") or "销售任务"), str(task.get("status") or ""), str(task.get("request") or ""), str(task.get("task_id") or ""), str(task.get("project_id") or DEFAULT_PROJECT_ID))
+    if "knowledge" in scopes:
+        for row in _csv_rows("data/knowledge/source-register.csv"):
+            fields = [row.get(key) for key in ("title", "publisher", "region", "topic", "notes", "status")]
+            if _match_text(query, fields):
+                add("知识", row.get("title") or "未命名来源", _snippet([row.get("publisher"), row.get("published_date"), row.get("status")]), _snippet([row.get("topic"), row.get("region"), row.get("notes")]), row.get("url") or row.get("source_id") or "")
+    if "sales" in scopes:
+        sources = [
+            ("data/sales/customers.csv", "客户", "customer_name", ("region", "sector", "owner", "stage", "health"), ("risks", "next_action"), "customer_id"),
+            ("data/sales/activities.csv", "跟进", "summary", ("occurred_at", "channel", "activity_type"), ("commitment", "next_action"), "activity_id"),
+            ("data/sales/resource-requests.csv", "资源", "request_summary", ("resource_type", "owner", "status", "deadline"), ("business_reason", "decision"), "request_id"),
+            ("data/sales/sales-assets.csv", "资料", "title", ("asset_type", "owner", "status"), ("use_case", "usage_feedback"), "asset_id"),
+        ]
+        for relative, kind, title_key, meta_keys, snippet_keys, id_key in sources:
+            for row in _csv_rows(relative):
+                fields = list(row.values())
+                if _match_text(query, fields):
+                    add(kind, row.get(title_key) or f"未命名{kind}", _snippet([row.get(key) for key in meta_keys]), _snippet([row.get(key) for key in snippet_keys]), row.get(id_key) or relative)
+    if "files" in scopes:
+        for item in project_files():
+            if _match_text(query, [item["name"], item["path"]]):
+                add("项目文件", item["name"], item["modified_at"], item["path"], item["path"], item["project_id"])
+    if "outputs" in scopes:
+        for item in output_summary():
+            if _match_text(query, [item["name"], item["path"]]):
+                add("产物", item["name"], item["modified_at"], item["path"], item["path"])
+    return {"query": query, "results": results, "truncated": len(results) >= 60}
 
 
 class ControlHandler(SimpleHTTPRequestHandler):
@@ -397,14 +835,72 @@ class ControlHandler(SimpleHTTPRequestHandler):
             raise ValueError("请求体必须是对象")
         return value
 
+    def upload_project_file(self) -> None:
+        project_id = safe_id(self.headers.get("X-Project-Id", ""))
+        active_project(project_id)
+        encoded_name = self.headers.get("X-File-Name", "")
+        filename = unquote(encoded_name).strip()
+        if (
+            not filename or len(filename) > 120 or Path(filename).name != filename or
+            filename in {".", ".."} or filename[-1] in {".", " "} or
+            re.search(r'[<>:"/\\|?*]', filename) is not None or
+            any(ord(character) < 32 for character in filename) or
+            Path(filename).suffix.lower() not in ALLOWED_UPLOAD_SUFFIXES
+        ):
+            raise ValueError("文件名无效；仅支持 PDF、Word、Excel、CSV、TXT、Markdown 和 PPTX")
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            raise ValueError("上传文件必须为 1 字节至 32 MiB")
+        projects_root = INPUTS / "projects"
+        if INPUTS.is_symlink() or projects_root.is_symlink():
+            raise ValueError("项目资料目录不能是符号链接")
+        project_root = projects_root / project_id
+        project_root.mkdir(parents=True, exist_ok=True)
+        inputs_root = INPUTS.resolve()
+        actual_root = project_root.resolve()
+        if not actual_root.is_relative_to(inputs_root) or project_root.is_symlink():
+            raise ValueError("项目资料目录越出受控 inputs 范围")
+        target = project_root / filename
+        if target.exists() or target.is_symlink():
+            self.send_json(HTTPStatus.CONFLICT, {"error": "同名文件已存在；请改名后上传，工作台不会覆盖原文件"})
+            return
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".upload-", suffix=".tmp", dir=project_root)
+        temporary = Path(temporary_name)
+        received = 0
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                while received < length:
+                    block = self.rfile.read(min(1024 * 1024, length - received))
+                    if not block:
+                        raise ValueError("上传连接提前中断")
+                    handle.write(block)
+                    received += len(block)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, target)
+        except FileExistsError:
+            self.send_json(HTTPStatus.CONFLICT, {"error": "同名文件已存在；请改名后上传，工作台不会覆盖原文件"})
+            return
+        finally:
+            temporary.unlink(missing_ok=True)
+        relative = target.relative_to(ROOT).as_posix()
+        self.send_json(HTTPStatus.CREATED, {
+            "name": filename, "path": relative, "project_id": project_id,
+            "size": received, "message": "资料已保存到项目空间；创建任务时可直接引用该路径。",
+        })
+
     def do_GET(self) -> None:
         if not self.local_host():
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         route = urlparse(self.path).path
         if route == "/api/bootstrap":
-            self.send_json(HTTPStatus.OK, {"profiles": profiles(), "workflows": workflows(), "tasks": task_summaries(),
+            process_due_schedules()
+            tasks = task_summaries()
+            self.send_json(HTTPStatus.OK, {"profiles": profiles(), "workflows": workflows(), "tasks": tasks,
                                            "data": data_summary(), "outputs": output_summary(),
+                                           "projects": project_summaries(tasks), "project_files": project_files(),
+                                           "schedules": schedule_records(),
                                            "model": model_settings_summary(ROOT), "request_token": SERVER_TOKEN})
             return
         if route == "/api/model-settings":
@@ -428,13 +924,31 @@ class ControlHandler(SimpleHTTPRequestHandler):
             if not secrets.compare_digest(self.headers.get("X-Director-Token", ""), SERVER_TOKEN):
                 self.send_json(HTTPStatus.FORBIDDEN, {"error": "工作台令牌无效，请刷新页面"})
                 return
+            route = urlparse(self.path).path
+            if route == "/api/project-files":
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+                    self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "项目资料上传只接受二进制文件"})
+                    return
+                self.upload_project_file()
+                return
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "只接受 JSON 请求"})
                 return
             payload = self.body()
-            route = urlparse(self.path).path
             if route == "/api/task-requests":
                 self.create_request(payload)
+            elif route == "/api/projects":
+                self.send_json(HTTPStatus.CREATED, create_project_record(payload))
+            elif route.startswith("/api/projects/") and route.endswith("/status"):
+                self.send_json(HTTPStatus.OK, set_project_status(route.split("/")[3], str(payload.get("status", ""))))
+            elif route == "/api/schedules":
+                self.send_json(HTTPStatus.CREATED, create_schedule_record(payload))
+            elif route.startswith("/api/schedules/") and route.endswith("/enabled"):
+                self.send_json(HTTPStatus.OK, set_schedule_enabled(route.split("/")[3], payload.get("enabled")))
+            elif route.startswith("/api/schedules/") and route.endswith("/run"):
+                self.send_json(HTTPStatus.CREATED, run_schedule_now(route.split("/")[3]))
+            elif route == "/api/search":
+                self.send_json(HTTPStatus.OK, local_search(payload))
             elif route == "/api/model-discovery":
                 self.discover_model_options(payload)
             elif route == "/api/model-settings":
@@ -447,8 +961,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.create_presentation_revision(route.split("/")[3], payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
-        except (ValueError, KeyError, json.JSONDecodeError) as error:
+        except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+        except RuntimeError as error:
+            self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
+        except OSError as error:
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"本地文件操作失败：{error}"})
 
     def discover_model_options(self, payload: dict[str, Any]) -> None:
         base_url = str(payload.get("base_url", ""))
@@ -494,12 +1012,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
     def create_request(self, payload: dict[str, Any]) -> None:
         profile_id = safe_id(str(payload.get("profile_id", "")))
         service_id = safe_id(str(payload.get("service_id", "")))
+        project_id = safe_id(str(payload.get("project_id", DEFAULT_PROJECT_ID)))
         request_text = str(payload.get("request", "")).strip()
         if not request_text or len(request_text) > 4000:
             raise ValueError("请填写 1 到 4000 字的任务说明")
         profile = next((item for item in profiles() if item["id"] == profile_id), None)
         if profile is None:
             raise ValueError("未知角色")
+        active_project(project_id)
         service = next((item for item in profile["services"] if item["id"] == service_id), None)
         if service is None:
             raise ValueError("该服务不属于当前角色")
@@ -508,7 +1028,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         request_id = f"request-{uuid.uuid4().hex[:12]}"
         record = {"schema_version": "1.0", "request_id": request_id, "status": "requested", "profile_id": profile_id,
                   "service_id": service_id, "workflow_id": service["workflow"], "request": request_text,
-                  "created_at": now(), "source": "local-workbench"}
+                  "created_at": now(), "source": "local-workbench", "project_id": project_id}
         atomic_json(REQUESTS / f"{request_id}.json", record)
         self.send_json(HTTPStatus.CREATED, record)
 
@@ -644,6 +1164,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     return
                 service_id = str(task.get("service_id", ""))
                 profile_id = str(task.get("profile_id", ""))
+                project_id = safe_id(str(task.get("project_id") or DEFAULT_PROJECT_ID))
                 workflow_id = str(task.get("workflow_id", ""))
                 if service_id != "presentation-studio" or workflow_id != "shared.presentation.studio":
                     self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务不是可修订的 PPT 工作室任务"})
@@ -663,6 +1184,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "schema_version": "1.0", "request_id": request_id, "status": "prepared",
                     "profile_id": profile_id, "service_id": service_id, "workflow_id": workflow_id,
                     "request": request_text, "created_at": now(), "source": "local-workbench",
+                    "project_id": project_id,
                     "request_kind": "presentation-plan-revision",
                     "revision_of_task_id": task_id, "source_plan_sha256": expected_plan_sha256,
                     "source_task_version": expected_version,
@@ -698,6 +1220,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
         })
 
 
+def schedule_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        process_due_schedules()
+        stop.wait(20)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="启动仅本机可访问的销售总监工作台")
     parser.add_argument("--port", type=int, default=8765)
@@ -708,11 +1236,17 @@ def main() -> None:
     if not (PROFILES / ACTIVE_PROFILE_ID / "profile.json").is_file():
         parser.error(f"未知发行版角色：{ACTIVE_PROFILE_ID}")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ControlHandler)
+    schedule_stop = threading.Event()
+    schedule_thread = threading.Thread(target=schedule_loop, args=(schedule_stop,), name="director-daily-scheduler", daemon=True)
+    schedule_thread.start()
     print(f"销售总监工作台已启动：http://127.0.0.1:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n销售总监工作台已停止")
+    finally:
+        schedule_stop.set()
+        server.server_close()
 
 
 if __name__ == "__main__":

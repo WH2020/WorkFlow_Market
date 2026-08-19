@@ -137,6 +137,42 @@ function writePresentationRevisionRequest(root: string): string {
   return requestId;
 }
 
+test("a scheduled sales workbench request preserves project and schedule provenance", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-scheduled-request-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const requestId = "request-scheduled-sales";
+  try {
+    const directory = join(root, ".pi", "director-runtime", "requests");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, `${requestId}.json`), JSON.stringify({
+      ...request(requestId, "sales-director"),
+      service_id: "industry-research", workflow_id: "shared.research.frontier-subagent",
+      project_id: "project-customer-a", schedule_id: "schedule-daily-a", scheduled_for: "2026-08-19",
+    }), "utf8");
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const task = JSON.parse(readFileSync(join(root, ".pi", "director-runtime", "tasks", `${requestId}.json`), "utf8")) as {
+      project_id?: string; schedule_id?: string; scheduled_for?: string;
+    };
+    assert.equal(task.project_id, "project-customer-a");
+    assert.equal(task.schedule_id, "schedule-daily-a");
+    assert.equal(task.scheduled_for, "2026-08-19");
+    const consumed = JSON.parse(readFileSync(join(directory, `${requestId}.json`), "utf8")) as { status: string };
+    assert.equal(consumed.status, "accepted");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a valid idle workbench request queues a command-context profile reload", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-profile-switch-"));
   const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
