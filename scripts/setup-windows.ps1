@@ -39,7 +39,17 @@ $CodexPrivatePathPattern = '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/]|[\\/
 function Update-ProcessPathFromSystem {
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $env:Path = @($UserPath, $MachinePath) -join [IO.Path]::PathSeparator
+    $Seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $Merged = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($SourcePath in @($env:Path, $UserPath, $MachinePath)) {
+        foreach ($Segment in ($SourcePath -split [Regex]::Escape([string][IO.Path]::PathSeparator))) {
+            $Normalized = $Segment.Trim()
+            if ($Normalized -and $Normalized -notmatch $CodexPrivatePathPattern -and $Seen.Add($Normalized)) {
+                $Merged.Add($Normalized)
+            }
+        }
+    }
+    $env:Path = $Merged -join [IO.Path]::PathSeparator
 }
 
 function Get-IndependentPnpm {

@@ -21,6 +21,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("--self-test", launcher_build)
         self.assertIn("BurntSushi.ripgrep.MSVC", windows)
         self.assertIn("sharkdp.fd", windows)
+        self.assertIn("$env:Path, $UserPath, $MachinePath", windows)
 
     def _project_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, Path]:
         temporary = tempfile.TemporaryDirectory()
