@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   readdirSync,
@@ -129,6 +130,47 @@ const SUBAGENT_AGENT_NAMES: Record<GovernedSubagentRole, string> = {
   "research-scout": "director-research-scout",
   "readonly-reviewer": "director-readonly-reviewer",
 };
+
+type AgentRuntimeLease = {
+  schema_version: "1.0";
+  pid: number;
+  nonce: string;
+  profile_id: string;
+  session_key: string;
+  task_id: string | null;
+  task_status: WorkflowTask["status"] | null;
+  heartbeat_at: string;
+};
+
+export function writeAgentRuntimeLease(projectRoot: string, lease: AgentRuntimeLease): string {
+  if (lease.pid !== process.pid || !/^[a-f0-9-]{36}$/u.test(lease.nonce)) {
+    throw new Error("Agent runtime lease identity is invalid");
+  }
+  const directory = resolve(projectRoot, ".pi", "director-runtime", "agent-leases");
+  if (existsSync(directory) && lstatSync(directory).isSymbolicLink()) {
+    throw new Error("Agent runtime lease directory cannot be a symbolic link");
+  }
+  mkdirSync(directory, { recursive: true });
+  const target = join(directory, `${lease.pid}.json`);
+  const temporary = join(directory, `.${lease.pid}.${lease.nonce}.tmp`);
+  try {
+    writeFileSync(temporary, `${JSON.stringify(lease, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    renameSync(temporary, target);
+    return target;
+  } finally {
+    if (existsSync(temporary)) rmSync(temporary, { force: true });
+  }
+}
+
+export function removeAgentRuntimeLease(path: string | undefined, nonce: string): void {
+  if (!path || !nonce || !existsSync(path) || lstatSync(path).isSymbolicLink()) return;
+  try {
+    const current = JSON.parse(readFileSync(path, "utf8")) as { nonce?: unknown };
+    if (current.nonce === nonce) rmSync(path, { force: true });
+  } catch {
+    // Never delete a lease whose ownership cannot be proven.
+  }
+}
 
 function loadProfiles(): Map<string, Profile> {
   const profiles = new Map<string, Profile>();
@@ -896,8 +938,31 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   let initialPoller: ReturnType<typeof setTimeout> | undefined;
   let requestPollBusy = false;
   let profileSwitchQueued = false;
+  let runtimeLeaseNonce = "";
+  let runtimeLeasePath: string | undefined;
   const pendingSubagentCalls = new Map<string, PendingGovernedSubagent>();
   const inFlightSubagentNodes = new Set<string>();
+
+  const updateRuntimeLease = () => {
+    if (!runtimeLeaseNonce || !sessionKey) return;
+    const task = activeTask && !isTerminal(activeTask) ? activeTask : undefined;
+    runtimeLeasePath = writeAgentRuntimeLease(projectRoot, {
+      schema_version: "1.0",
+      pid: process.pid,
+      nonce: runtimeLeaseNonce,
+      profile_id: activeProfile.id,
+      session_key: sessionKey,
+      task_id: task?.task_id ?? null,
+      task_status: task?.status ?? null,
+      heartbeat_at: new Date().toISOString(),
+    });
+  };
+
+  const clearRuntimeLease = () => {
+    removeAgentRuntimeLease(runtimeLeasePath, runtimeLeaseNonce);
+    runtimeLeasePath = undefined;
+    runtimeLeaseNonce = "";
+  };
 
   const workflowFor = (state: WorkflowTask): Workflow => {
     const workflow = workflows.get(state.workflow_id);
@@ -909,12 +974,14 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     taskStore.save(state);
     activeTask = state;
     pi.appendEntry("director-task-state", state);
+    updateRuntimeLease();
   };
 
   const persistTransition = (previous: WorkflowTask, next: WorkflowTask) => {
     taskStore.save(next, previous.version);
     activeTask = next;
     pi.appendEntry("director-task-state", next);
+    updateRuntimeLease();
   };
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow) => {
@@ -1064,21 +1131,49 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     return next;
   };
 
-  const pollRuntime = async (): Promise<void> => {
-    const previous = activeTask;
-    const synchronized = consumeExternalDecision();
-    if (
-      previous &&
-      synchronized &&
-      synchronized.version !== previous.version &&
-      synchronized.status === "running"
-    ) {
-      pi.sendUserMessage(
-        `本地工作台已批准受管任务 ${synchronized.task_id} 的人工关口。继续且仅执行当前阶段节点。`,
-        { deliverAs: "followUp" },
-      );
+  const consumeDetachedCancellations = (): void => {
+    if (!existsSync(taskStore.directory)) return;
+    for (const name of readdirSync(taskStore.directory).filter((entry) => entry.endsWith(".json")).sort().slice(0, 500)) {
+      const taskId = basename(name, ".json");
+      if (activeTask?.task_id === taskId) continue;
+      try {
+        const task = taskStore.load(taskId);
+        const request = task?.approval_request;
+        if (
+          !task ||
+          isTerminal(task) ||
+          request?.decision !== "cancel" ||
+          request.requested_by !== "local-workbench" ||
+          !profiles.has(task.profile_id)
+        ) continue;
+        const next = consumeApprovalRequest(task, workflowFor(task) as RuntimeWorkflow);
+        taskStore.save(next, task.version);
+      } catch {
+        // A concurrent transition or malformed task remains untouched for explicit recovery.
+      }
     }
-    await consumeWorkbenchRequest();
+  };
+
+  const pollRuntime = async (): Promise<void> => {
+    try {
+      const previous = activeTask;
+      const synchronized = consumeExternalDecision();
+      if (
+        previous &&
+        synchronized &&
+        synchronized.version !== previous.version &&
+        synchronized.status === "running"
+      ) {
+        pi.sendUserMessage(
+          `本地工作台已批准受管任务 ${synchronized.task_id} 的人工关口。继续且仅执行当前阶段节点。`,
+          { deliverAs: "followUp" },
+        );
+      }
+      consumeDetachedCancellations();
+      await consumeWorkbenchRequest();
+    } finally {
+      updateRuntimeLease();
+    }
   };
 
   const requireLogicalTool = (logicalTool: string): { state: WorkflowTask; workflow: Workflow } => {
@@ -1153,6 +1248,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", (_event, ctx) => {
+    clearRuntimeLease();
+    runtimeLeaseNonce = randomUUID();
     profileSwitchQueued = false;
     projectRoot = resolve(ctx.cwd);
     pendingSubagentCalls.clear();
@@ -1195,6 +1292,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       activeProfile = recoveredProfile;
       process.env.WORKFLOW_AGENT_PROFILE = recoveredProfile.id;
     }
+    updateRuntimeLease();
     const taskStatus = activeTask && !isTerminal(activeTask) ? `｜任务：${activeTask.status}` : "";
     ctx.ui.setStatus("vertical-workflow", `角色：${activeProfile.display_name}${taskStatus}`);
     if (requestPoller) clearInterval(requestPoller);
@@ -1221,6 +1319,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     }
     pendingSubagentCalls.clear();
     inFlightSubagentNodes.clear();
+    clearRuntimeLease();
   });
 
   pi.on("resources_discover", () => ({

@@ -102,6 +102,8 @@
     waiting_approval: "等待你的审批",
     running: "正在处理",
     requested: "等待 Pi 接手",
+    interrupted: "已中断",
+    cancelling: "正在取消",
     completed: "已完成",
     cancelled: "已取消",
     rejected: "已驳回",
@@ -127,6 +129,7 @@
   function currentProfile() { return model.profiles.find((profile) => profile.id === selectedProfile); }
   function currentService() { return currentProfile()?.services.find((service) => service.id === selectedService); }
   function serviceById(serviceId) { return currentProfile()?.services.find((service) => service.id === serviceId); }
+  function displayStatus(task) { return task.display_status || task.status || ""; }
   function projectById(projectId) { return model?.projects?.find((project) => project.project_id === projectId); }
   function selectedProjectRecord() { return projectById(selectedProject) || model?.projects?.[0]; }
   function isPresentationStudio(service = currentService()) { return service?.id === "presentation-studio" || service?.workflow === "shared.presentation.studio"; }
@@ -462,8 +465,9 @@
       const serviceName = currentProfile()?.services.find((service) => service.id === task.service_id)?.display_name;
       template.querySelector("strong").textContent = serviceName || task.service_id || "销售任务";
       const badge = template.querySelector(".status");
-      badge.textContent = label[task.status] || task.status || "未知";
-      if (Object.hasOwn(label, task.status)) badge.classList.add(task.status);
+      const effectiveStatus = displayStatus(task);
+      badge.textContent = label[effectiveStatus] || effectiveStatus || "未知";
+      if (Object.hasOwn(label, effectiveStatus)) badge.classList.add(effectiveStatus);
       const scheduleMeta = task.schedule_id ? ` · 每日任务 ${task.scheduled_for || ""}` : "";
       template.querySelector(".task-meta").textContent = `项目：${projectById(task.project_id)?.name || "日常工作"}${scheduleMeta} · 节点：${task.waiting_node || task.current_node || "等待 Pi 接手"} · 版本 ${task.version ?? "-"}`;
       template.querySelector(".task-request").textContent = task.request || "";
@@ -474,6 +478,7 @@
       if (task.status === "waiting_approval") addAction(actions, task, "approve", task.pending_write ? "批准并生成" : "确认并继续");
       if (task.status === "waiting_approval") addAction(actions, task, "reject", "驳回");
       if (task.status === "waiting_approval") addAction(actions, task, "cancel", "取消任务");
+      if (effectiveStatus === "interrupted") addAction(actions, task, "cancel", "取消中断任务");
       article.onclick = (event) => { if (!event.target.closest("button,summary,input,textarea,select")) renderWorkflow(task); };
       box.append(template);
       if (index === 0) renderWorkflow(task);
@@ -660,7 +665,8 @@
     const period = currentWeek();
     const inWeek = tasks.filter((task) => String(task.updated_at || task.created_at || "") >= period.start);
     const pending = tasks.filter((task) => task.status === "waiting_approval");
-    const running = tasks.filter((task) => ["requested", "running"].includes(task.status));
+    const running = tasks.filter((task) => displayStatus(task) === "running");
+    const queued = tasks.filter((task) => displayStatus(task) === "requested");
     const completed = inWeek.filter((task) => task.status === "completed");
     $("home-pending").textContent = pending.length;
     $("home-running").textContent = running.length;
@@ -668,7 +674,7 @@
     $("approval-total").textContent = pending.length;
     $("nav-task-count").textContent = pending.length ? String(pending.length) : "";
     const hour = new Date().getHours();
-    $("greeting").textContent = `${hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好"}，今天有 ${pending.length + running.length} 项需要处理`;
+    $("greeting").textContent = `${hour < 11 ? "早上好" : hour < 14 ? "中午好" : hour < 18 ? "下午好" : "晚上好"}，今天有 ${pending.length + running.length + queued.length} 项需要处理`;
     $("week-label").textContent = `${period.start} 至 ${period.end}`;
     const denominator = inWeek.length;
     const progress = denominator ? Math.round(completed.length / denominator * 100) : 0;
@@ -683,7 +689,8 @@
         const title = document.createElement("strong"); title.textContent = serviceById(task.service_id)?.display_name || "销售任务";
         const request = document.createElement("small"); request.textContent = String(task.request || "").replace(/\s+/gu, " ").slice(0, 60);
         copy.append(title, request);
-        const status = document.createElement("i"); status.className = `status ${task.status}`; status.textContent = label[task.status] || task.status;
+        const effectiveStatus = displayStatus(task);
+        const status = document.createElement("i"); status.className = `status ${effectiveStatus}`; status.textContent = label[effectiveStatus] || effectiveStatus;
         row.append(copy, status); row.onclick = () => { switchView("tasks"); renderWorkflow(task); }; return row;
       }));
     };

@@ -53,12 +53,14 @@ OUTPUTS = ROOT / "outputs"
 INPUTS = ROOT / "inputs"
 PROJECTS = RUNTIME / "projects.json"
 SCHEDULES = RUNTIME / "schedules.json"
+AGENT_LEASES = RUNTIME / "agent-leases"
 SERVER_TOKEN = secrets.token_urlsafe(32)
 ACTIVE_PROFILE_ID: str | None = None
 
 DEFAULT_PROJECT_ID = "project-default"
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".pptx"}
+AGENT_LEASE_FRESH_SECONDS = 15
 
 
 def now() -> str:
@@ -117,6 +119,63 @@ def safe_id(value: str) -> str:
     if not value or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in value):
         raise ValueError("标识符只能包含字母、数字、连字符和下划线")
     return value
+
+
+def live_agent_task_leases(reference: datetime | None = None) -> dict[str, dict[str, Any]]:
+    """Return fresh task-bound Pi leases without trusting stale process state."""
+    if AGENT_LEASES.is_symlink() or not AGENT_LEASES.is_dir():
+        return {}
+    current = (reference or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    result: dict[str, dict[str, Any]] = {}
+    for path in sorted(AGENT_LEASES.glob("*.json"))[:64]:
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
+                continue
+            lease = load_json(path)
+            pid = lease.get("pid")
+            nonce = lease.get("nonce")
+            task_id = lease.get("task_id")
+            profile_id = lease.get("profile_id")
+            session_key = lease.get("session_key")
+            heartbeat_at = lease.get("heartbeat_at")
+            if (
+                lease.get("schema_version") != "1.0" or not isinstance(pid, int) or pid <= 0 or
+                path.name != f"{pid}.json" or not isinstance(nonce, str) or
+                re.fullmatch(r"[a-f0-9-]{36}", nonce) is None or
+                not isinstance(task_id, str) or safe_id(task_id) != task_id or
+                not isinstance(profile_id, str) or safe_id(profile_id) != profile_id or
+                not isinstance(session_key, str) or not session_key or len(session_key) > 4096 or
+                not isinstance(heartbeat_at, str)
+            ):
+                continue
+            heartbeat = datetime.fromisoformat(heartbeat_at.replace("Z", "+00:00"))
+            if heartbeat.tzinfo is None:
+                continue
+            age = (current - heartbeat.astimezone(timezone.utc)).total_seconds()
+            if age < -5 or age > AGENT_LEASE_FRESH_SECONDS:
+                continue
+            result[task_id] = lease
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return result
+
+
+def task_display_state(task: dict[str, Any], leases: dict[str, dict[str, Any]] | None = None) -> tuple[str, str]:
+    status = str(task.get("status") or "")
+    if status == "requested":
+        return "requested", "queued"
+    if status != "running":
+        return status, status
+    approval = task.get("approval_request")
+    if isinstance(approval, dict) and approval.get("decision") == "cancel":
+        return "cancelling", "interrupted"
+    lease = (leases if leases is not None else live_agent_task_leases()).get(str(task.get("task_id") or ""))
+    if (
+        lease and lease.get("profile_id") == task.get("profile_id") and
+        lease.get("session_key") == task.get("session_key") and lease.get("task_status") == "running"
+    ):
+        return "running", "active"
+    return "interrupted", "interrupted"
 
 
 def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
@@ -576,6 +635,7 @@ def task_summaries() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     if not TASKS.exists():
         return result
+    leases = live_agent_task_leases()
     candidates = list(TASKS.glob("*.json"))[:500]
     for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True):
         try:
@@ -587,6 +647,7 @@ def task_summaries() -> list[dict[str, Any]]:
             )}
             if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
                 continue
+            summary["display_status"], summary["runtime_state"] = task_display_state(task, leases)
             summary["project_id"] = summary.get("project_id") or DEFAULT_PROJECT_ID
             if isinstance(task.get("task_id"), str):
                 summary["presentation_plan"] = presentation_plan(task["task_id"])
@@ -1058,10 +1119,15 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 if decision in {"approve", "reject"} and task.get("status") != "waiting_approval":
                     self.send_json(HTTPStatus.CONFLICT, {"error": "只有等待审批的任务可以批准或驳回"})
                     return
-                if decision == "cancel" and task.get("status") != "waiting_approval":
-                    self.send_json(HTTPStatus.CONFLICT, {"error": "工作台只在人工关口取消任务；运行中请在 Pi 使用 /director-cancel"})
-                    return
                 pending_write = task.get("pending_write")
+                if decision == "cancel":
+                    display_status, _runtime_state = task_display_state(task)
+                    if task.get("status") != "waiting_approval" and display_status != "interrupted":
+                        self.send_json(HTTPStatus.CONFLICT, {"error": "只有等待审批或已中断的任务可以从工作台取消"})
+                        return
+                    if isinstance(pending_write, dict) and pending_write.get("status") == "committing":
+                        self.send_json(HTTPStatus.CONFLICT, {"error": "任务正在提交写入，请先完成恢复，不能取消"})
+                        return
                 if decision == "approve" and isinstance(pending_write, dict) and pending_write.get("status") == "prepared":
                     if intent_id != pending_write.get("intent_id") or payload_sha256 != pending_write.get("payload_sha256"):
                         self.send_json(HTTPStatus.CONFLICT, {"error": "审批内容与当前冻结变更不一致，请刷新后重试"})

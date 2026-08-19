@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import verticalWorkflow, { selectWorkbenchRequest, validateRuntimeWorkflow } from "../pi/extensions/vertical-workflow.ts";
+import verticalWorkflow, {
+  removeAgentRuntimeLease,
+  selectWorkbenchRequest,
+  validateRuntimeWorkflow,
+  writeAgentRuntimeLease,
+} from "../pi/extensions/vertical-workflow.ts";
 import {
   completeLogicalTool,
   completeModelNode,
@@ -46,6 +51,31 @@ test("accepted workbench requests are never selected", () => {
   );
 });
 
+test("agent runtime lease is atomic and only its nonce owner can remove it", () => {
+  const root = mkdtempSync(join(tmpdir(), "director-agent-lease-"));
+  try {
+    const nonce = "a5a5a5a5-1111-4222-8333-a5a5a5a5a5a5";
+    const path = writeAgentRuntimeLease(root, {
+      schema_version: "1.0",
+      pid: process.pid,
+      nonce,
+      profile_id: "sales-director",
+      session_key: "session-a",
+      task_id: "task-a",
+      task_status: "running",
+      heartbeat_at: new Date().toISOString(),
+    });
+    const saved = JSON.parse(readFileSync(path, "utf8")) as { nonce: string; task_id: string };
+    assert.equal(saved.task_id, "task-a");
+    removeAgentRuntimeLease(path, "00000000-0000-4000-8000-000000000000");
+    assert.equal(existsSync(path), true);
+    removeAgentRuntimeLease(path, nonce);
+    assert.equal(existsSync(path), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("sales director edition exposes only sales and government skills", async () => {
   const root = mkdtempSync(join(tmpdir(), "sales-director-edition-"));
   const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
@@ -61,8 +91,13 @@ test("sales director edition exposes only sales and government skills", async ()
     assert.equal(resources.skillPaths.some((path) => path.includes("product-discovery")), false);
     await runtime.handlers.get("session_start")?.({}, runtime.context);
     await new Promise((resolve) => setTimeout(resolve, 30));
+    const leasePath = join(root, ".pi", "director-runtime", "agent-leases", `${process.pid}.json`);
+    const lease = JSON.parse(readFileSync(leasePath, "utf8")) as { profile_id: string; task_id: string | null };
+    assert.equal(lease.profile_id, "sales-director");
+    assert.equal(lease.task_id, null);
     assert.equal(runtime.messages.some((message) => message.includes("product-director")), false);
     await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+    assert.equal(existsSync(leasePath), false);
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
     else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
@@ -376,6 +411,64 @@ test("the runtime poll consumes a workbench approval and resumes the next stage"
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
     else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the runtime poll closes an interrupted task after a workbench cancellation request", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-detached-cancel-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const workflow: RuntimeWorkflow = {
+    id: "market.sales.pipeline-review",
+    nodes: [
+      { id: "load_accounts", type: "tool", tool: "sales.read", depends_on: [] },
+      { id: "analyze", type: "agent", depends_on: ["load_accounts"] },
+      { id: "confirm", type: "approval", depends_on: ["analyze"] },
+      { id: "update", type: "tool", tool: "sales.write", depends_on: ["confirm"] },
+      { id: "validate_updates", type: "validator", depends_on: ["update"] },
+    ],
+  };
+  try {
+    const task = createTask({
+      sessionKey: "ended-session.jsonl",
+      profileId: "sales-director",
+      serviceId: "sales-review",
+      workflow,
+      request: "review",
+      taskId: "task-interrupted",
+    });
+    const disk = {
+      ...task,
+      version: task.version + 1,
+      approval_request: {
+        decision: "cancel" as const,
+        requested_at: "2026-08-19T00:00:00.000Z",
+        requested_by: "local-workbench",
+        expected_version: task.version,
+      },
+    };
+    const taskDirectory = join(root, ".pi", "director-runtime", "tasks");
+    mkdirSync(taskDirectory, { recursive: true });
+    writeFileSync(join(taskDirectory, "task-interrupted.json"), JSON.stringify(disk), "utf8");
+
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const persisted = JSON.parse(readFileSync(join(taskDirectory, "task-interrupted.json"), "utf8")) as {
+      status: string;
+      approval_request?: unknown;
+    };
+    assert.equal(persisted.status, "cancelled");
+    assert.equal(persisted.approval_request, undefined);
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
     rmSync(root, { recursive: true, force: true });
   }
 });

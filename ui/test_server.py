@@ -2,7 +2,7 @@ import json
 import io
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
 from unittest.mock import patch
@@ -13,8 +13,8 @@ from ui import server
 class ControlCentreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_active_profile = (
-            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.ACTIVE_PROFILE_ID
+        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_active_profile = (
+            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.ACTIVE_PROFILE_ID
         )
         server.RUNTIME = Path(self.temporary.name)
         server.TASKS = server.RUNTIME / "tasks"
@@ -22,6 +22,7 @@ class ControlCentreTests(unittest.TestCase):
         server.PRESENTATION_PLANS = server.RUNTIME / "presentation-plans"
         server.PROJECTS = server.RUNTIME / "projects.json"
         server.SCHEDULES = server.RUNTIME / "schedules.json"
+        server.AGENT_LEASES = server.RUNTIME / "agent-leases"
         server.ACTIVE_PROFILE_ID = None
 
     def write_plan(self, task_id="task-ppt", **changes):
@@ -39,8 +40,8 @@ class ControlCentreTests(unittest.TestCase):
         return plan
 
     def tearDown(self):
-        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.ACTIVE_PROFILE_ID = (
-            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_active_profile
+        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.ACTIVE_PROFILE_ID = (
+            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_active_profile
         )
         self.temporary.cleanup()
 
@@ -98,6 +99,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="schedule-request"', html)
         self.assertIn('id="search-query"', html)
         self.assertIn('api("/api/search"', javascript)
+        self.assertIn("task.display_status", javascript)
+        self.assertIn('effectiveStatus === "interrupted"', javascript)
 
     def test_project_space_is_created_and_task_summaries_default_to_general_project(self):
         project = server.create_project_record({"name": "江苏客户项目", "description": "试点机会"})
@@ -107,6 +110,61 @@ class ControlCentreTests(unittest.TestCase):
             "task_id": "task-old", "profile_id": "sales-director", "status": "requested",
         })
         self.assertEqual(server.task_summaries()[0]["project_id"], server.DEFAULT_PROJECT_ID)
+
+    def test_running_task_requires_a_fresh_matching_agent_lease(self):
+        task = {
+            "task_id": "task-running", "profile_id": "sales-director", "status": "running",
+            "session_key": "session-a", "version": 1,
+        }
+        server.atomic_json(server.TASKS / "task-running.json", task)
+        summary = server.task_summaries()[0]
+        self.assertEqual(summary["display_status"], "interrupted")
+        self.assertEqual(summary["runtime_state"], "interrupted")
+
+        lease = {
+            "schema_version": "1.0", "pid": 1234, "nonce": "a" * 36,
+            "profile_id": "sales-director", "session_key": "session-a",
+            "task_id": "task-running", "task_status": "running",
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+        }
+        server.atomic_json(server.AGENT_LEASES / "1234.json", lease)
+        summary = server.task_summaries()[0]
+        self.assertEqual(summary["display_status"], "running")
+        self.assertEqual(summary["runtime_state"], "active")
+
+        lease["heartbeat_at"] = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        server.atomic_json(server.AGENT_LEASES / "1234.json", lease)
+        self.assertEqual(server.task_summaries()[0]["display_status"], "interrupted")
+
+    def test_workbench_can_request_cancellation_only_for_an_interrupted_task(self):
+        task = {
+            "task_id": "task-running", "profile_id": "sales-director", "service_id": "sales-review",
+            "workflow_id": "market.sales.review", "status": "running", "session_key": "session-a",
+            "version": 1, "audit": [],
+        }
+        path = server.TASKS / "task-running.json"
+        server.atomic_json(path, task)
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+
+        server.atomic_json(server.AGENT_LEASES / "1234.json", {
+            "schema_version": "1.0", "pid": 1234, "nonce": "b" * 36,
+            "profile_id": "sales-director", "session_key": "session-a",
+            "task_id": "task-running", "task_status": "running",
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+        })
+        handler.decide("task-running", {"decision": "cancel", "version": 1})
+        self.assertEqual(replies[-1][0], HTTPStatus.CONFLICT)
+        self.assertNotIn("approval_request", server.load_json(path))
+
+        (server.AGENT_LEASES / "1234.json").unlink()
+        handler.decide("task-running", {"decision": "cancel", "version": 1})
+        saved = server.load_json(path)
+        self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
+        self.assertEqual(saved["approval_request"]["decision"], "cancel")
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(server.task_summaries()[0]["display_status"], "cancelling")
 
     def test_daily_schedule_enqueues_at_most_once_per_day(self):
         service = {"id": "sales-review", "workflow": "market.sales.review"}
