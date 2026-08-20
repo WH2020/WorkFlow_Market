@@ -13,7 +13,6 @@ import socket
 import ssl
 import subprocess
 import tempfile
-import uuid
 from contextlib import contextmanager
 from ctypes import wintypes
 from datetime import date, datetime, timedelta, timezone
@@ -88,6 +87,20 @@ def _atomic_create(path: Path, value: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_replace(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -544,7 +557,7 @@ def search_reimbursement_mail(
 
 def import_reimbursement_mail(
     project_root: Path | str, inputs_root: Path, outputs_root: Path,
-    project_id: str, selected: Any,
+    selected: Any,
     *, connector: Callable[[dict[str, Any], str], Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(selected, list) or not 1 <= len(selected) <= MAX_SELECTED_MESSAGES:
@@ -563,15 +576,12 @@ def import_reimbursement_mail(
         seen_uids.add(uid)
         normalized.append((uid, message_key))
     config, password = _configured(project_root)
-    projects_root = inputs_root / "projects"
-    project_root_path = projects_root / project_id
-    if inputs_root.is_symlink() or projects_root.is_symlink() or project_root_path.is_symlink():
-        raise MailProviderError("项目资料目录不能是符号链接")
-    project_root_path.mkdir(parents=True, exist_ok=True)
-    controlled_inputs = inputs_root.resolve()
-    actual_project_root = project_root_path.resolve()
-    if not actual_project_root.is_relative_to(controlled_inputs) or actual_project_root == controlled_inputs:
-        raise MailProviderError("项目资料目录越出受控 inputs 范围")
+    batch_digest = hashlib.sha256("|".join(sorted(key for _, key in normalized)).encode("ascii")).hexdigest()
+    batch_id = f"reimbursement-{batch_digest[:16]}"
+    reimbursements_input = inputs_root / "reimbursements"
+    batch_root = reimbursements_input / batch_id
+    if inputs_root.is_symlink() or reimbursements_input.is_symlink() or batch_root.is_symlink():
+        raise MailProviderError("报销材料目录不能是符号链接")
     messages: list[dict[str, Any]] = []
     total_bytes = 0
     total_attachments = 0
@@ -599,6 +609,12 @@ def import_reimbursement_mail(
                 "received_at": _message_date(message), "attachments": attachments,
             })
 
+    batch_root.mkdir(parents=True, exist_ok=True)
+    controlled_inputs = inputs_root.resolve()
+    actual_batch_root = batch_root.resolve()
+    if not actual_batch_root.is_relative_to(controlled_inputs) or actual_batch_root == controlled_inputs:
+        raise MailProviderError("报销材料目录越出受控 inputs 范围")
+
     created: list[Path] = []
     materials: list[dict[str, Any]] = []
     try:
@@ -610,7 +626,7 @@ def import_reimbursement_mail(
                 base_name = f"mail-{message['message_key'][:10]}-{index}-{stem}{suffix}"
                 if len(base_name) > 120:
                     base_name = f"mail-{message['message_key'][:10]}-{index}-{stem[:50]}{suffix}"
-                target = project_root_path / base_name
+                target = batch_root / base_name
                 content = attachment["content"]
                 digest = hashlib.sha256(content).hexdigest()
                 if target.exists():
@@ -620,10 +636,13 @@ def import_reimbursement_mail(
                     _atomic_create(target, content)
                     created.append(target)
                 materials.append({
+                    "material_id": "material-" + hashlib.sha256(
+                        f"{message['message_key']}:{index}".encode("ascii")
+                    ).hexdigest()[:16],
                     "name": original, "stored_name": target.name,
                     "path": target.relative_to(Path(project_root).resolve()).as_posix(),
                     "size": len(content), "sha256": digest,
-                    "message_key": message["message_key"],
+                    "message_key": message["message_key"], "location": "reimbursement",
                 })
     except Exception:
         for path in created:
@@ -632,7 +651,7 @@ def import_reimbursement_mail(
 
     try:
         reimbursements_root = outputs_root / "reimbursements"
-        manifest_root = reimbursements_root / project_id
+        manifest_root = reimbursements_root / batch_id
         if outputs_root.is_symlink() or reimbursements_root.is_symlink() or manifest_root.is_symlink():
             raise MailProviderError("报销输出目录不能是符号链接")
         manifest_root.mkdir(parents=True, exist_ok=True)
@@ -650,15 +669,39 @@ def import_reimbursement_mail(
                 if item["message_key"] == message["message_key"]:
                     lines.append(f"  - {item['name']} → `{item['path']}`")
             lines.append("")
-        manifest = manifest_root / f"reimbursement-mail-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.md"
-        _atomic_create(manifest, ("\n".join(lines) + "\n").encode("utf-8"))
+        manifest = manifest_root / "material-list.md"
+        _atomic_replace(manifest, ("\n".join(lines) + "\n").encode("utf-8"))
+        record_path = Path(project_root).resolve() / ".pi" / "director-runtime" / "reimbursement-batches" / f"{batch_id}.json"
+        created_at = _now()
+        if record_path.is_file() and not record_path.is_symlink() and record_path.stat().st_size <= 256_000:
+            try:
+                previous = json.loads(record_path.read_text(encoding="utf-8"))
+                if isinstance(previous, dict) and isinstance(previous.get("created_at"), str):
+                    created_at = previous["created_at"]
+            except (OSError, json.JSONDecodeError):
+                pass
+        _atomic_json(record_path, {
+            "schema_version": "1.0", "batch_id": batch_id,
+            "created_at": created_at, "updated_at": _now(),
+            "mailbox": config["email_address"], "message_count": len(messages),
+            "manifest_path": manifest.relative_to(Path(project_root).resolve()).as_posix(),
+            "messages": [
+                {
+                    "message_key": message["message_key"], "subject": message["subject"],
+                    "sender": message["sender"], "received_at": message["received_at"],
+                }
+                for message in messages
+            ],
+            "materials": [{key: value for key, value in item.items() if key != "message_key"} for item in materials],
+        })
     except Exception:
         for path in created:
             path.unlink(missing_ok=True)
         raise
     return {
+        "batch_id": batch_id,
         "message_count": len(messages), "attachment_count": len(materials),
         "materials": [{key: value for key, value in item.items() if key != "message_key"} for item in materials],
         "manifest_path": manifest.relative_to(Path(project_root).resolve()).as_posix(),
-        "message": f"已从 {len(messages)} 封邮件导入 {len(materials)} 个报销附件，并生成材料清单。",
+        "message": f"已从 {len(messages)} 封邮件导入 {len(materials)} 个报销附件，保存在独立报销材料库。",
     }

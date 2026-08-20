@@ -156,12 +156,12 @@ class MailProviderTests(unittest.TestCase):
                 connector=lambda _config, _password: FakeMailbox({"101": self.raw}),
             )["messages"][0]
             first = import_reimbursement_mail(
-                self.root, self.root / "inputs", self.root / "outputs", "project-default",
+                self.root, self.root / "inputs", self.root / "outputs",
                 [{"uid": found["uid"], "message_key": found["message_key"]}],
                 connector=lambda _config, _password: FakeMailbox({"101": self.raw}),
             )
             second = import_reimbursement_mail(
-                self.root, self.root / "inputs", self.root / "outputs", "project-default",
+                self.root, self.root / "inputs", self.root / "outputs",
                 [{"uid": found["uid"], "message_key": found["message_key"]}],
                 connector=lambda _config, _password: FakeMailbox({"101": self.raw}),
             )
@@ -169,7 +169,10 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(material.read_bytes(), b"%PDF receipt")
         self.assertTrue((self.root / first["manifest_path"]).is_file())
         self.assertTrue((self.root / second["manifest_path"]).is_file())
-        self.assertEqual(len(list((self.root / "inputs" / "projects" / "project-default").glob("*.pdf"))), 1)
+        self.assertTrue(first["batch_id"].startswith("reimbursement-"))
+        self.assertEqual(len(list((self.root / "inputs" / "reimbursements" / first["batch_id"]).glob("*.pdf"))), 1)
+        record = self.root / ".pi" / "director-runtime" / "reimbursement-batches" / f"{first['batch_id']}.json"
+        self.assertTrue(record.is_file())
 
     def test_changed_message_is_rejected_before_any_material_is_written(self):
         self.configure()
@@ -181,12 +184,12 @@ class MailProviderTests(unittest.TestCase):
             )["messages"][0]
             with self.assertRaises(MailProviderError):
                 import_reimbursement_mail(
-                    self.root, self.root / "inputs", self.root / "outputs", "project-default",
+                    self.root, self.root / "inputs", self.root / "outputs",
                     [{"uid": "101", "message_key": found["message_key"]}],
                     connector=lambda _config, _password: FakeMailbox({"101": message_bytes("已被替换的邮件")}),
                 )
-        project_root = self.root / "inputs" / "projects" / "project-default"
-        self.assertFalse(project_root.exists() and any(project_root.iterdir()))
+        reimbursement_root = self.root / "inputs" / "reimbursements"
+        self.assertFalse(reimbursement_root.exists() and any(reimbursement_root.rglob("*")))
 
     def test_unsafe_attachment_is_not_exposed_or_imported(self):
         mixed = EmailMessage(policy=policy.default)
@@ -207,7 +210,7 @@ class MailProviderTests(unittest.TestCase):
                 connector=lambda _config, _password: FakeMailbox({"202": raw}),
             )["messages"][0]
             imported = import_reimbursement_mail(
-                self.root, self.root / "inputs", self.root / "outputs", "project-default",
+                self.root, self.root / "inputs", self.root / "outputs",
                 [{"uid": "202", "message_key": found["message_key"]}],
                 connector=lambda _config, _password: FakeMailbox({"202": raw}),
             )

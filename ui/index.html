@@ -105,7 +105,6 @@
             <div id="expense-mail-unconfigured" class="mail-empty-state" hidden><strong>还没有连接报销邮箱</strong><p>先在设置中填写邮箱客户端授权码或应用专用密码，通过只读验证后即可搜索。</p><button id="open-mail-settings" class="primary" type="button">前往连接邮箱</button></div>
             <div id="expense-mail-workspace">
               <div class="mail-search-grid">
-                <label>归属项目<select id="expense-project"></select></label>
                 <label>开始日期<input id="expense-mail-from" type="date"></label>
                 <label>结束日期<input id="expense-mail-to" type="date"></label>
                 <label class="span-3">关键词（可选）<input id="expense-mail-query" maxlength="100" placeholder="例如：发票、滴滴、酒店、某客户名称或发件人"></label>
@@ -115,6 +114,14 @@
               <div id="expense-mail-results" class="mail-result-list empty">尚未搜索邮箱。</div>
               <p class="safety-note">邮箱始终以只读方式连接；不会标记已读、移动、删除或发送邮件。单次最多导入 20 封邮件、50 个附件，合计不超过 50 兆字节。</p>
             </div>
+          </section>
+          <section class="panel reimbursement-library-panel">
+            <div class="panel-heading"><div><h2>报销材料库</h2><p class="hint">导入后的附件默认保存在这里，不占用项目空间；需要时再移动到具体项目。</p></div><button id="migrate-legacy-expenses" class="secondary" type="button" hidden>迁移旧材料</button></div>
+            <div id="reimbursement-batches" class="reimbursement-batch-list empty">还没有导入报销材料。</div>
+          </section>
+          <section class="panel reimbursement-trash-panel">
+            <div class="panel-heading"><div><h2>文件回收站</h2><p class="hint">项目文件和报销材料删除后会先保存在这里，可恢复到原位置。</p></div></div>
+            <div id="file-trash-list" class="file-list empty">回收站为空。</div>
           </section>
         </section>
 

@@ -30,6 +30,7 @@
   const taskWriteIntentState = {};
   const taskCardExpansion = new Map();
   const knowledgeCardExpansion = new Map();
+  const reimbursementBatchExpansion = new Map();
   const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
 
   function captureTaskComposerFocus() {
@@ -61,6 +62,8 @@
     cancelText = "取消",
     tone = "primary",
     detail = "",
+    inputValue = null,
+    inputLabel = "",
   }) {
     return new Promise((resolve) => {
       activeConfirmDismiss?.(false, true);
@@ -97,6 +100,14 @@
       messageNode.id = "app-confirm-message";
       messageNode.textContent = message;
       body.append(messageNode);
+      let editor = null;
+      if (inputValue !== null) {
+        const label = document.createElement("label");
+        label.className = "app-confirm-input";
+        const caption = document.createElement("strong"); caption.textContent = inputLabel || "填写内容";
+        editor = document.createElement("input"); editor.value = String(inputValue); editor.maxLength = 120;
+        label.append(caption, editor); body.append(label);
+      }
       if (detail) {
         const technical = document.createElement("details");
         technical.className = "app-confirm-detail";
@@ -131,7 +142,7 @@
           overlay.remove();
           document.body.classList.remove("modal-open");
           if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
-          resolve(Boolean(accepted));
+          resolve(inputValue !== null ? (accepted ? editor.value.trim() : null) : Boolean(accepted));
         };
         if (immediate) finish(); else window.setTimeout(finish, 140);
       };
@@ -150,7 +161,7 @@
         focusable[next].focus();
       });
       requestAnimationFrame(() => overlay.classList.add("visible"));
-      queueMicrotask(() => cancel.focus({ preventScroll: true }));
+      queueMicrotask(() => (editor || cancel).focus({ preventScroll: true }));
     });
   }
 
@@ -1702,7 +1713,6 @@
     setSelectOptions($("home-project"), options, selectedProject);
     setSelectOptions($("task-project"), options, selectedProject);
     setSelectOptions($("schedule-project"), options, selectedProject);
-    setSelectOptions($("expense-project"), options, $("expense-project").value || selectedProject);
   }
 
   function fileSize(bytes) {
@@ -1718,6 +1728,11 @@
     const meta = document.createElement("small"); meta.textContent = `${item.path} · ${item.modified_at}`;
     copy.append(title, meta);
     const size = document.createElement("span"); size.className = "file-size"; size.textContent = fileSize(item.size || 0);
+    const actions = document.createElement("div"); actions.className = "file-actions";
+    const open = document.createElement("button"); open.className = "secondary"; open.textContent = "打开";
+    open.onclick = () => openManagedFile(item);
+    const rename = document.createElement("button"); rename.className = "secondary"; rename.textContent = "重命名";
+    rename.onclick = () => renameManagedFile(item);
     const use = document.createElement("button"); use.className = "secondary"; use.textContent = item.name.toLowerCase().endsWith(".pdf") ? "电子文档入库" : "用于任务";
     use.onclick = () => {
       selectedProject = item.project_id;
@@ -1730,8 +1745,123 @@
         openService("office-document");
       }
     };
-    row.append(copy, size, use);
+    const remove = document.createElement("button"); remove.className = "danger-outline"; remove.textContent = "删除";
+    remove.onclick = () => trashManagedFile(item);
+    actions.append(open, rename, use, remove);
+    row.append(copy, size, actions);
     return row;
+  }
+
+  function managedFilePayload(item) {
+    return {
+      path: item.path, version: item.version,
+      ...(item.batch_id ? { batch_id: item.batch_id, material_id: item.material_id } : {}),
+    };
+  }
+
+  async function openManagedFile(item) {
+    try {
+      const response = await api("/api/files/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(managedFilePayload(item)) });
+      note(response.message);
+    } catch (error) { note(error.message, true); }
+  }
+
+  async function renameManagedFile(item) {
+    const name = await confirmAction({
+      title: "重命名文件", message: "文件类型不能改变；同名文件不会被覆盖。",
+      confirmText: "保存名称", inputLabel: "新文件名", inputValue: item.name,
+    });
+    if (!name || name === item.name) return;
+    try {
+      const response = await api("/api/files/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...managedFilePayload(item), name }) });
+      note(response.message); await load();
+    } catch (error) { note(error.message, true); }
+  }
+
+  async function trashManagedFile(item) {
+    if (!await confirmAction({ title: "将文件移入回收站？", message: `${item.name}\n删除后可从工具栏的文件回收站恢复。`, confirmText: "移入回收站", tone: "danger" })) return;
+    try {
+      let response = await api("/api/files/trash", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(managedFilePayload(item)) });
+      if (response.requires_confirmation) {
+        if (!await confirmAction({ title: "该文件仍被引用", message: response.message, detail: response.references.join("\n"), confirmText: "仍然移入回收站", tone: "danger" })) return;
+        response = await api("/api/files/trash", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...managedFilePayload(item), acknowledge_references: true }) });
+      }
+      note(response.message); await load();
+    } catch (error) { note(error.message, true); }
+  }
+
+  function reimbursementMaterialRow(item) {
+    const row = document.createElement("div"); row.className = "reimbursement-material-row";
+    const copy = document.createElement("div");
+    const title = document.createElement("strong"); title.textContent = item.name;
+    const location = item.location === "project" ? `已在项目：${projectById(item.project_id)?.name || item.project_id}` : "报销材料库";
+    const meta = document.createElement("small"); meta.textContent = `${location} · ${fileSize(item.size || 0)} · ${item.modified_at}`;
+    copy.append(title, meta);
+    const actions = document.createElement("div"); actions.className = "file-actions";
+    const open = document.createElement("button"); open.className = "secondary"; open.textContent = "打开"; open.onclick = () => openManagedFile(item);
+    const rename = document.createElement("button"); rename.className = "secondary"; rename.textContent = "重命名"; rename.onclick = () => renameManagedFile(item);
+    actions.append(open, rename);
+    if (item.location !== "project") {
+      const project = document.createElement("select");
+      (model.projects || []).filter((entry) => entry.status === "active").forEach((entry) => {
+        const option = document.createElement("option"); option.value = entry.project_id; option.textContent = entry.name; project.append(option);
+      });
+      project.value = selectedProject;
+      const move = document.createElement("button"); move.className = "secondary"; move.textContent = "移到项目";
+      move.onclick = async () => {
+        const destination = projectById(project.value);
+        if (!await confirmAction({ title: "移动到项目空间？", message: `${item.name}\n目标项目：${destination?.name || project.value}\n移动后报销材料库仍保留归档记录。`, confirmText: "移动文件" })) return;
+        try {
+          const response = await api("/api/reimbursements/move-to-project", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...managedFilePayload(item), project_id: project.value }) });
+          note(response.message); await load();
+        } catch (error) { note(error.message, true); }
+      };
+      actions.append(project, move);
+    }
+    const remove = document.createElement("button"); remove.className = "danger-outline"; remove.textContent = "删除"; remove.onclick = () => trashManagedFile(item);
+    actions.append(remove); row.append(copy, actions); return row;
+  }
+
+  function renderReimbursementLibrary() {
+    const library = model.reimbursements || { batches: [], trash: [], legacy_count: 0 };
+    const migrate = $("migrate-legacy-expenses");
+    migrate.hidden = !library.legacy_count;
+    migrate.textContent = library.legacy_count ? `迁移旧材料（${library.legacy_count}）` : "迁移旧材料";
+    const box = $("reimbursement-batches");
+    box.classList.toggle("empty", !library.batches.length);
+    if (!library.batches.length) { box.replaceChildren(); box.textContent = "还没有导入报销材料。"; }
+    else box.replaceChildren(...library.batches.map((batch) => {
+      const card = document.createElement("details"); card.className = "reimbursement-batch";
+      card.open = reimbursementBatchExpansion.get(batch.batch_id) ?? true;
+      card.addEventListener("toggle", () => reimbursementBatchExpansion.set(batch.batch_id, card.open));
+      const summary = document.createElement("summary");
+      const copy = document.createElement("div");
+      const title = document.createElement("strong"); title.textContent = `${batch.material_count} 个材料`;
+      const meta = document.createElement("small"); meta.textContent = `${batch.mailbox || "邮箱导入"} · ${batch.updated_at || batch.created_at}`;
+      copy.append(title, meta);
+      const remove = document.createElement("button"); remove.className = "danger-outline"; remove.type = "button"; remove.textContent = "删除整批";
+      remove.onclick = async (event) => {
+        event.preventDefault(); event.stopPropagation();
+        if (!await confirmAction({ title: "删除整批报销材料？", message: `本批共 ${batch.material_count} 个材料，将整体移入回收站并可恢复。`, confirmText: "删除整批", tone: "danger" })) return;
+        try { const response = await api(`/api/reimbursements/batches/${encodeURIComponent(batch.batch_id)}/trash`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); note(response.message); await load(); }
+        catch (error) { note(error.message, true); }
+      };
+      summary.append(copy, remove);
+      const materials = document.createElement("div"); materials.className = "reimbursement-material-list";
+      if (batch.materials.length) materials.append(...batch.materials.map(reimbursementMaterialRow));
+      else { materials.classList.add("empty"); materials.textContent = "本批次当前没有材料。"; }
+      card.append(summary, materials); return card;
+    }));
+    const trash = $("file-trash-list");
+    trash.classList.toggle("empty", !library.trash.length);
+    if (!library.trash.length) { trash.replaceChildren(); trash.textContent = "回收站为空。"; }
+    else trash.replaceChildren(...library.trash.map((entry) => {
+      const name = entry.kind === "reimbursement-batch" ? `报销批次（${entry.material_count || 0} 个材料）` : (entry.stored_name || "文件");
+      const row = summaryRow("file-row", name, `删除于 ${entry.trashed_at}`);
+      const restore = document.createElement("button"); restore.className = "secondary"; restore.textContent = "恢复";
+      restore.onclick = async () => { try { const response = await api(`/api/file-trash/${encodeURIComponent(entry.trash_id)}/restore`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); note(response.message); await load(); } catch (error) { note(error.message, true); } };
+      row.append(restore); return row;
+    }));
   }
 
   function projectCard(project) {
@@ -1863,7 +1993,7 @@
 
   function render() {
     renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
-    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); switchView(currentView);
+    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); switchView(currentView);
   }
 
   async function createTask(request) {
@@ -2160,11 +2290,25 @@
     try {
       const response = await api("/api/reimbursements/mail/import", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project_id: $("expense-project").value, selected }),
+        body: JSON.stringify({ selected }),
       });
-      note(response.message); reimbursementMailMessages = []; renderReimbursementMailResults([]); await load(); switchView("projects");
+      note(response.message); reimbursementMailMessages = []; renderReimbursementMailResults([]); await load(); switchView("tools");
     } catch (error) { note(error.message, true); }
     finally { button.disabled = false; updateReimbursementSelection(); }
+  };
+  $("migrate-legacy-expenses").onclick = async () => {
+    const count = model.reimbursements?.legacy_count || 0;
+    if (!count || !await confirmAction({
+      title: "迁移旧报销材料？",
+      message: `将复制并校验项目空间中的 ${count} 个旧报销附件，放入独立材料库。项目中的原件会继续保留。`,
+      confirmText: "开始迁移",
+    })) return;
+    const button = $("migrate-legacy-expenses"); button.disabled = true;
+    try {
+      const response = await api("/api/reimbursements/migrate-legacy", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      note(response.message); await load();
+    } catch (error) { note(error.message, true); }
+    finally { button.disabled = false; }
   };
 
   const schedulePresets = {

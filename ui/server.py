@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,8 @@ TASK_EVENTS = RUNTIME / "task-events"
 TASK_MESSAGES = RUNTIME / "task-messages"
 DESKTOP_SETTINGS = RUNTIME / "desktop-settings.json"
 AI_CORE_LOG = RUNTIME / "ai-core.log"
+REIMBURSEMENT_BATCHES = RUNTIME / "reimbursement-batches"
+FILE_TRASH = RUNTIME / "file-trash"
 SERVER_TOKEN = secrets.token_urlsafe(32)
 ACTIVE_PROFILE_ID: str | None = None
 
@@ -884,29 +887,602 @@ def active_project(project_id: str) -> dict[str, Any]:
 
 def project_files() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    if INPUTS.is_symlink() or not INPUTS.is_dir():
+    projects_root = INPUTS / "projects"
+    if INPUTS.is_symlink() or projects_root.is_symlink() or not projects_root.is_dir():
         return result
     projects = {item["project_id"] for item in project_records()}
-    for index, item in enumerate(INPUTS.rglob("*")):
+    reimbursement_links: dict[str, dict[str, str]] = {}
+    ambiguous_reimbursement_links: set[str] = set()
+    if REIMBURSEMENT_BATCHES.is_dir() and not REIMBURSEMENT_BATCHES.is_symlink():
+        for record_path in REIMBURSEMENT_BATCHES.glob("*.json"):
+            try:
+                if record_path.is_symlink() or not record_path.is_file() or record_path.stat().st_size > 256_000:
+                    continue
+                batch = load_json(record_path)
+                batch_id = safe_id(str(batch.get("batch_id") or ""))
+                if batch.get("schema_version") != "1.0" or batch_id != record_path.stem:
+                    continue
+                for material in batch.get("materials", []):
+                    if isinstance(material, dict) and material.get("location") == "project":
+                        relative = str(material.get("path") or "")
+                        material_id = safe_id(str(material.get("material_id") or ""))
+                        link = {"batch_id": batch_id, "material_id": material_id}
+                        if relative in reimbursement_links and reimbursement_links[relative] != link:
+                            ambiguous_reimbursement_links.add(relative)
+                            reimbursement_links.pop(relative, None)
+                        elif relative not in ambiguous_reimbursement_links:
+                            reimbursement_links[relative] = link
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+    for index, item in enumerate(projects_root.rglob("*")):
         if index >= 2000:
             break
         try:
             if item.name.startswith(".") or item.suffix.lower() not in ALLOWED_UPLOAD_SUFFIXES or item.is_symlink() or not item.is_file():
                 continue
             relative = item.relative_to(ROOT).as_posix()
-            parts = item.relative_to(INPUTS).parts
-            project_id = parts[1] if len(parts) >= 3 and parts[0] == "projects" and parts[1] in projects else DEFAULT_PROJECT_ID
+            parts = item.relative_to(projects_root).parts
+            if len(parts) != 2 or parts[0] not in projects:
+                continue
+            project_id = parts[0]
             stat = item.stat()
         except (OSError, ValueError):
             continue
-        result.append({
+        entry = {
             "name": item.name,
             "path": relative,
             "project_id": project_id,
             "size": stat.st_size,
             "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="minutes"),
-        })
+            "version": f"{stat.st_mtime_ns}:{stat.st_size}",
+            "kind": "project",
+        }
+        if relative in reimbursement_links:
+            entry.update(reimbursement_links[relative])
+            entry["kind"] = "reimbursement"
+        result.append(entry)
     return sorted(result, key=lambda entry: entry["modified_at"], reverse=True)[:200]
+
+
+def _managed_file_name(value: Any, suffix: str) -> str:
+    name = str(value or "").strip()
+    if (
+        not name or len(name) > 120 or Path(name).name != name or name in {".", ".."} or
+        name[-1] in {".", " "} or re.search(r'[<>:"/\\|?*]', name) is not None or
+        any(ord(character) < 32 for character in name)
+    ):
+        raise ValueError("文件名无效")
+    if Path(name).suffix.lower() != suffix.lower():
+        raise ValueError("重命名不能改变文件类型")
+    return name
+
+
+def _file_version(path: Path) -> str:
+    metadata = path.stat()
+    return f"{metadata.st_mtime_ns}:{metadata.st_size}"
+
+
+def _open_local_file(path: Path) -> None:
+    try:
+        if sys.platform == "win32":
+            startfile = getattr(os, "startfile", None)
+            if startfile is None:
+                raise OSError("Windows 文件打开功能不可用")
+            startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             close_fds=True, start_new_session=True)
+        else:
+            subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             close_fds=True, start_new_session=True)
+    except OSError as error:
+        raise RuntimeError(f"无法使用系统默认应用打开文件：{error}") from error
+
+
+def _safe_relative_file(relative: str, allowed_prefixes: tuple[str, ...]) -> Path:
+    if not relative or len(relative) > 600 or "\\" in relative:
+        raise ValueError("文件路径无效")
+    candidate = ROOT / Path(relative)
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError("文件不存在或已发生变化")
+    resolved_root = ROOT.resolve()
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(resolved_root) or not any(relative.startswith(prefix) for prefix in allowed_prefixes):
+        raise ValueError("文件不属于受控资料库")
+    return candidate
+
+
+def _safe_relative_destination(relative: str, allowed_prefixes: tuple[str, ...]) -> Path:
+    parts = Path(relative).parts
+    if (
+        not relative or len(relative) > 600 or "\\" in relative or not parts or
+        any(part in {"", ".", ".."} for part in parts) or
+        not any(relative.startswith(prefix) for prefix in allowed_prefixes)
+    ):
+        raise ValueError("目标文件路径无效")
+    target = ROOT / Path(relative)
+    resolved_root = ROOT.resolve()
+    resolved = target.resolve(strict=False)
+    if not resolved.is_relative_to(resolved_root) or resolved == resolved_root:
+        raise ValueError("目标文件路径越出应用范围")
+    return target
+
+
+def _controlled_trash_root() -> Path:
+    if RUNTIME.is_symlink() or FILE_TRASH.is_symlink():
+        raise ValueError("文件回收站不能是符号链接")
+    FILE_TRASH.mkdir(parents=True, exist_ok=True)
+    runtime_root = RUNTIME.resolve()
+    resolved = FILE_TRASH.resolve()
+    if not resolved.is_relative_to(runtime_root) or resolved == runtime_root:
+        raise ValueError("文件回收站越出受控运行目录")
+    return FILE_TRASH
+
+
+def _reimbursement_record(batch_id: str) -> tuple[Path, dict[str, Any]]:
+    batch_id = safe_id(batch_id)
+    path = REIMBURSEMENT_BATCHES / f"{batch_id}.json"
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 256_000:
+        raise ValueError("报销批次不存在")
+    record = load_json(path)
+    if record.get("schema_version") != "1.0" or record.get("batch_id") != batch_id or not isinstance(record.get("materials"), list):
+        raise ValueError("报销批次记录无效")
+    return path, record
+
+
+def _write_reimbursement_manifest(record: dict[str, Any]) -> None:
+    relative = str(record.get("manifest_path") or "")
+    if not relative.startswith(f"outputs/reimbursements/{record['batch_id']}/"):
+        raise ValueError("报销清单路径无效")
+    target = ROOT / relative
+    if target.is_symlink():
+        raise ValueError("报销清单不能是符号链接")
+    lines = ["# 邮箱报销材料清单", "", f"更新时间：{now()}", f"邮箱：{record.get('mailbox') or '未知'}", ""]
+    for message in record.get("messages", []):
+        if not isinstance(message, dict):
+            continue
+        lines.extend([f"## {message.get('subject') or '无主题邮件'}", f"- 发件人：{message.get('sender') or '未知'}",
+                      f"- 邮件时间：{message.get('received_at') or '未知'}", ""])
+    lines.append("## 当前材料")
+    materials = [item for item in record["materials"] if isinstance(item, dict)]
+    if materials:
+        lines.extend(f"- {item.get('name') or item.get('stored_name')} → `{item.get('path')}`" for item in materials)
+    else:
+        lines.append("- 本批次当前没有材料。")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".material-list-", suffix=".tmp", dir=target.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def reimbursement_batches() -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if REIMBURSEMENT_BATCHES.is_symlink() or not REIMBURSEMENT_BATCHES.is_dir():
+        return result
+    for path in sorted(REIMBURSEMENT_BATCHES.glob("*.json"))[:200]:
+        try:
+            batch_id = safe_id(path.stem)
+            _, record = _reimbursement_record(batch_id)
+            materials = []
+            for raw in record["materials"][:200]:
+                if not isinstance(raw, dict):
+                    continue
+                relative = str(raw.get("path") or "")
+                allowed = (f"inputs/reimbursements/{batch_id}/", "inputs/projects/")
+                target = _safe_relative_file(relative, allowed)
+                metadata = target.stat()
+                materials.append({
+                    **{key: raw.get(key) for key in ("material_id", "name", "stored_name", "path", "size", "sha256", "location", "project_id")},
+                    "size": metadata.st_size, "version": f"{metadata.st_mtime_ns}:{metadata.st_size}",
+                    "modified_at": datetime.fromtimestamp(metadata.st_mtime).astimezone().isoformat(timespec="minutes"),
+                    "batch_id": batch_id, "kind": "reimbursement",
+                })
+            result.append({
+                "batch_id": batch_id, "created_at": str(record.get("created_at") or "")[:40],
+                "updated_at": str(record.get("updated_at") or "")[:40],
+                "mailbox": str(record.get("mailbox") or "")[:254],
+                "message_count": int(record.get("message_count") or 0),
+                "manifest_path": str(record.get("manifest_path") or "")[:600],
+                "materials": materials, "material_count": len(materials),
+            })
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return sorted(result, key=lambda item: item["updated_at"], reverse=True)
+
+
+def _managed_file(payload: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    relative = str(payload.get("path") or "")
+    batch_id = str(payload.get("batch_id") or "")
+    material_id = str(payload.get("material_id") or "")
+    reimbursement_records = [item for batch in reimbursement_batches() for item in batch["materials"]]
+    if batch_id or material_id:
+        record = next((item for item in reimbursement_records
+                       if item.get("path") == relative and item.get("batch_id") == batch_id and
+                       item.get("material_id") == material_id), None)
+    else:
+        record = next((item for item in project_files() if item.get("path") == relative), None)
+    if record is None:
+        raise ValueError("文件不属于当前项目或报销材料库")
+    path = _safe_relative_file(relative, ("inputs/projects/", "inputs/reimbursements/"))
+    expected = str(payload.get("version") or "")
+    if not expected or expected != _file_version(path):
+        raise RuntimeError("文件已发生变化，请刷新后重试")
+    return path, record
+
+
+def open_managed_file(payload: dict[str, Any]) -> dict[str, Any]:
+    path, record = _managed_file(payload)
+    _open_local_file(path)
+    return {"message": f"已打开 {record['name']}。", "path": record["path"]}
+
+
+def rename_managed_file(payload: dict[str, Any]) -> dict[str, Any]:
+    path, record = _managed_file(payload)
+    name = _managed_file_name(payload.get("name"), path.suffix)
+    target = path.with_name(name)
+    if target.exists() or target.is_symlink():
+        raise RuntimeError("同名文件已存在，请换一个名称")
+    path.rename(target)
+    new_relative = target.relative_to(ROOT).as_posix()
+    if record.get("kind") == "reimbursement":
+        record_path, batch = _reimbursement_record(str(record["batch_id"]))
+        previous_batch = json.loads(json.dumps(batch, ensure_ascii=False))
+        material = next((item for item in batch["materials"] if item.get("material_id") == record.get("material_id")), None)
+        if material is None or material.get("path") != record.get("path"):
+            target.rename(path)
+            raise RuntimeError("报销材料记录已变化，请刷新后重试")
+        material.update({"name": name, "stored_name": name, "path": new_relative})
+        batch["updated_at"] = now()
+        try:
+            atomic_json(record_path, batch)
+            _write_reimbursement_manifest(batch)
+        except Exception:
+            if target.exists() and not path.exists():
+                target.rename(path)
+            atomic_json(record_path, previous_batch)
+            _write_reimbursement_manifest(previous_batch)
+            raise
+    return {"message": f"已重命名为 {name}。", "path": new_relative}
+
+
+def move_reimbursement_to_project(payload: dict[str, Any]) -> dict[str, Any]:
+    source, record = _managed_file(payload)
+    if record.get("kind") != "reimbursement" or record.get("location") == "project":
+        raise ValueError("只能移动报销材料库中的文件")
+    project_id = safe_id(str(payload.get("project_id") or ""))
+    active_project(project_id)
+    projects_root = INPUTS / "projects"
+    if INPUTS.is_symlink() or projects_root.is_symlink():
+        raise ValueError("项目资料目录不能是符号链接")
+    project_root = projects_root / project_id
+    project_root.mkdir(parents=True, exist_ok=True)
+    if project_root.is_symlink() or project_root.resolve().parent != projects_root.resolve():
+        raise ValueError("项目资料目录越出受控 inputs 范围")
+    name = _managed_file_name(record.get("name") or record.get("stored_name"), source.suffix)
+    target = project_root / name
+    if target.exists() or target.is_symlink():
+        raise RuntimeError("项目中已有同名文件，请先重命名材料")
+    os.link(source, target)
+    try:
+        if hashlib.sha256(target.read_bytes()).hexdigest() != str(record.get("sha256") or ""):
+            raise RuntimeError("移动后的文件校验失败")
+        record_path, batch = _reimbursement_record(str(record["batch_id"]))
+        previous_batch = json.loads(json.dumps(batch, ensure_ascii=False))
+        material = next((item for item in batch["materials"] if item.get("material_id") == record.get("material_id")), None)
+        if material is None or material.get("path") != record.get("path"):
+            raise RuntimeError("报销材料记录已变化，请刷新后重试")
+        material.update({"path": target.relative_to(ROOT).as_posix(), "stored_name": name,
+                         "location": "project", "project_id": project_id})
+        batch["updated_at"] = now()
+        atomic_json(record_path, batch)
+        _write_reimbursement_manifest(batch)
+        source.unlink()
+    except Exception:
+        target.unlink(missing_ok=True)
+        if "record_path" in locals() and "previous_batch" in locals():
+            atomic_json(record_path, previous_batch)
+            _write_reimbursement_manifest(previous_batch)
+        raise
+    return {"message": f"已将 {name} 移动到项目空间。", "path": target.relative_to(ROOT).as_posix()}
+
+
+def _file_references(relative: str) -> list[str]:
+    references: list[str] = []
+    if TASKS.is_dir() and not TASKS.is_symlink():
+        for path in list(TASKS.glob("*.json"))[:500]:
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_000_000:
+                    continue
+                task = load_json(path)
+                if relative in json.dumps(task, ensure_ascii=False):
+                    references.append(f"任务：{task.get('task_id') or path.stem}")
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+    for row in _csv_rows("data/knowledge/source-register.csv", 5000):
+        if relative in "\n".join(str(value or "") for value in row.values()):
+            references.append(f"知识：{row.get('title') or row.get('source_id') or '未命名记录'}")
+    return references[:20]
+
+
+def trash_managed_file(payload: dict[str, Any]) -> dict[str, Any]:
+    source, record = _managed_file(payload)
+    references = _file_references(record["path"])
+    if references and payload.get("acknowledge_references") is not True:
+        return {"requires_confirmation": True, "references": references,
+                "message": "该文件已被任务或知识记录引用，移入回收站后原路径会失效。"}
+    trash_id = f"trash-{uuid.uuid4().hex[:16]}"
+    destination_root = _controlled_trash_root() / trash_id
+    destination_root.mkdir(parents=True, exist_ok=False)
+    destination = destination_root / source.name
+    source.replace(destination)
+    trash_record = {
+        "schema_version": "1.0", "trash_id": trash_id, "kind": "file",
+        "original_path": record["path"], "stored_name": source.name,
+        "trashed_at": now(), "references": references,
+        "reimbursement": None,
+    }
+    previous_batch = None
+    try:
+        if record.get("kind") == "reimbursement":
+            record_path, batch = _reimbursement_record(str(record["batch_id"]))
+            previous_batch = json.loads(json.dumps(batch, ensure_ascii=False))
+            index = next((index for index, item in enumerate(batch["materials"])
+                          if item.get("material_id") == record.get("material_id") and item.get("path") == record.get("path")), None)
+            if index is None:
+                raise RuntimeError("报销材料记录已变化，请刷新后重试")
+            trash_record["reimbursement"] = {"batch_id": record["batch_id"], "material": batch["materials"][index]}
+            del batch["materials"][index]
+            batch["updated_at"] = now()
+        atomic_json(destination_root / "record.json", trash_record)
+        if record.get("kind") == "reimbursement":
+            atomic_json(record_path, batch)
+            _write_reimbursement_manifest(batch)
+    except Exception:
+        if previous_batch is not None:
+            atomic_json(record_path, previous_batch)
+            _write_reimbursement_manifest(previous_batch)
+        if destination.exists() and not source.exists():
+            destination.replace(source)
+        shutil.rmtree(destination_root, ignore_errors=True)
+        raise
+    return {"message": f"已将 {record['name']} 移入回收站。", "trash_id": trash_id}
+
+
+def trash_reimbursement_batch(batch_id: str) -> dict[str, Any]:
+    record_path, record = _reimbursement_record(batch_id)
+    trash_id = f"trash-{uuid.uuid4().hex[:16]}"
+    destination = _controlled_trash_root() / trash_id
+    destination.mkdir(parents=True, exist_ok=False)
+    manifest_root = OUTPUTS / "reimbursements" / batch_id
+    entries: list[dict[str, str]] = []
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for material in record["materials"]:
+            if not isinstance(material, dict):
+                raise ValueError("报销批次材料记录无效")
+            relative = str(material.get("path") or "")
+            source = _safe_relative_file(relative, (f"inputs/reimbursements/{batch_id}/", "inputs/projects/"))
+            material_id = safe_id(str(material.get("material_id") or ""))
+            stored = destination / "files" / material_id / source.name
+            stored.parent.mkdir(parents=True, exist_ok=False)
+            source.replace(stored)
+            moved.append((stored, source))
+            entries.append({"original_path": relative, "stored_path": stored.relative_to(destination).as_posix()})
+        if manifest_root.is_dir() and not manifest_root.is_symlink():
+            manifest_root.replace(destination / "manifest")
+        record_path.replace(destination / "batch.json")
+    except Exception:
+        for stored, source in reversed(moved):
+            source.parent.mkdir(parents=True, exist_ok=True)
+            if stored.exists() and not source.exists():
+                stored.replace(source)
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    input_root = INPUTS / "reimbursements" / batch_id
+    try:
+        input_root.rmdir()
+    except OSError:
+        pass
+    try:
+        atomic_json(destination / "record.json", {
+            "schema_version": "1.0", "trash_id": trash_id, "kind": "reimbursement-batch",
+            "batch_id": batch_id, "trashed_at": now(), "material_count": len(record["materials"]),
+            "entries": entries,
+        })
+    except Exception:
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        if (destination / "batch.json").exists():
+            (destination / "batch.json").replace(record_path)
+        if (destination / "manifest").is_dir():
+            manifest_root.parent.mkdir(parents=True, exist_ok=True)
+            (destination / "manifest").replace(manifest_root)
+        for stored, source in reversed(moved):
+            source.parent.mkdir(parents=True, exist_ok=True)
+            if stored.exists() and not source.exists():
+                stored.replace(source)
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    return {"message": "报销批次已移入回收站，可随时恢复。", "trash_id": trash_id}
+
+
+def trash_summary() -> list[dict[str, Any]]:
+    result = []
+    if FILE_TRASH.is_symlink() or not FILE_TRASH.is_dir():
+        return result
+    for path in sorted(FILE_TRASH.glob("trash-*/record.json"))[:200]:
+        try:
+            record = load_json(path)
+            if record.get("schema_version") != "1.0" or safe_id(str(record.get("trash_id"))) != path.parent.name:
+                continue
+            result.append({key: record.get(key) for key in ("trash_id", "kind", "original_path", "stored_name", "batch_id", "trashed_at", "material_count")})
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    return sorted(result, key=lambda item: str(item.get("trashed_at") or ""), reverse=True)
+
+
+def restore_trash(trash_id: str) -> dict[str, Any]:
+    trash_id = safe_id(trash_id)
+    trash_root = _controlled_trash_root()
+    root = trash_root / trash_id
+    record_path = root / "record.json"
+    if root.is_symlink() or record_path.is_symlink() or not record_path.is_file():
+        raise ValueError("回收站记录不存在")
+    record = load_json(record_path)
+    if record.get("trash_id") != trash_id:
+        raise ValueError("回收站记录无效")
+    if record.get("kind") == "file":
+        original = str(record.get("original_path") or "")
+        target = _safe_relative_destination(original, ("inputs/projects/", "inputs/reimbursements/"))
+        if target.exists() or target.is_symlink():
+            raise RuntimeError("原位置已有同名文件，暂不能恢复")
+        stored = root / str(record.get("stored_name") or "")
+        if stored.parent != root or stored.is_symlink() or not stored.is_file():
+            raise ValueError("回收站中的文件缺失")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stored.replace(target)
+        reimbursement = record.get("reimbursement")
+        if isinstance(reimbursement, dict):
+            batch_path, batch = _reimbursement_record(str(reimbursement.get("batch_id") or ""))
+            previous_batch = json.loads(json.dumps(batch, ensure_ascii=False))
+            material = reimbursement.get("material")
+            if not isinstance(material, dict) or any(item.get("material_id") == material.get("material_id") for item in batch["materials"]):
+                target.replace(stored)
+                raise RuntimeError("报销批次记录已变化，暂不能恢复")
+            batch["materials"].append(material)
+            batch["updated_at"] = now()
+            try:
+                atomic_json(batch_path, batch)
+                _write_reimbursement_manifest(batch)
+            except Exception:
+                if target.exists() and not stored.exists():
+                    target.replace(stored)
+                atomic_json(batch_path, previous_batch)
+                _write_reimbursement_manifest(previous_batch)
+                raise
+    elif record.get("kind") == "reimbursement-batch":
+        batch_id = safe_id(str(record.get("batch_id") or ""))
+        input_target = INPUTS / "reimbursements" / batch_id
+        manifest_target = OUTPUTS / "reimbursements" / batch_id
+        batch_target = REIMBURSEMENT_BATCHES / f"{batch_id}.json"
+        entries = record.get("entries")
+        if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+            raise ValueError("回收站中的报销批次记录无效")
+        restore_pairs: list[tuple[Path, Path]] = []
+        for entry in entries:
+            original = str(entry.get("original_path") or "")
+            stored_relative = str(entry.get("stored_path") or "")
+            if not original.startswith((f"inputs/reimbursements/{batch_id}/", "inputs/projects/")) or not stored_relative.startswith("files/"):
+                raise ValueError("回收站中的文件路径无效")
+            stored_parts = Path(stored_relative).parts
+            if any(part in {"", ".", ".."} for part in stored_parts):
+                raise ValueError("回收站中的文件路径无效")
+            stored = root / stored_relative
+            if not stored.resolve(strict=False).is_relative_to(root.resolve()):
+                raise ValueError("回收站中的文件路径越界")
+            target = _safe_relative_destination(original, (f"inputs/reimbursements/{batch_id}/", "inputs/projects/"))
+            restore_pairs.append((stored, target))
+        if any(path.exists() or path.is_symlink() for path in (manifest_target, batch_target)) or any(
+            target.exists() or target.is_symlink() for _, target in restore_pairs
+        ):
+            raise RuntimeError("原位置已有同名报销批次，暂不能恢复")
+        if (root / "batch.json").is_symlink() or not (root / "batch.json").is_file():
+            raise ValueError("回收站中的报销批次记录缺失")
+        for stored, _ in restore_pairs:
+            if stored.is_symlink() or not stored.is_file():
+                raise ValueError("回收站中的报销材料缺失")
+        manifest_target.parent.mkdir(parents=True, exist_ok=True)
+        batch_target.parent.mkdir(parents=True, exist_ok=True)
+        restored: list[tuple[Path, Path]] = []
+        try:
+            for stored, target in restore_pairs:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                stored.replace(target)
+                restored.append((target, stored))
+            if (root / "manifest").is_dir():
+                (root / "manifest").replace(manifest_target)
+            (root / "batch.json").replace(batch_target)
+        except Exception:
+            if batch_target.exists() and not (root / "batch.json").exists():
+                batch_target.replace(root / "batch.json")
+            if manifest_target.is_dir() and not (root / "manifest").exists():
+                manifest_target.replace(root / "manifest")
+            for target, stored in reversed(restored):
+                stored.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and not stored.exists():
+                    target.replace(stored)
+            raise
+    else:
+        raise ValueError("回收站记录类型无效")
+    record_path.unlink(missing_ok=True)
+    if root.resolve().parent != trash_root.resolve():
+        raise RuntimeError("回收站清理路径校验失败")
+    shutil.rmtree(root)
+    return {"message": "文件已恢复到原位置。"}
+
+
+def legacy_reimbursement_files(files: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    migrated: set[str] = set()
+    if REIMBURSEMENT_BATCHES.is_dir() and not REIMBURSEMENT_BATCHES.is_symlink():
+        for batch_path in REIMBURSEMENT_BATCHES.glob("*.json"):
+            try:
+                if batch_path.is_symlink() or not batch_path.is_file():
+                    continue
+                sources = load_json(batch_path).get("legacy_sources", [])
+                if isinstance(sources, list):
+                    migrated.update(str(source) for source in sources if isinstance(source, str))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+    return [item for item in (files if files is not None else project_files())
+            if item["name"].startswith("mail-") and not item.get("batch_id") and item["path"] not in migrated][:200]
+
+
+def migrate_legacy_reimbursements() -> dict[str, Any]:
+    legacy = legacy_reimbursement_files()
+    if not legacy:
+        return {"message": "没有需要迁移的旧报销附件。", "migrated_count": 0}
+    identity = "|".join(sorted(f"{item['path']}:{item['version']}" for item in legacy))
+    batch_id = f"legacy-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+    batch_root = INPUTS / "reimbursements" / batch_id
+    record_path = REIMBURSEMENT_BATCHES / f"{batch_id}.json"
+    manifest_root = OUTPUTS / "reimbursements" / batch_id
+    batch_root.mkdir(parents=True, exist_ok=False)
+    materials = []
+    try:
+        for index, item in enumerate(legacy, start=1):
+            source = _safe_relative_file(item["path"], ("inputs/projects/",))
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            target = batch_root / f"{item['project_id']}-{item['name']}"
+            shutil.copy2(source, target)
+            if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                raise RuntimeError("旧报销附件迁移校验失败")
+            materials.append({
+                "material_id": f"material-legacy-{index:04d}", "name": item["name"],
+                "stored_name": target.name, "path": target.relative_to(ROOT).as_posix(),
+                "size": target.stat().st_size, "sha256": digest, "location": "reimbursement",
+                "legacy_project_id": item["project_id"],
+            })
+        record = {
+            "schema_version": "1.0", "batch_id": batch_id, "created_at": now(), "updated_at": now(),
+            "mailbox": "旧项目资料迁移", "message_count": 0, "messages": [], "materials": materials,
+            "legacy_sources": [item["path"] for item in legacy],
+            "manifest_path": f"outputs/reimbursements/{batch_id}/material-list.md",
+        }
+        atomic_json(record_path, record)
+        _write_reimbursement_manifest(record)
+    except Exception:
+        shutil.rmtree(batch_root, ignore_errors=True)
+        record_path.unlink(missing_ok=True)
+        shutil.rmtree(manifest_root, ignore_errors=True)
+        raise
+    return {"message": f"已复制并校验 {len(materials)} 个旧报销附件；项目中的原件仍保留。",
+            "batch_id": batch_id, "migrated_count": len(materials)}
 
 
 def schedule_records() -> list[dict[str, Any]]:
@@ -1264,6 +1840,7 @@ def output_summary() -> list[dict[str, Any]]:
     if OUTPUTS.is_symlink() or not OUTPUTS.is_dir():
         return []
     result: list[tuple[float, dict[str, Any]]] = []
+    known_projects = {project["project_id"] for project in project_records()}
     for index, item in enumerate(OUTPUTS.rglob("*")):
         if index >= 2000:
             break
@@ -1278,7 +1855,7 @@ def output_summary() -> list[dict[str, Any]]:
         project_id = (
             relative_parts[1]
             if len(relative_parts) >= 3 and relative_parts[0] == "reimbursements" and
-            re.fullmatch(r"[A-Za-z0-9_-]+", relative_parts[1])
+            re.fullmatch(r"[A-Za-z0-9_-]+", relative_parts[1]) and relative_parts[1] in known_projects
             else None
         )
         result.append((modified, {
@@ -1290,10 +1867,14 @@ def output_summary() -> list[dict[str, Any]]:
     return [entry for _, entry in sorted(result, key=lambda pair: pair[0], reverse=True)[:20]]
 
 
-def project_summaries(tasks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def project_summaries(
+    tasks: list[dict[str, Any]] | None = None,
+    files: list[dict[str, Any]] | None = None,
+    local_outputs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     tasks = tasks if tasks is not None else task_summaries()
-    files = project_files()
-    local_outputs = output_summary()
+    files = files if files is not None else project_files()
+    local_outputs = local_outputs if local_outputs is not None else output_summary()
     result: list[dict[str, Any]] = []
     for project in project_records():
         project_tasks = [task for task in tasks if task.get("project_id", DEFAULT_PROJECT_ID) == project["project_id"]]
@@ -1617,14 +2198,20 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if route == "/api/bootstrap":
             process_due_schedules()
             tasks = task_summaries()
+            files = project_files()
+            outputs = output_summary()
+            batches = reimbursement_batches()
             self.send_json(HTTPStatus.OK, {"profiles": profiles(), "workflows": workflows(), "tasks": tasks,
-                                           "data": data_summary(), "outputs": output_summary(),
-                                            "projects": project_summaries(tasks), "project_files": project_files(),
+                                           "data": data_summary(), "outputs": outputs,
+                                            "projects": project_summaries(tasks, files, outputs), "project_files": files,
                                             "schedules": schedule_records(),
                                             "model": model_settings_summary(ROOT),
                                             "search": search_settings_summary(ROOT),
                                             "search_gateway": search_gateway_settings_summary(ROOT),
                                             "mail": mail_settings_summary(ROOT),
+                                            "reimbursements": {"batches": batches,
+                                                               "trash": trash_summary(),
+                                                               "legacy_count": len(legacy_reimbursement_files(files))},
                                             "desktop_runtime": desktop_runtime_summary(),
                                             "request_token": SERVER_TOKEN})
             return
@@ -1744,12 +2331,24 @@ class ControlHandler(SimpleHTTPRequestHandler):
             elif route == "/api/reimbursements/mail/search":
                 self.send_json(HTTPStatus.OK, search_reimbursement_mail(ROOT, payload))
             elif route == "/api/reimbursements/mail/import":
-                project_id = safe_id(str(payload.get("project_id", "")))
-                active_project(project_id)
                 result = import_reimbursement_mail(
-                    ROOT, INPUTS, OUTPUTS, project_id, payload.get("selected")
+                    ROOT, INPUTS, OUTPUTS, payload.get("selected")
                 )
                 self.send_json(HTTPStatus.CREATED, result)
+            elif route == "/api/files/open":
+                self.send_json(HTTPStatus.OK, open_managed_file(payload))
+            elif route == "/api/files/rename":
+                self.send_json(HTTPStatus.OK, rename_managed_file(payload))
+            elif route == "/api/files/trash":
+                self.send_json(HTTPStatus.OK, trash_managed_file(payload))
+            elif route.startswith("/api/reimbursements/batches/") and route.endswith("/trash"):
+                self.send_json(HTTPStatus.OK, trash_reimbursement_batch(route.split("/")[4]))
+            elif route == "/api/reimbursements/move-to-project":
+                self.send_json(HTTPStatus.OK, move_reimbursement_to_project(payload))
+            elif route == "/api/reimbursements/migrate-legacy":
+                self.send_json(HTTPStatus.OK, migrate_legacy_reimbursements())
+            elif route.startswith("/api/file-trash/") and route.endswith("/restore"):
+                self.send_json(HTTPStatus.OK, restore_trash(route.split("/")[3]))
             elif route == "/api/desktop-settings":
                 self.send_json(HTTPStatus.OK, {
                     **save_desktop_settings(payload),

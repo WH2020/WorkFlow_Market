@@ -1,3 +1,4 @@
+import hashlib
 import json
 import io
 import tempfile
@@ -13,8 +14,8 @@ from ui import server
 class ControlCentreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_task_events, self.old_task_messages, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile = (
-            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.TASK_EVENTS, server.TASK_MESSAGES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID
+        self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_task_events, self.old_task_messages, self.old_desktop_settings, self.old_ai_core_log, self.old_reimbursement_batches, self.old_file_trash, self.old_active_profile = (
+            server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.TASK_EVENTS, server.TASK_MESSAGES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.REIMBURSEMENT_BATCHES, server.FILE_TRASH, server.ACTIVE_PROFILE_ID
         )
         server.RUNTIME = Path(self.temporary.name)
         server.TASKS = server.RUNTIME / "tasks"
@@ -27,6 +28,8 @@ class ControlCentreTests(unittest.TestCase):
         server.TASK_MESSAGES = server.RUNTIME / "task-messages"
         server.DESKTOP_SETTINGS = server.RUNTIME / "desktop-settings.json"
         server.AI_CORE_LOG = server.RUNTIME / "ai-core.log"
+        server.REIMBURSEMENT_BATCHES = server.RUNTIME / "reimbursement-batches"
+        server.FILE_TRASH = server.RUNTIME / "file-trash"
         server.ACTIVE_PROFILE_ID = None
 
     def write_plan(self, task_id="task-ppt", **changes):
@@ -44,8 +47,8 @@ class ControlCentreTests(unittest.TestCase):
         return plan
 
     def tearDown(self):
-        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.TASK_EVENTS, server.TASK_MESSAGES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.ACTIVE_PROFILE_ID = (
-            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_task_events, self.old_task_messages, self.old_desktop_settings, self.old_ai_core_log, self.old_active_profile
+        server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.TASK_EVENTS, server.TASK_MESSAGES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.REIMBURSEMENT_BATCHES, server.FILE_TRASH, server.ACTIVE_PROFILE_ID = (
+            self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_task_events, self.old_task_messages, self.old_desktop_settings, self.old_ai_core_log, self.old_reimbursement_batches, self.old_file_trash, self.old_active_profile
         )
         self.temporary.cleanup()
 
@@ -163,6 +166,10 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="expense-mail-results"', html)
         self.assertIn('id="search-expense-mail"', html)
         self.assertIn('id="import-expense-mail"', html)
+        self.assertNotIn('id="expense-project"', html)
+        self.assertIn('id="reimbursement-batches"', html)
+        self.assertIn('id="file-trash-list"', html)
+        self.assertIn('id="migrate-legacy-expenses"', html)
         self.assertIn('id="mail-settings-panel"', html)
         self.assertIn('id="mail-credential"', html)
         self.assertIn("不会标记已读、移动、删除或发送邮件", html)
@@ -170,6 +177,10 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('api("/api/reimbursements/mail/import"', javascript)
         self.assertIn('api("/api/mail-settings"', javascript)
         self.assertIn("function renderReimbursementMailResults", javascript)
+        self.assertIn("function renderReimbursementLibrary", javascript)
+        self.assertIn('api("/api/files/rename"', javascript)
+        self.assertIn('api("/api/files/trash"', javascript)
+        self.assertIn('api("/api/reimbursements/move-to-project"', javascript)
         self.assertNotIn('id="expense-mode"', html)
         self.assertNotIn('id="create-expense-draft"', html)
         self.assertNotIn('api("/api/reimbursements/draft"', javascript)
@@ -712,6 +723,97 @@ class ControlCentreTests(unittest.TestCase):
             handler.upload_project_file()
             self.assertEqual(replies[-1][0], HTTPStatus.CONFLICT)
             self.assertEqual(target.read_bytes(), payload)
+        finally:
+            server.ROOT, server.INPUTS = previous_root, previous_inputs
+
+    def test_project_file_can_be_renamed_trashed_and_restored(self):
+        previous_root, previous_inputs, previous_outputs = server.ROOT, server.INPUTS, server.OUTPUTS
+        try:
+            root = Path(self.temporary.name)
+            server.ROOT, server.INPUTS, server.OUTPUTS = root, root / "inputs", root / "outputs"
+            target = server.INPUTS / "projects" / server.DEFAULT_PROJECT_ID / "客户材料.pdf"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"project evidence")
+            item = server.project_files()[0]
+            renamed = server.rename_managed_file({"path": item["path"], "version": item["version"], "name": "客户凭证.pdf"})
+            self.assertTrue((root / renamed["path"]).is_file())
+            item = server.project_files()[0]
+            trashed = server.trash_managed_file({"path": item["path"], "version": item["version"]})
+            self.assertFalse((root / item["path"]).exists())
+            self.assertEqual(len(server.trash_summary()), 1)
+            server.restore_trash(trashed["trash_id"])
+            self.assertEqual((root / item["path"]).read_bytes(), b"project evidence")
+            self.assertEqual(server.trash_summary(), [])
+        finally:
+            server.ROOT, server.INPUTS, server.OUTPUTS = previous_root, previous_inputs, previous_outputs
+
+    def test_reimbursement_material_moves_to_project_and_batch_restore_preserves_association(self):
+        previous_root, previous_inputs, previous_outputs = server.ROOT, server.INPUTS, server.OUTPUTS
+        try:
+            root = Path(self.temporary.name)
+            server.ROOT, server.INPUTS, server.OUTPUTS = root, root / "inputs", root / "outputs"
+            batch_id = "reimbursement-test"
+            source = server.INPUTS / "reimbursements" / batch_id / "invoice.pdf"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"invoice")
+            record = {
+                "schema_version": "1.0", "batch_id": batch_id, "created_at": server.now(), "updated_at": server.now(),
+                "mailbox": "sales@example.com", "message_count": 1, "messages": [],
+                "manifest_path": f"outputs/reimbursements/{batch_id}/material-list.md",
+                "materials": [{
+                    "material_id": "material-test", "name": "invoice.pdf", "stored_name": "invoice.pdf",
+                    "path": source.relative_to(root).as_posix(), "size": 7,
+                    "sha256": hashlib.sha256(b"invoice").hexdigest(), "location": "reimbursement",
+                }],
+            }
+            server.atomic_json(server.REIMBURSEMENT_BATCHES / f"{batch_id}.json", record)
+            server._write_reimbursement_manifest(record)
+            item = server.reimbursement_batches()[0]["materials"][0]
+            moved = server.move_reimbursement_to_project({
+                "path": item["path"], "version": item["version"], "batch_id": batch_id,
+                "material_id": item["material_id"], "project_id": server.DEFAULT_PROJECT_ID,
+            })
+            self.assertTrue((root / moved["path"]).is_file())
+            self.assertFalse(source.exists())
+            current = server.reimbursement_batches()[0]["materials"][0]
+            self.assertEqual(current["location"], "project")
+            project_item = server.project_files()[0]
+            self.assertEqual(project_item["batch_id"], batch_id)
+            renamed = server.rename_managed_file({
+                "path": project_item["path"], "version": project_item["version"],
+                "batch_id": project_item["batch_id"], "material_id": project_item["material_id"],
+                "name": "renamed-invoice.pdf",
+            })
+            moved = {"path": renamed["path"]}
+            self.assertEqual(server.reimbursement_batches()[0]["materials"][0]["path"], renamed["path"])
+            trashed = server.trash_reimbursement_batch(batch_id)
+            self.assertFalse((root / moved["path"]).exists())
+            self.assertEqual(server.reimbursement_batches(), [])
+            server.restore_trash(trashed["trash_id"])
+            restored = server.reimbursement_batches()[0]["materials"][0]
+            self.assertEqual(restored["path"], moved["path"])
+            self.assertTrue((root / restored["path"]).is_file())
+        finally:
+            server.ROOT, server.INPUTS, server.OUTPUTS = previous_root, previous_inputs, previous_outputs
+
+    def test_tampered_trash_record_cannot_restore_outside_managed_directories(self):
+        previous_root, previous_inputs = server.ROOT, server.INPUTS
+        try:
+            root = Path(self.temporary.name)
+            server.ROOT, server.INPUTS = root, root / "inputs"
+            trash_id = "trash-path-check"
+            trash_root = server.FILE_TRASH / trash_id
+            trash_root.mkdir(parents=True)
+            (trash_root / "invoice.pdf").write_bytes(b"invoice")
+            server.atomic_json(trash_root / "record.json", {
+                "schema_version": "1.0", "trash_id": trash_id, "kind": "file",
+                "original_path": "inputs/projects/../../escaped.pdf", "stored_name": "invoice.pdf",
+                "trashed_at": server.now(), "references": [], "reimbursement": None,
+            })
+            with self.assertRaisesRegex(ValueError, "目标文件路径"):
+                server.restore_trash(trash_id)
+            self.assertFalse((root / "escaped.pdf").exists())
+            self.assertTrue((trash_root / "invoice.pdf").is_file())
         finally:
             server.ROOT, server.INPUTS = previous_root, previous_inputs
 
