@@ -37,6 +37,8 @@ class EnvironmentTests(unittest.TestCase):
         launcher = (root / "scripts" / "start-windows.ps1").read_text(encoding="utf-8")
         self.assertIn("fn show_ai_core_window", desktop_source)
         self.assertIn('desktop-settings.json', desktop_source)
+        self.assertIn('GET /api/health HTTP/1.1', desktop_source)
+        self.assertIn('if route == "/api/health":', (root / "ui/server.py").read_text(encoding="utf-8"))
         self.assertIn('split_once("\\\"show_ai_core_window\\\":")', desktop_source)
         self.assertIn('fn start_agent(root: &Path, show_window: bool)', desktop_source)
         self.assertIn('"--mode",', desktop_source)

@@ -1327,6 +1327,9 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         route = urlparse(self.path).path
+        if route == "/api/health":
+            self.send_json(HTTPStatus.OK, {"status": "ok", "profile_id": ACTIVE_PROFILE_ID})
+            return
         if route == "/api/bootstrap":
             process_due_schedules()
             tasks = task_summaries()

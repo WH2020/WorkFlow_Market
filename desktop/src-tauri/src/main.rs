@@ -206,7 +206,7 @@ fn workbench_healthy() -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(900)));
     if stream
         .write_all(
-            b"GET /api/bootstrap HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nConnection: close\r\n\r\n",
+            b"GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nConnection: close\r\n\r\n",
         )
         .is_err()
     {
@@ -215,7 +215,9 @@ fn workbench_healthy() -> bool {
     let mut response = Vec::with_capacity(4096);
     let _ = stream.take(4096).read_to_end(&mut response);
     let text = String::from_utf8_lossy(&response);
-    text.contains("200 OK") && text.contains("sales-director") && !text.contains("product-director")
+    text.contains("200 OK")
+        && text.contains("\"status\": \"ok\"")
+        && text.contains("\"profile_id\": \"sales-director\"")
 }
 
 fn start_workbench(root: &Path) -> Result<Child, String> {
@@ -410,12 +412,32 @@ fn cleanup(children: &RuntimeChildren) {
 }
 
 fn self_test() -> i32 {
-    let Ok(root) = project_root() else { return 2 };
-    let Ok(mut server) = start_workbench(&root) else {
-        return 2;
+    let root = match project_root() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("Agent4Market self-test could not find its runtime: {error}");
+            return 2;
+        }
+    };
+    let mut server = match start_workbench(&root) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("Agent4Market self-test could not start the workbench: {error}");
+            return 2;
+        }
     };
     let healthy = wait_for_workbench(&mut server);
     let pi_ok = healthy && pi_version_ok(&root);
+    if !healthy {
+        let child_state = server
+            .try_wait()
+            .ok()
+            .flatten()
+            .map_or_else(|| "still running".to_string(), |status| status.to_string());
+        eprintln!("Agent4Market self-test health check failed; workbench child is {child_state}.");
+    } else if !pi_ok {
+        eprintln!("Agent4Market self-test could not validate the Pi runtime.");
+    }
     stop_child(&mut server);
     if healthy && pi_ok {
         0
