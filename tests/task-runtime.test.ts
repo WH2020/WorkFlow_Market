@@ -22,6 +22,7 @@ import {
   rejectApproval,
   proposeWriteIntent,
   recoverWriteFailure,
+  rebindTaskSession,
   revisePreparedWriteIntent,
   type RuntimeWorkflow,
 } from "../pi/extensions/task-runtime.ts";
@@ -56,6 +57,31 @@ test("a workbench project id stays attached to the governed task", () => {
   assert.equal(task.project_id, "project-customer-a");
   assert.equal(task.schedule_id, "schedule-daily-a");
   assert.equal(task.scheduled_for, "2026-08-19");
+});
+
+test("an Agent restart can rebind one nonterminal task without changing its write checkpoint", () => {
+  const root = mkdtempSync(join(tmpdir(), "director-task-rebind-"));
+  try {
+    const store = new TaskStore(root);
+    let task = start();
+    task = completeModelNode(task, linearWorkflow, "draft", task.version);
+    store.save(task);
+    const detached = store.findNonterminalForProfile("market-director");
+    assert.equal(detached?.task_id, task.task_id);
+    const rebound = rebindTaskSession(detached!, "session-after-restart", detached!.version);
+    assert.equal(rebound.session_key, "session-after-restart");
+    assert.equal(rebound.current_node, task.current_node);
+    assert.equal(rebound.pending_write, task.pending_write);
+    assert.ok(rebound.audit.some((event) => event.action === "task_session_rebound"));
+    const second = createTask({
+      sessionKey: "another-session", profileId: "market-director", serviceId: "test-service",
+      workflow: linearWorkflow, request: "second", taskId: "task-b",
+    });
+    store.save(second);
+    assert.equal(store.findNonterminalForProfile("market-director"), undefined, "多任务歧义时不得自动接管");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 const writePayload = {

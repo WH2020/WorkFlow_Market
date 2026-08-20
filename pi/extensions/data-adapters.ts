@@ -48,6 +48,7 @@ type TableDefinition = {
   file: string;
   key: string;
   columns: string[];
+  legacyColumns?: string[][];
   requiredOnInsert: string[];
   timestamp?: string;
 };
@@ -120,8 +121,13 @@ const KNOWLEDGE_DEFINITION: TableDefinition = {
   key: "source_id",
   columns: [
     "source_id", "title", "url", "publisher", "published_date", "accessed_date", "region",
-    "topic", "source_type", "quality", "exposure_status", "status", "notes",
+    "topic", "source_type", "quality", "exposure_status", "key_facts", "important_quotes",
+    "interpretation", "limitations", "status", "notes",
   ],
+  legacyColumns: [[
+    "source_id", "title", "url", "publisher", "published_date", "accessed_date", "region",
+    "topic", "source_type", "quality", "exposure_status", "status", "notes",
+  ]],
   requiredOnInsert: ["source_id", "title", "status"],
 };
 
@@ -212,19 +218,25 @@ function parseTableContent(content: string, path: string, definition: TableDefin
     throw new Error(`CSV 表头无效：${path}`);
   }
   if (new Set(headers).size !== headers.length) throw new Error(`CSV 存在重复表头：${path}`);
-  if (
-    headers.length !== definition.columns.length ||
-    headers.some((header, index) => header !== definition.columns[index])
-  ) {
+  const currentSchema = headers.length === definition.columns.length &&
+    headers.every((header, index) => header === definition.columns[index]);
+  const supportedLegacySchema = definition.legacyColumns?.some((legacy) =>
+    headers.length === legacy.length && headers.every((header, index) => header === legacy[index])
+  ) ?? false;
+  if (!currentSchema && !supportedLegacySchema) {
     throw new Error(`CSV 表头与 ${definition.file} 契约不一致，拒绝继续处理`);
   }
-  const rows = parsed.slice(1).map((values, index) => {
+  const parsedRows = parsed.slice(1).map((values, index) => {
     if (values.length !== headers.length) {
       throw new Error(`CSV 第 ${index + 2} 行字段数与表头不一致：${path}`);
     }
     return Object.fromEntries(headers.map((header, column) => [header, values[column]]));
   });
-  return { headers, rows };
+  if (currentSchema) return { headers, rows: parsedRows };
+  return {
+    headers: [...definition.columns],
+    rows: parsedRows.map((row) => Object.fromEntries(definition.columns.map((header) => [header, row[header] ?? ""]))),
+  };
 }
 
 function readTable(path: string, definition: TableDefinition): CsvTable {
@@ -1358,10 +1370,42 @@ type TaskEvidenceState = {
   task_id: string;
   searched_urls: string[];
   mutations: Record<string, string>;
+  source_anchors?: Record<string, SourceEvidenceAnchor>;
   presentation_sources?: Record<string, PresentationEvidenceSource>;
   weekly_snapshot?: WeeklySnapshotEvidence;
   updated_at: string;
 };
+
+export type SourceEvidenceAnchor = {
+  source_id: string;
+  title: string;
+  source_type: string;
+  url: string;
+  content_sha256: string;
+  accessed_at: string;
+  published_date?: string;
+  reliability: "standard" | "limited";
+};
+
+function assertMutationMatchesSourceAnchor(mutation: Mutation, anchor: SourceEvidenceAnchor): void {
+  if (mutation.operation !== "insert" || mutation.record_id !== anchor.source_id) {
+    throw new Error(`知识来源 ${mutation.record_id} 与受管正文证据的写入类型不一致`);
+  }
+  const changes = mutation.changes;
+  if (changes.title !== anchor.title || changes.url !== anchor.url) {
+    throw new Error(`知识来源 ${mutation.record_id} 的标题或 URL 与受管正文证据不一致`);
+  }
+  if (changes.accessed_date !== anchor.accessed_at.slice(0, 10)) {
+    throw new Error(`知识来源 ${mutation.record_id} 的访问日期与受管正文证据不一致`);
+  }
+  if (anchor.published_date && changes.published_date !== anchor.published_date.slice(0, 10)) {
+    throw new Error(`知识来源 ${mutation.record_id} 的发布日期与受管正文证据不一致`);
+  }
+  const notes = changes.notes ?? "";
+  if (!new RegExp(`(?:^|;\\s*)content_sha256=${anchor.content_sha256}(?:;|$)`, "u").test(notes)) {
+    throw new Error(`知识来源 ${mutation.record_id} 缺少与正文一致的内容哈希`);
+  }
+}
 
 export type PresentationEvidenceSource = {
   source_id: string;
@@ -1412,7 +1456,10 @@ function taskEvidencePath(projectRoot: string, taskId: string): string {
 function readTaskEvidence(projectRoot: string, taskId: string): TaskEvidenceState {
   const path = taskEvidencePath(projectRoot, taskId);
   if (!existsSync(path)) {
-    return { schema_version: "1.0", task_id: taskId, searched_urls: [], mutations: {}, presentation_sources: {}, updated_at: new Date().toISOString() };
+    return {
+      schema_version: "1.0", task_id: taskId, searched_urls: [], mutations: {},
+      source_anchors: {}, presentation_sources: {}, updated_at: new Date().toISOString(),
+    };
   }
   const meta = lstatSync(path);
   if (!meta.isFile() || meta.isSymbolicLink() || meta.size > 2 * 1024 * 1024) throw new Error("证据 registry 文件无效或过大");
@@ -1423,6 +1470,23 @@ function readTaskEvidence(projectRoot: string, taskId: string): TaskEvidenceStat
     state.searched_urls.some((url) => typeof url !== "string" || url.length > 2048) ||
     !state.mutations || typeof state.mutations !== "object" || Array.isArray(state.mutations) ||
     Object.keys(state.mutations).length > 500 || Object.values(state.mutations).some((value) => typeof value !== "string") ||
+    (state.source_anchors !== undefined && (
+      !state.source_anchors || typeof state.source_anchors !== "object" || Array.isArray(state.source_anchors) ||
+      Object.keys(state.source_anchors).length > 500 ||
+      Object.entries(state.source_anchors).some(([sourceId, source]) => (
+        !source || typeof source !== "object" || source.source_id !== sourceId ||
+        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(sourceId) ||
+        typeof source.title !== "string" || !source.title.trim() || source.title.length > 500 ||
+        typeof source.source_type !== "string" || !source.source_type.trim() || source.source_type.length > 80 ||
+        typeof source.url !== "string" || source.url.length > 2048 ||
+        !/^[a-f0-9]{64}$/u.test(source.content_sha256) ||
+        typeof source.accessed_at !== "string" || !Number.isFinite(Date.parse(source.accessed_at)) ||
+        (source.published_date !== undefined && (
+          typeof source.published_date !== "string" || !Number.isFinite(Date.parse(source.published_date))
+        )) ||
+        (source.reliability !== "standard" && source.reliability !== "limited")
+      ))
+    )) ||
     (state.presentation_sources !== undefined && (
       !state.presentation_sources || typeof state.presentation_sources !== "object" || Array.isArray(state.presentation_sources) ||
       Object.keys(state.presentation_sources).length > 1000 ||
@@ -1870,30 +1934,59 @@ export function assertDeckMatchesEvidenceContext(
   assertDeckMatchesWeeklySnapshot(projectRoot, taskId, profileId, payload);
 }
 
-export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): void {
+export type GovernedSourceEvidence = {
+  source_id: string;
+  title: string;
+  source_type: string;
+  url: string;
+  content_sha256: string;
+  accessed_at: string;
+  published_date?: string;
+  extraction_reliability?: string;
+  knowledge_mutation?: {
+    operation: "insert";
+    record_id: string;
+    changes: Record<string, string>;
+  };
+};
+
+export type DataAdapterRuntime = {
+  recordGovernedSources: (taskId: string, sources: GovernedSourceEvidence[]) => number;
+};
+
+export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): DataAdapterRuntime {
   const searchableUrls = new Map<string, Set<string>>();
   const evidenceRegistry = new Map<string, Map<string, string>>();
+  const sourceAnchorRegistry = new Map<string, Map<string, SourceEvidenceAnchor>>();
   const presentationSourceRegistry = new Map<string, Map<string, PresentationEvidenceSource>>();
   const weeklySnapshotRegistry = new Map<string, WeeklySnapshotEvidence>();
   const loadedEvidence = new Set<string>();
   const taskKey = (context: { task_id?: string } | void): string => context?.task_id ?? "__standalone__";
-  const loadEvidence = (context: { task_id?: string } | void): { urls: Set<string>; mutations: Map<string, string>; sources: Map<string, PresentationEvidenceSource> } => {
+  const loadEvidence = (context: { task_id?: string } | void): {
+    urls: Set<string>;
+    mutations: Map<string, string>;
+    anchors: Map<string, SourceEvidenceAnchor>;
+    sources: Map<string, PresentationEvidenceSource>;
+  } => {
     const key = taskKey(context);
     if (key !== "__standalone__" && !loadedEvidence.has(key)) {
       const persisted = readTaskEvidence(hooks.projectRoot(), key);
       searchableUrls.set(key, new Set(persisted.searched_urls));
       evidenceRegistry.set(key, new Map(Object.entries(persisted.mutations)));
+      sourceAnchorRegistry.set(key, new Map(Object.entries(persisted.source_anchors ?? {})));
       presentationSourceRegistry.set(key, new Map(Object.entries(persisted.presentation_sources ?? {})));
       if (persisted.weekly_snapshot) weeklySnapshotRegistry.set(key, persisted.weekly_snapshot);
       loadedEvidence.add(key);
     }
     const urls = searchableUrls.get(key) ?? new Set<string>();
     const mutations = evidenceRegistry.get(key) ?? new Map<string, string>();
+    const anchors = sourceAnchorRegistry.get(key) ?? new Map<string, SourceEvidenceAnchor>();
     const sources = presentationSourceRegistry.get(key) ?? new Map<string, PresentationEvidenceSource>();
     searchableUrls.set(key, urls);
     evidenceRegistry.set(key, mutations);
+    sourceAnchorRegistry.set(key, anchors);
     presentationSourceRegistry.set(key, sources);
-    return { urls, mutations, sources };
+    return { urls, mutations, anchors, sources };
   };
   const saveEvidence = (context: { task_id?: string } | void): void => {
     const key = taskKey(context);
@@ -1904,10 +1997,78 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       task_id: key,
       searched_urls: [...loaded.urls].sort(),
       mutations: Object.fromEntries([...loaded.mutations.entries()].sort(([left], [right]) => left.localeCompare(right))),
+      source_anchors: Object.fromEntries([...loaded.anchors.entries()].sort(([left], [right]) => left.localeCompare(right))),
       presentation_sources: Object.fromEntries([...loaded.sources.entries()].sort(([left], [right]) => left.localeCompare(right))),
       weekly_snapshot: weeklySnapshotRegistry.get(key),
       updated_at: new Date().toISOString(),
     });
+  };
+
+  const runtime: DataAdapterRuntime = {
+    recordGovernedSources: (taskId, sources) => {
+      if (!/^[A-Za-z0-9_-]{1,128}$/u.test(taskId)) throw new Error("受管来源 task_id 无效");
+      if (!Array.isArray(sources) || sources.length > 60) throw new Error("受管来源数量无效");
+      const loaded = loadEvidence({ task_id: taskId });
+      for (const source of sources) {
+        if (
+          !source || typeof source !== "object" ||
+          !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(source.source_id) ||
+          typeof source.title !== "string" || !source.title.trim() || source.title.length > 500 ||
+          typeof source.source_type !== "string" || !source.source_type.trim() || source.source_type.length > 80 ||
+          typeof source.url !== "string" || source.url.length > 2048 ||
+          !/^[a-f0-9]{64}$/u.test(source.content_sha256) ||
+          typeof source.accessed_at !== "string" || !Number.isFinite(Date.parse(source.accessed_at)) ||
+          (source.published_date !== undefined && !Number.isFinite(Date.parse(source.published_date))) ||
+          (source.extraction_reliability !== undefined &&
+            source.extraction_reliability !== "standard" && source.extraction_reliability !== "limited")
+        ) throw new Error("受管 Subagent 来源证据无效");
+        const normalizedUrl = normalizePublicUrl(source.url).toString();
+        const anchor: SourceEvidenceAnchor = {
+          source_id: source.source_id,
+          title: source.title,
+          source_type: source.source_type,
+          url: normalizedUrl,
+          content_sha256: source.content_sha256,
+          accessed_at: source.accessed_at,
+          ...(source.published_date ? { published_date: source.published_date } : {}),
+          reliability: source.extraction_reliability === "limited" ? "limited" : "standard",
+        };
+        const existingAnchor = loaded.anchors.get(source.source_id);
+        if (existingAnchor && canonicalEvidence(existingAnchor) !== canonicalEvidence(anchor)) {
+          throw new Error(`受管来源 ${source.source_id} 与本任务已有证据冲突`);
+        }
+        loaded.anchors.set(source.source_id, anchor);
+        if (source.knowledge_mutation) {
+          const mutation = source.knowledge_mutation;
+          if (
+            mutation.operation !== "insert" || mutation.record_id !== source.source_id ||
+            !mutation.changes || typeof mutation.changes !== "object" || Array.isArray(mutation.changes) ||
+            Object.keys(mutation.changes).length > 100 ||
+            Object.values(mutation.changes).some((value) => typeof value !== "string") ||
+            mutation.changes.title !== source.title || mutation.changes.url !== normalizedUrl ||
+            !new RegExp(`(?:^|;\\s*)content_sha256=${source.content_sha256}(?:;|$)`, "u")
+              .test(mutation.changes.notes ?? "")
+          ) throw new Error(`受管来源 ${source.source_id} 的原始写入证据无效`);
+          const mutationCanonical = canonicalEvidence(source.knowledge_mutation);
+          const existingMutation = loaded.mutations.get(source.source_id);
+          if (existingMutation && existingMutation !== mutationCanonical) {
+            throw new Error(`受管来源 ${source.source_id} 的原始写入证据冲突`);
+          }
+          loaded.mutations.set(source.source_id, mutationCanonical);
+        }
+        loaded.sources.set(source.source_id, {
+          source_id: source.source_id,
+          title: source.title,
+          source_type: source.source_type,
+          url: normalizedUrl,
+          content_sha256: source.content_sha256,
+          reliability: anchor.reliability,
+          accessed_at: source.accessed_at,
+        });
+      }
+      saveEvidence({ task_id: taskId });
+      return sources.length;
+    },
   };
 
   pi.registerTool({
@@ -2058,6 +2219,18 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
         });
         sources.push(source);
         loaded.mutations.set(source.source_id, canonicalEvidence(source.knowledge_mutation));
+        if (source.url) {
+          loaded.anchors.set(source.source_id, {
+            source_id: source.source_id,
+            title: source.title,
+            source_type: source.source_type,
+            url: source.url,
+            content_sha256: source.content_sha256,
+            accessed_at: source.accessed_at,
+            ...(source.published_date ? { published_date: source.published_date } : {}),
+            reliability: source.extraction_reliability,
+          });
+        }
         loaded.sources.set(source.source_id, {
           source_id: source.source_id,
           title: source.title,
@@ -2367,33 +2540,41 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
     async execute(_toolCallId, params) {
       const commit = hooks.beforeLogicalTool("knowledge.write", params);
       if (!commit?.intent_id || !commit.payload_sha256) throw new Error("写入缺少受管提交上下文");
-      const registered = loadEvidence(commit).mutations;
-      let revisionBase = new Map<string, Mutation>();
-      if (commit.revision_base_payload) {
-        let parsed: unknown;
-        try { parsed = JSON.parse(commit.revision_base_payload); } catch { throw new Error("人工修订缺少有效的原始冻结载荷"); }
-        const mutations = parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).mutations)
-          ? (parsed as { mutations: Mutation[] }).mutations
-          : [];
-        revisionBase = new Map(mutations.map((mutation) => [mutation.record_id, mutation]));
-      }
-      for (const mutation of params.mutations) {
-        const expected = registered?.get(mutation.record_id);
-        if (mutation.operation === "insert" && registered.size > 0 && !expected) {
-          throw new Error(`知识来源 ${mutation.record_id} 未出现在本任务读取证据中`);
-        }
-        if (/^(web|pdf)-/u.test(mutation.record_id) && !expected) {
-          throw new Error(`工具来源 ${mutation.record_id} 缺少本任务证据 registry`);
-        }
-        if (expected && canonicalEvidence(mutation) !== expected) {
-          const original = revisionBase.get(mutation.record_id);
-          if (!original || canonicalEvidence(original) !== expected) {
-            throw new Error(`知识来源 ${mutation.record_id} 与本任务读取证据或人工修订基线不一致`);
-          }
-        }
-      }
       let path: string | undefined;
       try {
+        const evidence = loadEvidence(commit);
+        const registered = evidence.mutations;
+        const anchors = evidence.anchors;
+        let revisionBase = new Map<string, Mutation>();
+        if (commit.revision_base_payload) {
+          let parsed: unknown;
+          try { parsed = JSON.parse(commit.revision_base_payload); } catch { throw new Error("人工修订缺少有效的原始冻结载荷"); }
+          const mutations = parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).mutations)
+            ? (parsed as { mutations: Mutation[] }).mutations
+            : [];
+          revisionBase = new Map(mutations.map((mutation) => [mutation.record_id, mutation]));
+        }
+        for (const mutation of params.mutations) {
+          const expected = registered.get(mutation.record_id);
+          const anchor = anchors.get(mutation.record_id);
+          if (mutation.operation === "insert" && (registered.size > 0 || anchors.size > 0) && !expected && !anchor) {
+            throw new Error(`知识来源 ${mutation.record_id} 未出现在本任务读取证据中`);
+          }
+          if (/^(web|pdf)-/u.test(mutation.record_id) && !expected && !anchor) {
+            throw new Error(`工具来源 ${mutation.record_id} 缺少本任务证据 registry`);
+          }
+          if (expected && canonicalEvidence(mutation) !== expected) {
+            const original = revisionBase.get(mutation.record_id);
+            if (!original || canonicalEvidence(original) !== expected) {
+              if (!anchor) {
+                throw new Error(`知识来源 ${mutation.record_id} 与本任务读取证据或人工修订基线不一致`);
+              }
+              assertMutationMatchesSourceAnchor(mutation, anchor);
+            }
+          } else if (!expected && anchor) {
+            assertMutationMatchesSourceAnchor(mutation, anchor);
+          }
+        }
         path = resolveDataFile(hooks.projectRoot(), "knowledge", KNOWLEDGE_DEFINITION.file);
         const result = mutateRecords(path, KNOWLEDGE_DEFINITION, params.mutations, {
           projectRoot: hooks.projectRoot(), intent_id: commit.intent_id,
@@ -2515,4 +2696,5 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       }
     },
   });
+  return runtime;
 }

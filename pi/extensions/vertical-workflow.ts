@@ -32,6 +32,7 @@ import {
   currentNodes,
   isTerminal,
   proposeWriteIntent,
+  rebindTaskSession,
   recoverWriteFailure,
   releaseTaskLock,
   rejectApproval,
@@ -43,6 +44,7 @@ import {
   cleanupExpiredSubagentContracts,
   createGovernedSubagentContract,
   loadGovernedSubagentContract,
+  loadGovernedSubagentResult,
   removeGovernedSubagentContract,
   writeGovernedSubagentResult,
   type GovernedSubagentContract,
@@ -1654,7 +1656,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     return { state: activeTask, workflow };
   };
 
-  registerDataAdapters(pi, {
+  const dataAdapters = registerDataAdapters(pi, {
     projectRoot: () => projectRoot,
     beforeLogicalTool: (logicalTool, params) => {
       const { state, workflow } = requireLogicalTool(logicalTool);
@@ -1718,6 +1720,35 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     },
   });
 
+  const restoreTaskSubagentEvidence = (task: WorkflowTask): number => {
+    let restored = 0;
+    const receiptHashes = new Map<string, string>();
+    for (const event of task.audit) {
+      if (event.action !== "subagent_completed" || !event.note) continue;
+      try {
+        const bound = JSON.parse(event.note) as { receipt?: unknown; sha256?: unknown };
+        if (typeof bound.receipt === "string" && typeof bound.sha256 === "string" && /^[a-f0-9]{64}$/u.test(bound.sha256)) {
+          receiptHashes.set(bound.receipt, bound.sha256);
+        }
+      } catch {
+        // An unparseable historic audit note cannot authorize evidence restoration.
+      }
+    }
+    for (const artifact of task.artifacts) {
+      const match = /^\.pi\/director-runtime\/subagent-results\/([a-f0-9-]{36})\.json$/u.exec(artifact);
+      if (!match) continue;
+      const result = loadGovernedSubagentResult(projectRoot, match[1]!);
+      if (result.task_id !== task.task_id || result.profile_id !== task.profile_id) {
+        throw new Error("Subagent 结果与恢复任务的身份不一致");
+      }
+      if (receiptHashes.get(artifact) !== result.receipt_sha256) {
+        throw new Error("Subagent 结果与任务审计绑定的回执哈希不一致");
+      }
+      restored += dataAdapters.recordGovernedSources(task.task_id, result.sources);
+    }
+    return restored;
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     clearRuntimeLease();
     runtimeLeaseNonce = randomUUID();
@@ -1748,6 +1779,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     if (typeof storedSessionKey !== "string") pi.appendEntry("director-session-key", sessionKey);
 
     activeTask = undefined;
+    let recoveredAcrossSession = false;
     if (lastStoredTask) {
       const disk = taskStore.load(lastStoredTask.task_id);
       activeTask =
@@ -1758,11 +1790,22 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             : lastStoredTask;
     } else {
       activeTask = taskStore.findActive(sessionKey);
+      if (!activeTask) {
+        const detached = taskStore.findNonterminalForProfile(activeProfile.id);
+        if (detached && !detached.approval_request) {
+          const rebound = rebindTaskSession(detached, sessionKey, detached.version);
+          taskStore.save(rebound, detached.version);
+          activeTask = rebound;
+          recoveredAcrossSession = true;
+          pi.appendEntry("director-task-state", rebound);
+        }
+      }
     }
     if (activeTask && !isTerminal(activeTask) && editionProfileId && activeTask.profile_id !== editionProfileId) {
       activeTask = undefined;
     }
     if (activeTask && !isTerminal(activeTask)) {
+      restoreTaskSubagentEvidence(activeTask);
       const recoveredProfile = profiles.get(activeTask.profile_id);
       if (!recoveredProfile) throw new Error(`Recovered task references unknown Profile ${activeTask.profile_id}`);
       activeProfile = recoveredProfile;
@@ -1775,6 +1818,19 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     updateRuntimeLease();
     const taskStatus = activeTask && !isTerminal(activeTask) ? `｜任务：${activeTask.status}` : "";
     ctx.ui.setStatus("vertical-workflow", `角色：${activeProfile.display_name}${taskStatus}`);
+    if (recoveredAcrossSession && activeTask && !isTerminal(activeTask)) {
+      const service = activeProfile.services.find((item) => item.id === activeTask!.service_id);
+      const workflow = workflows.get(activeTask.workflow_id);
+      if (!service || !workflow || service.workflow !== workflow.id) {
+        throw new Error("恢复任务的服务与工作流绑定无效");
+      }
+      sendTaskPrompt(
+        activeTask,
+        service,
+        workflow,
+        `Agent 已重启并安全接管未完成任务 ${activeTask.task_id}。保留原审批和写入意图，只继续当前阶段。`,
+      );
+    }
     if (requestPoller) clearInterval(requestPoller);
     requestPoller = setInterval(() => {
       void pollRuntime().catch(() => {
@@ -2133,6 +2189,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         ...(validated.model ? { model: validated.model } : {}),
         ...(validated.runId ? { run_id: validated.runId } : {}),
       });
+      dataAdapters.recordGovernedSources(contract.task_id, receipt.result.sources);
       const previous = activeTask;
       const next = completeSubagentNode(
         previous,

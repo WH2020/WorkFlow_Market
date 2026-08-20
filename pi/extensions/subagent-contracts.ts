@@ -34,6 +34,11 @@ export type GovernedSubagentSource = {
   accessed_at: string;
   published_date?: string;
   extraction_reliability?: string;
+  knowledge_mutation?: {
+    operation: "insert";
+    record_id: string;
+    changes: Record<string, string>;
+  };
 };
 
 export type GovernedSubagentContract = {
@@ -119,6 +124,34 @@ function contractPath(projectRoot: string, contractId: string): string {
   return join(runtimeDirectory(projectRoot, "subagent-contracts"), `${contractId}.json`);
 }
 
+function assertGovernedSource(source: GovernedSubagentSource): void {
+  if (
+    !source || typeof source !== "object" ||
+    !SAFE_ID.test(source.source_id) ||
+    typeof source.title !== "string" || !source.title.trim() || source.title.length > 500 ||
+    typeof source.url !== "string" || source.url.length > 2048 ||
+    typeof source.source_type !== "string" || !source.source_type.trim() || source.source_type.length > 80 ||
+    !/^[a-f0-9]{64}$/u.test(source.content_sha256) ||
+    typeof source.accessed_at !== "string" || !Number.isFinite(Date.parse(source.accessed_at)) ||
+    (source.published_date !== undefined && (
+      typeof source.published_date !== "string" || !Number.isFinite(Date.parse(source.published_date))
+    )) ||
+    (source.extraction_reliability !== undefined &&
+      source.extraction_reliability !== "standard" && source.extraction_reliability !== "limited")
+  ) throw new Error("Governed subagent source registry is invalid");
+  if (source.knowledge_mutation !== undefined) {
+    const mutation = source.knowledge_mutation;
+    if (
+      !mutation || mutation.operation !== "insert" || mutation.record_id !== source.source_id ||
+      !mutation.changes || typeof mutation.changes !== "object" || Array.isArray(mutation.changes) ||
+      Object.keys(mutation.changes).length > 100 ||
+      Object.values(mutation.changes).some((entry) => typeof entry !== "string") ||
+      mutation.changes.title !== source.title || mutation.changes.url !== source.url ||
+      !new RegExp(`(?:^|;\\s*)content_sha256=${source.content_sha256}(?:;|$)`, "u").test(mutation.changes.notes ?? "")
+    ) throw new Error("Governed subagent knowledge mutation is invalid");
+  }
+}
+
 function assertContract(value: unknown, expectedId: string): GovernedSubagentContract {
   if (!value || typeof value !== "object") throw new Error("Governed subagent contract must be an object");
   const item = value as Partial<GovernedSubagentContract>;
@@ -153,20 +186,9 @@ function assertContract(value: unknown, expectedId: string): GovernedSubagentCon
   if (item.authorized_urls.some((url) => typeof url !== "string" || url.length > 2048)) throw new Error("Governed subagent authorized URL is invalid");
   if (item.searched_urls.some((url) => typeof url !== "string" || url.length > 2048)) throw new Error("Governed subagent searched URL is invalid");
   if (item.sources.length > 60) throw new Error("Governed subagent source registry exceeds 60 items");
-  for (const source of item.sources) {
-    if (
-      !source ||
-      typeof source !== "object" ||
-      !SAFE_ID.test(source.source_id) ||
-      typeof source.title !== "string" ||
-      !source.title.trim() ||
-      source.title.length > 500 ||
-      typeof source.url !== "string" ||
-      source.url.length > 2048 ||
-      !/^[a-f0-9]{64}$/u.test(source.content_sha256) ||
-      typeof source.accessed_at !== "string" ||
-      !Number.isFinite(Date.parse(source.accessed_at))
-    ) throw new Error("Governed subagent source registry is invalid");
+  for (const source of item.sources) assertGovernedSource(source);
+  if (new Set(item.sources.map((source) => source.source_id)).size !== item.sources.length) {
+    throw new Error("Governed subagent source registry contains duplicate IDs");
   }
   return item as GovernedSubagentContract;
 }
@@ -356,4 +378,37 @@ export function writeGovernedSubagentResult(
     result,
     path: relative(realpathSync.native(resolve(projectRoot)), path).replaceAll("\\", "/"),
   };
+}
+
+export function loadGovernedSubagentResult(projectRoot: string, contractId: string): GovernedSubagentResult {
+  validateContractId(contractId);
+  const path = join(runtimeDirectory(projectRoot, "subagent-results"), `${contractId}.json`);
+  if (!existsSync(path)) throw new Error("Governed subagent result is missing");
+  const meta = lstatSync(path);
+  if (!meta.isFile() || meta.isSymbolicLink() || meta.size < 2 || meta.size > MAX_RESULT_BYTES) {
+    throw new Error("Governed subagent result is not a bounded regular file");
+  }
+  const item = JSON.parse(readFileSync(path, "utf8")) as Partial<GovernedSubagentResult>;
+  if (
+    item.schema_version !== "1.0" || item.contract_id !== contractId ||
+    !SAFE_ID.test(item.task_id ?? "") || !SAFE_ID.test(item.profile_id ?? "") || !SAFE_ID.test(item.node_id ?? "") ||
+    (item.role !== "research-scout" && item.role !== "readonly-reviewer") ||
+    typeof item.agent !== "string" || !item.agent.trim() || item.agent.length > 128 ||
+    typeof item.output !== "string" || !item.output.trim() || Buffer.byteLength(item.output, "utf8") > 256 * 1024 ||
+    !Array.isArray(item.sources) || item.sources.length > 60 ||
+    !/^[a-f0-9]{64}$/u.test(item.contract_sha256 ?? "") ||
+    !/^[a-f0-9]{64}$/u.test(item.output_sha256 ?? "") ||
+    !/^[a-f0-9]{64}$/u.test(item.receipt_sha256 ?? "") ||
+    typeof item.completed_at !== "string" || !Number.isFinite(Date.parse(item.completed_at)) ||
+    (item.model !== undefined && (typeof item.model !== "string" || item.model.length > 256)) ||
+    (item.run_id !== undefined && (typeof item.run_id !== "string" || item.run_id.length > 256))
+  ) throw new Error("Governed subagent result has an invalid schema");
+  for (const source of item.sources) assertGovernedSource(source);
+  if (new Set(item.sources.map((source) => source.source_id)).size !== item.sources.length) {
+    throw new Error("Governed subagent result contains duplicate source IDs");
+  }
+  if (item.output_sha256 !== sha256(item.output)) throw new Error("Governed subagent output hash mismatch");
+  const { receipt_sha256: receiptSha256, ...base } = item as GovernedSubagentResult;
+  if (receiptSha256 !== sha256(canonical(base))) throw new Error("Governed subagent receipt hash mismatch");
+  return item as GovernedSubagentResult;
 }

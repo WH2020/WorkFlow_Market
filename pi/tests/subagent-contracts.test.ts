@@ -9,6 +9,7 @@ import {
   cleanupExpiredSubagentContracts,
   createGovernedSubagentContract,
   loadGovernedSubagentContract,
+  loadGovernedSubagentResult,
   recordGovernedSearchUrls,
   recordGovernedSources,
   updateGovernedSubagentContract,
@@ -42,6 +43,15 @@ test("governed subagent contract freezes identity and produces a hashed local re
       content_sha256: "b".repeat(64),
       accessed_at: "2026-08-19T00:00:00.000Z",
       extraction_reliability: "standard",
+      knowledge_mutation: {
+        operation: "insert",
+        record_id: "web-source-1",
+        changes: {
+          title: "Example source",
+          url: "https://example.com/search-result",
+          notes: `content_sha256=${"b".repeat(64)}; evidence_refs=正文全文`,
+        },
+      },
     }]);
     const loaded = loadGovernedSubagentContract(root, contract.contract_id);
     assert.equal(loaded.revision, 2);
@@ -59,6 +69,8 @@ test("governed subagent contract freezes identity and produces a hashed local re
     const stored = JSON.parse(readFileSync(join(root, receipt.path), "utf8")) as { receipt_sha256: string };
     assert.equal(stored.receipt_sha256, receipt.result.receipt_sha256);
     assert.match(stored.receipt_sha256, /^[a-f0-9]{64}$/u);
+    const recovered = loadGovernedSubagentResult(root, contract.contract_id);
+    assert.equal(recovered.sources[0]?.knowledge_mutation?.record_id, "web-source-1");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -885,6 +885,24 @@ export function consumeApprovalRequest(
     : rejectApproval(clean, workflow, nodeId, clean.version, note);
 }
 
+export function rebindTaskSession(
+  source: WorkflowTask,
+  destinationSessionKey: string,
+  expectedVersion: number,
+  note = "Agent process restarted while the governed task was active",
+): WorkflowTask {
+  assertExpectedVersion(source, expectedVersion);
+  if (isTerminal(source)) throw new TaskTransitionError(`Task ${source.task_id} is already ${source.status}`);
+  if (!destinationSessionKey || destinationSessionKey.length > 4096) {
+    throw new TaskTransitionError("Task destination session identity is invalid");
+  }
+  const state = clone(source);
+  if (state.session_key === destinationSessionKey) return state;
+  state.session_key = destinationSessionKey;
+  appendAudit(state, "task_session_rebound", "system", undefined, note);
+  return state;
+}
+
 function validateTaskId(taskId: string): void {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(taskId)) throw new Error(`Unsafe task ID: ${taskId}`);
 }
@@ -949,6 +967,16 @@ export class TaskStore {
       throw new TaskTransitionError(`Session has ${active.length} active tasks; manual recovery is required`);
     }
     return active[0];
+  }
+
+  findNonterminalForProfile(profileId: string): WorkflowTask | undefined {
+    if (!existsSync(this.directory)) return undefined;
+    const active = readdirSync(this.directory)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => this.load(basename(name, ".json")))
+      .filter((task): task is WorkflowTask => Boolean(task))
+      .filter((task) => task.profile_id === profileId && !isTerminal(task));
+    return active.length === 1 ? active[0] : undefined;
   }
 
   save(state: WorkflowTask, expectedVersion?: number): void {

@@ -58,7 +58,7 @@ function fixture(fixedIntent = false, taskId?: string, profileId = "market-direc
       tools.set(tool.name, tool);
     },
   };
-  registerDataAdapters(pi as never, {
+  const runtime = registerDataAdapters(pi as never, {
     projectRoot: () => root,
     beforeLogicalTool: (tool, params) => {
       before.push(tool);
@@ -73,6 +73,7 @@ function fixture(fixedIntent = false, taskId?: string, profileId = "market-direc
   });
   return {
     root,
+    runtime,
     tools,
     before,
     after,
@@ -469,6 +470,78 @@ test("knowledge writes reject unrecognized evidence status", async () => {
       /status 必须是/,
     );
     assert.equal(readFileSync(join(state.root, "data", "knowledge", "source-register.csv"), "utf8"), original);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("knowledge evidence validation rolls a managed commit back instead of stranding it", async () => {
+  const state = fixture(true, "task-missing-evidence");
+  try {
+    const original = readFileSync(join(state.root, "data", "knowledge", "source-register.csv"), "utf8");
+    await assert.rejects(
+      () => state.tools.get("director_knowledge_write")!.execute("missing-evidence", {
+        mutations: [{
+          operation: "insert",
+          record_id: "web-missing",
+          changes: { title: "缺少证据", status: "pending" },
+        }],
+      }),
+      /缺少本任务证据 registry/,
+    );
+    assert.deepEqual(state.errors, [{ tool: "knowledge.write", outcome: "not_committed" }]);
+    assert.equal(readFileSync(join(state.root, "data", "knowledge", "source-register.csv"), "utf8"), original);
+  } finally {
+    state.cleanup();
+  }
+});
+
+test("governed subagent source anchors permit approved enrichment but reject identity drift", async () => {
+  const taskId = "task-governed-anchor";
+  const state = fixture(true, taskId);
+  const source = {
+    source_id: "web-governed",
+    title: "已读取的官方正文",
+    source_type: "web",
+    url: "https://example.com/policy",
+    content_sha256: "a".repeat(64),
+    accessed_at: "2026-08-20T08:00:00.000Z",
+    extraction_reliability: "standard",
+  };
+  const mutation = {
+    operation: "insert" as const,
+    record_id: source.source_id,
+    changes: {
+      title: source.title,
+      url: source.url,
+      publisher: "官方机构",
+      published_date: "",
+      accessed_date: "2026-08-20",
+      region: "中国",
+      topic: "政策",
+      source_type: "政府政策",
+      quality: "官方正文",
+      exposure_status: "未触达",
+      status: "verified",
+      notes: `content_sha256=${source.content_sha256}; evidence_refs=正文全文`,
+    },
+  };
+  try {
+    assert.equal(state.runtime.recordGovernedSources(taskId, [source]), 1);
+    await assert.rejects(
+      () => state.tools.get("director_knowledge_write")!.execute("drift", {
+        mutations: [{ ...mutation, changes: { ...mutation.changes, title: "伪造标题" } }],
+      }),
+      /标题或 URL 与受管正文证据不一致/,
+    );
+    assert.equal(state.errors.at(-1)?.outcome, "not_committed");
+
+    await state.tools.get("director_knowledge_write")!.execute("write", { mutations: [mutation] });
+    const stored = readFileSync(join(state.root, "data", "knowledge", "source-register.csv"), "utf8");
+    assert.match(stored, /web-governed/u);
+    assert.match(stored, /官方正文/u);
+    assert.match(stored.split(/\r?\n/u, 1)[0] ?? "", /key_facts,important_quotes,interpretation,limitations/u);
+    assert.match(stored, /脑机, 综述/u, "旧知识记录必须在加列升级后保留");
   } finally {
     state.cleanup();
   }

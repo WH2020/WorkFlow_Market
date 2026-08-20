@@ -13,6 +13,8 @@ import verticalWorkflow, {
   writeAgentRuntimeLease,
 } from "../pi/extensions/vertical-workflow.ts";
 import {
+  approveNode,
+  beginWriteCommit,
   completeLogicalTool,
   completeModelNode,
   createTask,
@@ -607,6 +609,63 @@ test("a fresh runtime safely adopts an approved task from an ended session", asy
       join(root, ".pi", "director-runtime", "agent-leases", `${process.pid}.json`), "utf8",
     )) as { task_id: string };
     assert.equal(lease.task_id, "task-detached-approval");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a fresh runtime rebinds one interrupted committing task and continues its exact checkpoint", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-restart-commit-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const workflow: RuntimeWorkflow = {
+    id: "market.sales.pipeline-review",
+    nodes: [
+      { id: "load_accounts", type: "tool", tool: "sales.read", depends_on: [] },
+      { id: "analyze", type: "agent", depends_on: ["load_accounts"] },
+      { id: "confirm", type: "approval", depends_on: ["analyze"] },
+      { id: "update", type: "tool", tool: "sales.write", depends_on: ["confirm"] },
+      { id: "validate_updates", type: "validator", depends_on: ["update"] },
+    ],
+  };
+  try {
+    const payload = {
+      table: "customers",
+      mutations: [{ operation: "update", record_id: "c-1", changes: { next_action: "follow up" }, expected_version: "v1" }],
+    };
+    let task = createTask({
+      sessionKey: "ended-session.jsonl", profileId: "sales-director",
+      serviceId: "sales-review", workflow, request: "review", taskId: "task-restart-commit",
+    });
+    task = completeLogicalTool(task, workflow, "sales.read", task.version);
+    task = proposeWriteIntent(task, workflow, "sales.write", payload, task.version);
+    task = completeModelNode(task, workflow, "analyze", task.version);
+    task = approveNode(task, workflow, "confirm", task.version);
+    task = beginWriteCommit(task, workflow, "sales.write", payload, task.version);
+    const taskDirectory = join(root, ".pi", "director-runtime", "tasks");
+    mkdirSync(taskDirectory, { recursive: true });
+    writeFileSync(join(taskDirectory, `${task.task_id}.json`), JSON.stringify(task), "utf8");
+
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const persisted = JSON.parse(readFileSync(join(taskDirectory, `${task.task_id}.json`), "utf8")) as {
+      session_key: string; status: string; current_node: string; pending_write: { status: string };
+      audit: Array<{ action: string }>;
+    };
+    assert.equal(persisted.session_key, join(root, "session.jsonl"));
+    assert.equal(persisted.status, "running");
+    assert.equal(persisted.current_node, "update");
+    assert.equal(persisted.pending_write.status, "committing");
+    assert.ok(persisted.audit.some((event) => event.action === "task_session_rebound"));
+    assert.ok(runtime.messages.some((message) => message.includes("Agent 已重启并安全接管未完成任务")));
     await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;

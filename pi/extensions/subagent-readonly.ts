@@ -102,6 +102,7 @@ export default function governedReadonlySubagent(pi: ExtensionAPI): void {
           accessed_at: source.accessed_at,
           ...(source.published_date ? { published_date: source.published_date } : {}),
           extraction_reliability: source.extraction_reliability,
+          knowledge_mutation: source.knowledge_mutation,
         });
       }
       recordGovernedSources(projectRoot, params.contract_id, registry);
