@@ -30,6 +30,7 @@ class MacOSDistributionTests(unittest.TestCase):
             "--bundles app,dmg",
             "codesign --verify --deep --strict",
             "lipo -archs",
+            'case " $ARCHS " in *" arm64 "*',
             "runtime.zip",
             "SHA256SUMS.txt",
             "--self-test",

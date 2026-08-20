@@ -51,7 +51,8 @@ DMG_SOURCE="$(find "$BUNDLE_ROOT/dmg" -maxdepth 1 -type f -name '*.dmg' -print -
 codesign --verify --deep --strict "$APP_SOURCE"
 ARCHS="$(lipo -archs "$APP_SOURCE/Contents/MacOS/Agent4Market")"
 if [ "$TARGET" = "universal-apple-darwin" ]; then
-  case " $ARCHS " in *" aarch64 "*) ;; *) printf '%s\n' 'Universal app is missing Apple Silicon code.' >&2; exit 2 ;; esac
+  # Rust names the target aarch64-apple-darwin, while macOS lipo reports it as arm64.
+  case " $ARCHS " in *" arm64 "*) ;; *) printf '%s\n' 'Universal app is missing Apple Silicon code.' >&2; exit 2 ;; esac
   case " $ARCHS " in *" x86_64 "*) ;; *) printf '%s\n' 'Universal app is missing Intel code.' >&2; exit 2 ;; esac
 fi
 
