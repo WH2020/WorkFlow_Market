@@ -283,6 +283,8 @@
   const $ = (id) => document.getElementById(id);
   const label = {
     waiting_approval: "等待你的审批",
+    approval_pending: "正在执行审批",
+    approval_stalled: "等待智能核心接管",
     running: "正在处理",
     requested: "等待智能核心接手",
     interrupted: "已中断",
@@ -1279,7 +1281,9 @@
       composer.append(textarea, actions);
       if (task.status === "waiting_approval") {
         const warning = document.createElement("small");
-        warning.textContent = "当前正等待审批：消息可以补充上下文，但不会替代批准、驳回或演示文稿大纲修订。";
+        warning.textContent = task.approval_request
+          ? "你的审批已经提交；智能核心核验完成前不能重复操作。"
+          : "当前正等待审批：消息可以补充上下文，但不会替代批准、驳回或演示文稿大纲修订。";
         composer.append(warning);
       }
       section.append(composer);
@@ -1322,9 +1326,9 @@
       renderTaskProgress(article, task, historical);
       const presentationRendered = renderPresentationReview(article, task);
       renderRawWriteIntent(article, task, presentationRendered);
-      if (task.status === "waiting_approval") addAction(actions, task, "approve", approvalActionLabel(task));
-      if (task.status === "waiting_approval") addAction(actions, task, "reject", "驳回");
-      if (task.status === "waiting_approval") addAction(actions, task, "cancel", "结束任务");
+      if (task.status === "waiting_approval" && !task.approval_request) addAction(actions, task, "approve", approvalActionLabel(task));
+      if (task.status === "waiting_approval" && !task.approval_request) addAction(actions, task, "reject", "驳回");
+      if (task.status === "waiting_approval" && !task.approval_request) addAction(actions, task, "cancel", "结束任务");
       if (effectiveStatus === "interrupted") addAction(actions, task, "resume", "继续任务");
       if (effectiveStatus === "interrupted") addRestartAction(actions, task, "重新开始");
       if (effectiveStatus === "interrupted") addAction(actions, task, "cancel", "结束任务");
@@ -1606,10 +1610,10 @@
     const activeTasks = tasks.filter((task) => !isHistoricalTask(task));
     const period = currentWeek();
     const inWeek = tasks.filter((task) => String(task.updated_at || task.created_at || "") >= period.start);
-    const pending = tasks.filter((task) => task.status === "waiting_approval");
-    const running = tasks.filter((task) => displayStatus(task) === "running");
+    const pending = tasks.filter((task) => task.status === "waiting_approval" && !task.approval_request);
+    const running = tasks.filter((task) => ["running", "approval_pending"].includes(displayStatus(task)));
     const queued = tasks.filter((task) => displayStatus(task) === "requested");
-    const interrupted = tasks.filter((task) => displayStatus(task) === "interrupted");
+    const interrupted = tasks.filter((task) => ["interrupted", "approval_stalled"].includes(displayStatus(task)));
     const completed = inWeek.filter((task) => task.status === "completed");
     $("home-pending").textContent = pending.length;
     $("home-running").textContent = running.length;

@@ -1322,9 +1322,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     }
   };
 
-  const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow) => {
+  const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow, recoveryNote = "") => {
     pi.sendUserMessage(
-      `/skill:${service.skill} 当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
+      `/skill:${service.skill} ${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
       { expandPromptTemplates: true },
     );
   };
@@ -1539,7 +1539,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     return next;
   };
 
-  const consumeDetachedLifecycleRequests = (): void => {
+  const consumeDetachedLifecycleRequests = async (): Promise<void> => {
     if (!existsSync(taskStore.directory)) return;
     for (const name of readdirSync(taskStore.directory).filter((entry) => entry.endsWith(".json")).sort().slice(0, 500)) {
       const taskId = basename(name, ".json");
@@ -1555,6 +1555,45 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           ) continue;
           const next = consumeApprovalRequest(task, workflowFor(task) as RuntimeWorkflow);
           taskStore.save(next, task.version);
+          continue;
+        }
+        const trustedDetachedDecision =
+          request.requested_by === "local-workbench" ||
+          request.requested_by === "local-workbench-write-card" ||
+          request.requested_by.startsWith("local-workbench-revision:");
+        if (request.decision === "reject" && trustedDetachedDecision) {
+          const next = consumeApprovalRequest(task, workflowFor(task) as RuntimeWorkflow);
+          taskStore.save(next, task.version);
+          continue;
+        }
+        if (
+          (request.decision === "approve" || request.decision === "revise") &&
+          trustedDetachedDecision &&
+          (!activeTask || isTerminal(activeTask)) &&
+          task.profile_id === activeProfile.id
+        ) {
+          const workflow = workflowFor(task);
+          const service = activeProfile.services.find((item) => item.id === task.service_id);
+          if (!service || service.workflow !== workflow.id) continue;
+          const next = consumeApprovalRequest(task, workflow as RuntimeWorkflow, sessionKey);
+          const applied = await applyTaskRuntimeSelection({
+            requested_model: next.effective_model ?? next.requested_model,
+            requested_thinking_level: next.effective_thinking_level ?? next.requested_thinking_level,
+          });
+          try {
+            persistTransition(task, next);
+          } catch (error) {
+            await applied.rollback();
+            throw error;
+          }
+          if (next.status === "running") {
+            sendTaskPrompt(
+              next,
+              service,
+              workflow,
+              `本地工作台已批准受管任务 ${next.task_id}；该任务已从旧会话安全接管。继续且仅执行当前阶段节点。`,
+            );
+          }
           continue;
         }
         if (
@@ -1593,7 +1632,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           { deliverAs: "followUp" },
         );
       }
-      consumeDetachedLifecycleRequests();
+      await consumeDetachedLifecycleRequests();
       consumeTaskMessages();
       await consumeWorkbenchRequest();
     } finally {

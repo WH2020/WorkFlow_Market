@@ -176,6 +176,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn(".write-edit-overlay", styles)
         self.assertIn("function confirmAction", javascript)
         self.assertIn(".app-confirm-overlay", styles)
+        self.assertIn('approval_pending: "正在执行审批"', javascript)
+        self.assertIn('task.status === "waiting_approval" && !task.approval_request', javascript)
         self.assertNotIn("window.confirm(", javascript)
         self.assertNotRegex(javascript, r"(?<![A-Za-z])confirm\(")
         self.assertIn('redirect.textContent = "调整当前方向"', javascript)
@@ -383,6 +385,26 @@ class ControlCentreTests(unittest.TestCase):
         lease["heartbeat_at"] = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
         server.atomic_json(server.AGENT_LEASES / "1234.json", lease)
         self.assertEqual(server.task_summaries()[0]["display_status"], "interrupted")
+
+    def test_submitted_approval_has_pending_and_stalled_display_states(self):
+        current = datetime.now(timezone.utc)
+        task = {
+            "task_id": "task-approval", "profile_id": "sales-director", "status": "waiting_approval",
+            "session_key": "old-session", "version": 8,
+            "approval_request": {
+                "decision": "approve", "requested_by": "local-workbench", "expected_version": 7,
+                "requested_at": current.isoformat(),
+            },
+        }
+        self.assertEqual(
+            server.task_display_state(task, {}, current),
+            ("approval_pending", "approval_pending"),
+        )
+        task["approval_request"]["requested_at"] = (current - timedelta(seconds=16)).isoformat()
+        self.assertEqual(
+            server.task_display_state(task, {}, current),
+            ("approval_stalled", "approval_stalled"),
+        )
 
     def test_embedded_ai_core_is_default_and_runtime_summary_accepts_an_idle_lease(self):
         self.assertFalse(server.desktop_settings()["show_ai_core_window"])

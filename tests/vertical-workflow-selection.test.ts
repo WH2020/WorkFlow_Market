@@ -550,6 +550,136 @@ test("the runtime poll consumes a workbench approval and resumes the next stage"
   }
 });
 
+test("a fresh runtime safely adopts an approved task from an ended session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-detached-approval-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const workflow: RuntimeWorkflow = {
+    id: "market.sales.pipeline-review",
+    nodes: [
+      { id: "load_accounts", type: "tool", tool: "sales.read", depends_on: [] },
+      { id: "analyze", type: "agent", depends_on: ["load_accounts"] },
+      { id: "confirm", type: "approval", depends_on: ["analyze"] },
+      { id: "update", type: "tool", tool: "sales.write", depends_on: ["confirm"] },
+      { id: "validate_updates", type: "validator", depends_on: ["update"] },
+    ],
+  };
+  try {
+    let task = createTask({
+      sessionKey: "ended-session.jsonl", profileId: "sales-director",
+      serviceId: "sales-review", workflow, request: "review", taskId: "task-detached-approval",
+    });
+    task = completeLogicalTool(task, workflow, "sales.read", task.version);
+    task = proposeWriteIntent(task, workflow, "sales.write", {
+      table: "customers",
+      mutations: [{ operation: "update", record_id: "c-1", changes: { next_action: "follow up" }, expected_version: "v1" }],
+    }, task.version);
+    task = completeModelNode(task, workflow, "analyze", task.version);
+    const disk = {
+      ...task,
+      version: task.version + 1,
+      approval_request: {
+        decision: "approve" as const, requested_at: "2026-08-20T00:00:00.000Z",
+        requested_by: "local-workbench", expected_version: task.version,
+        intent_id: task.pending_write!.intent_id, payload_sha256: task.pending_write!.payload_sha256,
+      },
+    };
+    const taskDirectory = join(root, ".pi", "director-runtime", "tasks");
+    mkdirSync(taskDirectory, { recursive: true });
+    writeFileSync(join(taskDirectory, "task-detached-approval.json"), JSON.stringify(disk), "utf8");
+
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    const persisted = JSON.parse(readFileSync(join(taskDirectory, "task-detached-approval.json"), "utf8")) as {
+      session_key: string; status: string; approval_request?: unknown;
+      pending_write?: { status: string }; audit: Array<{ action: string }>;
+    };
+    assert.equal(persisted.session_key, join(root, "session.jsonl"));
+    assert.equal(persisted.status, "running");
+    assert.equal(persisted.pending_write?.status, "approved");
+    assert.equal(persisted.approval_request, undefined);
+    assert.ok(persisted.audit.some((event) => event.action === "task_session_rebound"));
+    assert.ok(runtime.messages.some((message) => message.includes("已从旧会话安全接管")));
+    const lease = JSON.parse(readFileSync(
+      join(root, ".pi", "director-runtime", "agent-leases", `${process.pid}.json`), "utf8",
+    )) as { task_id: string };
+    assert.equal(lease.task_id, "task-detached-approval");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a detached approval with a replaced hash remains fail closed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-detached-approval-hash-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  const previousEdition = process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+  const workflow: RuntimeWorkflow = {
+    id: "market.sales.pipeline-review",
+    nodes: [
+      { id: "load_accounts", type: "tool", tool: "sales.read", depends_on: [] },
+      { id: "analyze", type: "agent", depends_on: ["load_accounts"] },
+      { id: "confirm", type: "approval", depends_on: ["analyze"] },
+      { id: "update", type: "tool", tool: "sales.write", depends_on: ["confirm"] },
+    ],
+  };
+  try {
+    let task = createTask({
+      sessionKey: "ended-session.jsonl", profileId: "sales-director",
+      serviceId: "sales-review", workflow, request: "review", taskId: "task-detached-tampered",
+    });
+    task = completeLogicalTool(task, workflow, "sales.read", task.version);
+    task = proposeWriteIntent(task, workflow, "sales.write", {
+      table: "customers",
+      mutations: [{ operation: "update", record_id: "c-1", changes: { next_action: "follow up" }, expected_version: "v1" }],
+    }, task.version);
+    task = completeModelNode(task, workflow, "analyze", task.version);
+    const disk = {
+      ...task,
+      version: task.version + 1,
+      approval_request: {
+        decision: "approve" as const, requested_at: "2026-08-20T00:00:00.000Z",
+        requested_by: "local-workbench", expected_version: task.version,
+        intent_id: task.pending_write!.intent_id, payload_sha256: "f".repeat(64),
+      },
+    };
+    const taskDirectory = join(root, ".pi", "director-runtime", "tasks");
+    mkdirSync(taskDirectory, { recursive: true });
+    const taskPath = join(taskDirectory, "task-detached-tampered.json");
+    writeFileSync(taskPath, JSON.stringify(disk), "utf8");
+    const runtime = harness(root);
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const persisted = JSON.parse(readFileSync(taskPath, "utf8")) as {
+      session_key: string; status: string; approval_request?: unknown; pending_write?: { status: string };
+    };
+    assert.equal(persisted.session_key, "ended-session.jsonl");
+    assert.equal(persisted.status, "waiting_approval");
+    assert.equal(persisted.pending_write?.status, "prepared");
+    assert.ok(persisted.approval_request);
+    const lease = JSON.parse(readFileSync(
+      join(root, ".pi", "director-runtime", "agent-leases", `${process.pid}.json`), "utf8",
+    )) as { task_id: string | null };
+    assert.equal(lease.task_id, null);
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
+    else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the runtime poll closes an interrupted task after a workbench cancellation request", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-detached-cancel-"));
   const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;

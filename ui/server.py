@@ -80,6 +80,7 @@ DEFAULT_PROJECT_ID = "project-default"
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".pptx"}
 AGENT_LEASE_FRESH_SECONDS = 15
+APPROVAL_REQUEST_STALE_SECONDS = 15
 TASK_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 PUBLIC_SEARCH_SERVICES = {"industry-research", "government-proposal", "presentation-studio"}
 BRAVE_DASHBOARD_URL = "https://api-dashboard.search.brave.com/app/keys"
@@ -387,7 +388,10 @@ def open_data_directory() -> Path:
     return directory
 
 
-def task_display_state(task: dict[str, Any], leases: dict[str, dict[str, Any]] | None = None) -> tuple[str, str]:
+def task_display_state(
+    task: dict[str, Any], leases: dict[str, dict[str, Any]] | None = None,
+    reference: datetime | None = None,
+) -> tuple[str, str]:
     status = str(task.get("status") or "")
     if status in {"completed", "rejected", "cancelled", "failed"}:
         if status == "cancelled" and isinstance(task.get("superseded_by_task_id"), str):
@@ -395,9 +399,21 @@ def task_display_state(task: dict[str, Any], leases: dict[str, dict[str, Any]] |
         return status, "historical"
     if status == "requested":
         return "requested", "queued"
+    approval = task.get("approval_request")
+    if status == "waiting_approval" and isinstance(approval, dict):
+        try:
+            requested_at = datetime.fromisoformat(str(approval.get("requested_at") or "").replace("Z", "+00:00"))
+            if requested_at.tzinfo is None:
+                raise ValueError("approval timestamp has no timezone")
+            current = (reference or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            age = (current - requested_at.astimezone(timezone.utc)).total_seconds()
+            if -5 <= age <= APPROVAL_REQUEST_STALE_SECONDS:
+                return "approval_pending", "approval_pending"
+        except (TypeError, ValueError):
+            pass
+        return "approval_stalled", "approval_stalled"
     if status != "running":
         return status, status
-    approval = task.get("approval_request")
     if isinstance(approval, dict):
         if approval.get("decision") == "resume":
             return "resuming", "interrupted"
@@ -493,7 +509,7 @@ def task_progress_timeline(
         "write_commit_rolled_back": "写入已安全回滚", "write_commit_ambiguous": "写入状态需要人工检查",
         "approval_granted": "你已批准继续", "approval_rejected": "你已驳回当前方案",
         "task_resumed": "任务已恢复", "task_cancelled": "任务已结束", "task_completed": "任务已完成",
-        "write_reapproval_required": "写入需要重新确认",
+        "write_reapproval_required": "写入需要重新确认", "task_session_rebound": "智能核心已接管任务",
     }
     for index, audit in enumerate(task.get("audit") if isinstance(task.get("audit"), list) else []):
         if not isinstance(audit, dict) or audit.get("action") not in audit_titles or not isinstance(audit.get("at"), str):
@@ -532,6 +548,10 @@ def task_progress_timeline(
         node = readable_node(task.get("waiting_node") or task.get("current_node"))
         if display_status == "waiting_approval":
             title, summary = "等待你的确认", "内容已到人工确认关口；新消息不会替代批准或驳回。"
+        elif display_status == "approval_pending":
+            title, summary = "正在执行你的审批", "审批已安全保存，智能核心正在核对任务版本和内容校验码。"
+        elif display_status == "approval_stalled":
+            title, summary = "智能核心尚未接管", "审批已保存，但超过 15 秒仍未被智能核心接管；请检查智能核心运行状态。"
         elif display_status == "interrupted":
             title, summary = "任务已中断", "智能核心没有继续执行，可选择继续任务或重新开始。"
         else:

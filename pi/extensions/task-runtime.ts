@@ -824,6 +824,7 @@ export function consumeResumeRequest(
 export function consumeApprovalRequest(
   source: WorkflowTask,
   workflow: RuntimeWorkflow,
+  destinationSessionKey?: string,
 ): WorkflowTask {
   const request = source.approval_request;
   if (!request) throw new TaskTransitionError("Task has no external approval request");
@@ -837,6 +838,21 @@ export function consumeApprovalRequest(
   }
   const clean: WorkflowTask = clone(source);
   delete clean.approval_request;
+  if (destinationSessionKey !== undefined) {
+    if (!destinationSessionKey || destinationSessionKey.length > 4096) {
+      throw new TaskTransitionError("Approval destination session identity is invalid");
+    }
+    if (clean.session_key !== destinationSessionKey) {
+      clean.session_key = destinationSessionKey;
+      appendAudit(
+        clean,
+        "task_session_rebound",
+        "system",
+        undefined,
+        "Detached external decision adopted by the active Agent session",
+      );
+    }
+  }
   const note = `${request.requested_by} @ ${request.requested_at}`;
   if (request.decision === "revise") {
     if (

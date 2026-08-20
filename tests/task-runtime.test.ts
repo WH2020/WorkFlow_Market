@@ -235,6 +235,32 @@ test("external UI approval request consumes exactly one reserved version", () =>
   );
 });
 
+test("a detached approval can be audited and rebound to the active Agent session", () => {
+  const task = readyForApproval();
+  const requested = {
+    ...task,
+    version: task.version + 1,
+    approval_request: {
+      decision: "approve" as const,
+      requested_at: "2026-08-18T00:00:00.000Z",
+      requested_by: "local-workbench",
+      expected_version: task.version,
+      intent_id: task.pending_write!.intent_id,
+      payload_sha256: task.pending_write!.payload_sha256,
+    },
+  };
+  const approved = consumeApprovalRequest(requested, linearWorkflow, "session-after-restart");
+  assert.equal(approved.session_key, "session-after-restart");
+  assert.equal(approved.status, "running");
+  assert.equal(approved.pending_write?.status, "approved");
+  assert.ok(approved.audit.some((event) => event.action === "task_session_rebound"));
+  assert.equal(approved.audit.at(-1)?.action, "approval_granted");
+  assert.throws(
+    () => consumeApprovalRequest(requested, linearWorkflow, ""),
+    /destination session identity is invalid/,
+  );
+});
+
 test("a user card edit invalidates the old hash and remains at the approval checkpoint", () => {
   const task = readyForApproval();
   const revisedPayload = {
