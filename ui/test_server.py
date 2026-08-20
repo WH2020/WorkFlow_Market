@@ -145,6 +145,13 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="project-quick-upload"', html)
         self.assertIn('id="open-data-directory"', html)
         self.assertIn('api("/api/data-directory/open"', javascript)
+        self.assertIn('id="open-knowledge-file"', html)
+        self.assertIn('id="knowledge-query"', html)
+        self.assertIn('id="knowledge-status-filter"', html)
+        self.assertIn('id="knowledge-records"', html)
+        self.assertIn('api("/api/knowledge/source/open"', javascript)
+        self.assertIn('api("/api/knowledge/file/open"', javascript)
+        self.assertIn("function renderKnowledge", javascript)
         self.assertIn('id="quick-command"', html)
         self.assertIn('id="schedule-request"', html)
         self.assertIn('id="search-query"', html)
@@ -775,6 +782,59 @@ class ControlCentreTests(unittest.TestCase):
         finally:
             server.ROOT = previous_root
         self.assertEqual(summary["records"], 1)
+
+    def test_knowledge_entries_return_readable_allowlisted_fields(self):
+        root = Path(self.temporary.name) / "knowledge-root"
+        data = root / "data" / "knowledge"
+        data.mkdir(parents=True)
+        target = data / "source-register.csv"
+        target.write_text(
+            "source_id,title,url,publisher,published_date,accessed_date,region,topic,source_type,quality,exposure_status,key_facts,important_quotes,interpretation,limitations,status,notes,secret\n"
+            "source-1,政策原文,https://example.com/policy,主管部门,2026-08-01,2026-08-20,江苏,具身智能,html,high,public,支持试点,原文摘录,适合首轮沟通,仍需确认申报期,verified,第 3 段,不得返回\n",
+            encoding="utf-8",
+        )
+        with patch.object(server, "ROOT", root):
+            result = server.knowledge_entries()
+        self.assertEqual(len(result["entries"]), 1)
+        self.assertEqual(result["entries"][0]["title"], "政策原文")
+        self.assertEqual(result["entries"][0]["key_facts"], "支持试点")
+        self.assertNotIn("secret", result["entries"][0])
+        self.assertNotEqual(result["version"], "missing")
+
+    def test_knowledge_source_only_opens_registered_http_url(self):
+        root = Path(self.temporary.name) / "knowledge-source-root"
+        data = root / "data" / "knowledge"
+        data.mkdir(parents=True)
+        target = data / "source-register.csv"
+        target.write_text(
+            "source_id,title,url\nsource-1,来源,https://example.com/source\n",
+            encoding="utf-8",
+        )
+        with patch.object(server, "ROOT", root), patch.object(server.webbrowser, "open", return_value=True) as opened:
+            self.assertEqual(
+                server.open_knowledge_source({"url": "https://example.com/source"}),
+                "https://example.com/source",
+            )
+            opened.assert_called_once_with("https://example.com/source", new=2)
+            with self.assertRaises(ValueError):
+                server.open_knowledge_source({"url": "https://example.com/not-registered"})
+            with self.assertRaises(ValueError):
+                server.open_knowledge_source({"url": "file:///tmp/source"})
+
+    def test_open_knowledge_file_uses_the_fixed_database_path(self):
+        root = Path(self.temporary.name) / "knowledge-file-root"
+        data = root / "data" / "knowledge"
+        data.mkdir(parents=True)
+        target = data / "source-register.csv"
+        target.write_text("source_id,title\n", encoding="utf-8")
+        with (
+            patch.object(server, "ROOT", root),
+            patch.object(server.sys, "platform", "win32"),
+            patch.object(server.os, "startfile", create=True) as startfile,
+        ):
+            opened = server.open_knowledge_file()
+        self.assertEqual(opened, target.resolve())
+        startfile.assert_called_once_with(str(target.resolve()))
 
     def test_presentation_brief_limits_match_the_plan_contract(self):
         brief = {

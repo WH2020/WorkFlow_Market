@@ -73,7 +73,19 @@
 
         <section class="page" data-page="tasks"><div class="page-heading"><div><p class="section-kicker">TASK CENTRE</p><h1>任务中心</h1><p>查看 AI 处理过程、排队补充消息、调整方向并处理审批。</p></div><button class="primary" data-view="work">发起新任务</button></div><div class="two-column task-layout"><section class="panel"><h2>当前任务</h2><div id="tasks" class="empty">正在读取任务状态…</div></section><section class="panel sticky-panel"><h2>工作流阶段</h2><div id="workflow" class="empty">选择任务后显示。</div></section></div><section class="panel task-history-panel"><div class="panel-heading"><div><h2>历史任务</h2><p class="hint">已完成、已结束和已替代的任务保留在这里，可按原内容再次创建。</p></div></div><div id="task-history" class="empty">暂无历史任务。</div></section></section>
         <section class="page" data-page="sales"><div class="page-heading"><div><p class="section-kicker">CUSTOMERS & SALES</p><h1>客户与销售</h1><p>客户、跟进、资源请求和销售资料的本地台账概览。</p></div><button class="primary" data-service="sales-review">开始客户复盘</button></div><section class="panel"><div id="sales-summary" class="summary"></div></section></section>
-        <section class="page" data-page="knowledge"><div class="page-heading"><div><p class="section-kicker">KNOWLEDGE BASE</p><h1>知识库</h1><p>查看来源登记，上传资料并发起证据化研究。</p></div><button class="primary" data-service="industry-research">发起行业研究</button></div><section class="panel"><div id="knowledge-summary" class="summary"></div></section><section class="panel"><h2>最近项目资料</h2><div id="knowledge-files" class="file-list empty">暂无资料</div></section></section>
+        <section class="page" data-page="knowledge">
+          <div class="page-heading">
+            <div><p class="section-kicker">KNOWLEDGE BASE</p><h1>知识库</h1><p>查看已登记的来源、关键事实、分析说明和使用限制。</p></div>
+            <div class="page-heading-actions"><button id="open-knowledge-file" class="secondary">打开知识库文件</button><button class="primary" data-service="industry-research">发起行业研究</button></div>
+          </div>
+          <section class="panel"><div id="knowledge-summary" class="summary"></div></section>
+          <section class="panel knowledge-library">
+            <div class="panel-heading"><div><h2>知识条目</h2><p class="hint">点击卡片查看完整内容；来源会在系统浏览器中打开。</p></div><span id="knowledge-count" class="count-pill">0</span></div>
+            <div class="knowledge-toolbar"><label><span>搜索知识库</span><input id="knowledge-query" maxlength="100" placeholder="搜索标题、机构、主题或关键事实"></label><label><span>状态</span><select id="knowledge-status-filter"><option value="">全部状态</option><option value="verified">已核验</option><option value="pending">待核验</option><option value="superseded">已替代</option></select></label></div>
+            <div id="knowledge-records" class="knowledge-list empty">正在读取知识条目…</div>
+          </section>
+          <section class="panel"><h2>最近项目资料</h2><div id="knowledge-files" class="file-list empty">暂无资料</div></section>
+        </section>
         <section class="page" data-page="weekly"><div class="page-heading"><div><p class="section-kicker">WEEKLY REPORT</p><h1>周报中心</h1><p>自动汇总本周销售记录，只需补充一个重点。</p></div></div><section id="weekly-task-form" class="panel task-form weekly-form"><div class="form-heading"><div><h2>生成周五销售汇报</h2><p class="hint">客户进展、资源需求、风险和下周行动会自动汇总。</p></div><span id="weekly-period" class="period-badge"></span></div><div class="weekly-summary"><strong>自动读取本周已有记录</strong><ul><li>重点客户进展与停滞机会</li><li>资源需求、风险和待确认事项</li><li>本周完成情况与下周行动</li></ul></div><label>本周特别想强调什么？（可选）<textarea id="weekly-focus" maxlength="120" placeholder="例如：重点突出 A 客户停滞原因，以及需要技术团队支持的事项。"></textarea></label><div class="form-actions"><button id="create-weekly" class="primary">一键生成本周汇报</button><span class="hint">正式 PPT 生成前仍会让你确认。</span></div></section></section>
         <section class="page" data-page="outputs"><div class="page-heading"><div><p class="section-kicker">OUTPUT CENTRE</p><h1>输出中心</h1><p>查看通过受控流程生成的方案、报告和 PPT。</p></div></div><section class="panel"><div id="outputs" class="empty">暂无可显示的产物。</div></section></section>
 

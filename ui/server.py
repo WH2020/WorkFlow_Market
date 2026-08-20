@@ -126,7 +126,8 @@ TASK_STATUS_DISPLAY_NAMES = {
 PROJECT_STATUS_DISPLAY_NAMES = {"active": "使用中", "archived": "已归档"}
 KNOWLEDGE_WRITE_FIELDS = {
     "source_id", "title", "url", "publisher", "published_date", "accessed_date", "region",
-    "topic", "source_type", "quality", "exposure_status", "status", "notes",
+    "topic", "source_type", "quality", "exposure_status", "key_facts", "important_quotes",
+    "interpretation", "limitations", "status", "notes",
 }
 SALES_WRITE_FIELDS = {
     "customers": {
@@ -386,6 +387,35 @@ def open_data_directory() -> Path:
     except OSError as error:
         raise RuntimeError(f"无法打开本地数据目录：{error}") from error
     return directory
+
+
+def open_knowledge_file() -> Path:
+    target = ROOT / "data" / "knowledge" / "source-register.csv"
+    if target.is_symlink() or not target.is_file():
+        raise ValueError("知识库文件尚未创建")
+    root = ROOT.resolve()
+    file_path = target.resolve()
+    if not file_path.is_relative_to(root) or file_path == root:
+        raise ValueError("知识库文件越出应用安装范围")
+    try:
+        if sys.platform == "win32":
+            startfile = getattr(os, "startfile", None)
+            if startfile is None:
+                raise OSError("Windows 文件打开功能不可用")
+            startfile(str(file_path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", str(file_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, start_new_session=True,
+            )
+        else:
+            subprocess.Popen(
+                ["xdg-open", str(file_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, start_new_session=True,
+            )
+    except OSError as error:
+        raise OSError(f"无法打开知识库文件：{error}") from error
+    return file_path
 
 
 def task_display_state(
@@ -1189,10 +1219,19 @@ def task_summaries() -> list[dict[str, Any]]:
 def file_summary(relative: str) -> dict[str, Any]:
     path = ROOT / relative
     is_regular = path.is_file() and not path.is_symlink()
-    info: dict[str, Any] = {"path": relative, "exists": is_regular, "updated_at": None, "records": None}
+    info: dict[str, Any] = {
+        "path": relative, "exists": is_regular, "updated_at": None, "records": None,
+        "version": "missing",
+    }
     if not is_regular:
         return info
-    info["updated_at"] = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="minutes")
+    try:
+        metadata = path.stat()
+    except OSError:
+        info["exists"] = False
+        return info
+    info["updated_at"] = datetime.fromtimestamp(metadata.st_mtime).astimezone().isoformat(timespec="minutes")
+    info["version"] = f"{metadata.st_mtime_ns}:{metadata.st_size}"
     try:
         # Parse record boundaries correctly without returning business fields.
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1332,13 +1371,65 @@ def service_display_name(service_id: Any) -> str:
 
 def _csv_rows(relative: str, limit: int = 5000) -> list[dict[str, str]]:
     path = ROOT / relative
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+    try:
+        metadata = path.stat()
+    except OSError:
+        return []
+    if path.is_symlink() or not path.is_file() or metadata.st_size > 16 * 1024 * 1024:
         return []
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             return [dict(row) for _, row in zip(range(limit), csv.DictReader(handle))]
     except (OSError, UnicodeError, csv.Error):
         return []
+
+
+def knowledge_entries(limit: int = 500) -> dict[str, Any]:
+    path = ROOT / "data" / "knowledge" / "source-register.csv"
+    try:
+        metadata = path.stat()
+    except OSError:
+        return {"version": "missing", "entries": [], "truncated": False}
+    if path.is_symlink() or not path.is_file() or metadata.st_size > 16 * 1024 * 1024:
+        return {"version": "missing", "entries": [], "truncated": False}
+    allowed_fields = (
+        "source_id", "title", "url", "publisher", "published_date", "accessed_date", "region",
+        "topic", "source_type", "quality", "exposure_status", "key_facts", "important_quotes",
+        "interpretation", "limitations", "status", "notes",
+    )
+    rows = _csv_rows("data/knowledge/source-register.csv", limit + 1)
+    entries = [
+        {field: str(row.get(field) or "")[:12000] for field in allowed_fields}
+        for row in rows[:limit]
+    ]
+    entries.sort(
+        key=lambda row: (row.get("accessed_date", ""), row.get("published_date", ""), row.get("source_id", "")),
+        reverse=True,
+    )
+    return {
+        "version": f"{metadata.st_mtime_ns}:{metadata.st_size}",
+        "entries": entries,
+        "truncated": len(rows) > limit,
+    }
+
+
+def open_knowledge_source(payload: dict[str, Any]) -> str:
+    url = str(payload.get("url") or "").strip()
+    if not url or len(url) > 2048:
+        raise ValueError("来源链接无效")
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("来源链接只允许普通 HTTP/HTTPS 地址")
+    allowed = {
+        str(row.get("url") or "").strip()
+        for row in _csv_rows("data/knowledge/source-register.csv", 5000)
+        if str(row.get("url") or "").strip()
+    }
+    if url not in allowed:
+        raise ValueError("该链接不属于当前知识库记录")
+    if not webbrowser.open(url, new=2):
+        raise RuntimeError("无法打开系统浏览器；可在知识卡片中复制来源链接")
+    return url
 
 
 def local_search(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1523,6 +1614,9 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if route == "/api/tasks":
             self.send_json(HTTPStatus.OK, task_summaries())
             return
+        if route == "/api/knowledge":
+            self.send_json(HTTPStatus.OK, knowledge_entries())
+            return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
         elif route not in ("/app.js", "/styles.css"):
@@ -1594,6 +1688,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {
                     "message": "已打开本地数据目录。", "path": str(directory),
                 })
+            elif route == "/api/knowledge/file/open":
+                file_path = open_knowledge_file()
+                self.send_json(HTTPStatus.OK, {
+                    "message": "已使用系统默认表格软件打开知识库。", "path": str(file_path),
+                })
+            elif route == "/api/knowledge/source/open":
+                url = open_knowledge_source(payload)
+                self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开来源。", "url": url})
             elif route == "/api/desktop-settings":
                 self.send_json(HTTPStatus.OK, {
                     **save_desktop_settings(payload),

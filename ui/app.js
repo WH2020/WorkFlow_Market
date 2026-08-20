@@ -14,12 +14,18 @@
   let noticeTimer = null;
   let activeConfirmDismiss = null;
   let schedulePanelInitialized = false;
+  let knowledgeEntries = [];
+  let knowledgeVersion = "";
+  let knowledgeLoadError = "";
+  let knowledgeTruncated = false;
+  let knowledgeRenderedKey = "";
   const guidedDrafts = {};
   const guidedNotes = {};
   const taskMessageDrafts = {};
   const taskProgressScroll = {};
   const taskWriteIntentState = {};
   const taskCardExpansion = new Map();
+  const knowledgeCardExpansion = new Map();
   const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
 
   function captureTaskComposerFocus() {
@@ -1451,12 +1457,159 @@
     return row;
   }
 
+  const knowledgeStatusLabels = {
+    verified: "已核验", pending: "待核验", superseded: "已替代", rejected: "已拒绝",
+  };
+
+  function knowledgeTextSection(className, title, text) {
+    const section = document.createElement("section");
+    section.className = `knowledge-content ${className}`;
+    const heading = document.createElement("strong");
+    heading.textContent = title;
+    const copy = document.createElement("p");
+    copy.textContent = text;
+    section.append(heading, copy);
+    return section;
+  }
+
+  function knowledgeCard(entry) {
+    const card = document.createElement("details");
+    card.className = "knowledge-card";
+    const cardId = entry.source_id || entry.url || entry.title;
+    card.open = Boolean(knowledgeCardExpansion.get(cardId));
+    card.addEventListener("toggle", () => knowledgeCardExpansion.set(cardId, card.open));
+
+    const summary = document.createElement("summary");
+    const summaryCopy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = entry.title || "未命名知识条目";
+    const meta = document.createElement("small");
+    meta.textContent = [entry.publisher, entry.published_date || entry.accessed_date, entry.topic].filter(Boolean).join(" · ") || "暂无来源说明";
+    summaryCopy.append(title, meta);
+    const badges = document.createElement("div");
+    badges.className = "knowledge-badges";
+    const status = document.createElement("span");
+    status.className = `knowledge-badge ${entry.status || "unknown"}`;
+    status.textContent = knowledgeStatusLabels[entry.status] || entry.status || "未标注状态";
+    badges.append(status);
+    if (entry.quality) {
+      const quality = document.createElement("span");
+      quality.className = "knowledge-badge quality";
+      quality.textContent = entry.quality;
+      badges.append(quality);
+    }
+    summary.append(summaryCopy, badges);
+
+    const body = document.createElement("div");
+    body.className = "knowledge-card-body";
+    if (entry.key_facts) body.append(knowledgeTextSection("facts", "主要事实", entry.key_facts));
+    if (entry.interpretation) body.append(knowledgeTextSection("analysis", "分析说明", entry.interpretation));
+    if (entry.limitations) body.append(knowledgeTextSection("warning", "限制与提醒", entry.limitations));
+    if (entry.important_quotes) body.append(knowledgeTextSection("quotes", "重要原文", entry.important_quotes));
+
+    const metadata = document.createElement("dl");
+    metadata.className = "knowledge-metadata";
+    const appendMeta = (labelText, value) => {
+      if (!value) return;
+      const term = document.createElement("dt"); term.textContent = labelText;
+      const description = document.createElement("dd"); description.textContent = value;
+      metadata.append(term, description);
+    };
+    appendMeta("发布机构", entry.publisher);
+    appendMeta("发布日期", entry.published_date);
+    appendMeta("访问日期", entry.accessed_date);
+    appendMeta("地区", entry.region);
+    appendMeta("资料类型", entry.source_type);
+    appendMeta("知识编号", entry.source_id);
+    if (metadata.children.length) body.append(metadata);
+
+    if (entry.notes) {
+      const notes = document.createElement("details");
+      notes.className = "knowledge-notes";
+      const notesSummary = document.createElement("summary"); notesSummary.textContent = "查看补充记录";
+      const notesText = document.createElement("p"); notesText.textContent = entry.notes;
+      notes.append(notesSummary, notesText);
+      body.append(notes);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "knowledge-actions";
+    if (entry.url) {
+      const open = document.createElement("button");
+      open.className = "primary";
+      open.type = "button";
+      open.textContent = "打开来源";
+      open.addEventListener("click", async () => {
+        open.disabled = true;
+        try {
+          const reply = await api("/api/knowledge/source/open", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: entry.url }),
+          });
+          note(reply.message);
+        } catch (error) { note(error.message, true); }
+        finally { open.disabled = false; }
+      });
+      const copy = document.createElement("button");
+      copy.className = "secondary";
+      copy.type = "button";
+      copy.textContent = "复制链接";
+      copy.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(entry.url); note("来源链接已复制。"); }
+        catch { note("无法自动复制，请展开补充记录或打开知识库文件查看链接。", true); }
+      });
+      actions.append(open, copy);
+    } else {
+      const noUrl = document.createElement("span");
+      noUrl.className = "hint";
+      noUrl.textContent = "这条记录没有登记公开来源链接。";
+      actions.append(noUrl);
+    }
+    body.append(actions);
+    card.append(summary, body);
+    return card;
+  }
+
+  function renderKnowledge() {
+    const box = $("knowledge-records");
+    const query = $("knowledge-query").value.trim().toLocaleLowerCase("zh-CN");
+    const status = $("knowledge-status-filter").value;
+    const renderedKey = `${knowledgeVersion}|${query}|${status}|${knowledgeLoadError}`;
+    if (renderedKey === knowledgeRenderedKey) return;
+    knowledgeRenderedKey = renderedKey;
+    const scrollTop = box.scrollTop;
+    const fields = ["title", "publisher", "topic", "region", "key_facts", "interpretation", "limitations", "important_quotes", "notes"];
+    const filtered = knowledgeEntries.filter((entry) => {
+      if (status && entry.status !== status) return false;
+      if (!query) return true;
+      return fields.some((field) => String(entry[field] || "").toLocaleLowerCase("zh-CN").includes(query));
+    });
+    $("knowledge-count").textContent = String(filtered.length);
+    box.classList.toggle("empty", filtered.length === 0);
+    if (knowledgeLoadError) {
+      box.replaceChildren();
+      box.textContent = `知识条目暂时无法读取：${knowledgeLoadError}`;
+    } else if (!filtered.length) {
+      box.replaceChildren();
+      box.textContent = query || status ? "没有符合筛选条件的知识条目。" : "知识库中还没有可显示的条目。";
+    } else {
+      box.replaceChildren(...filtered.map(knowledgeCard));
+      if (knowledgeTruncated) {
+        const warning = document.createElement("p");
+        warning.className = "knowledge-truncated";
+        warning.textContent = "当前只显示最近 500 条；可使用搜索缩小范围，或打开知识库文件查看全部记录。";
+        box.append(warning);
+      }
+    }
+    queueMicrotask(() => { box.scrollTop = Math.min(scrollTop, Math.max(0, box.scrollHeight - box.clientHeight)); });
+  }
+
   function renderData() {
     const renderGroup = (box, items) => {
       box.replaceChildren(...items.map((item) => summaryRow("summary-row", item.path.split("/").pop(), item.exists ? `${item.records ?? "?"} 条 · ${item.updated_at || "未知时间"}` : "尚未创建")));
     };
     renderGroup($("knowledge-summary"), model.data.knowledge || []);
     renderGroup($("sales-summary"), model.data.sales || []);
+    renderKnowledge();
     const recentFiles = (model.project_files || []).slice(0, 8);
     const filesBox = $("knowledge-files");
     filesBox.classList.toggle("empty", recentFiles.length === 0);
@@ -1736,6 +1889,20 @@
     if (!selectedProfile || !model.profiles.some((item) => item.id === selectedProfile)) { selectedProfile = model.profiles.find((item) => item.id === "sales-director")?.id || model.profiles[0]?.id; selectedService = currentProfile()?.default_service; }
     if (!currentProfile()?.services.some((item) => item.id === selectedService)) selectedService = currentProfile()?.default_service;
     if (!projectById(selectedProject) || projectById(selectedProject)?.status !== "active") selectedProject = model.projects?.find((item) => item.status === "active")?.project_id || "project-default";
+    const sourceVersion = model.data?.knowledge?.[0]?.version || "missing";
+    if (sourceVersion !== knowledgeVersion || knowledgeLoadError) {
+      try {
+        const library = await api("/api/knowledge");
+        knowledgeEntries = Array.isArray(library.entries) ? library.entries : [];
+        knowledgeVersion = library.version || sourceVersion;
+        knowledgeTruncated = Boolean(library.truncated);
+        knowledgeLoadError = "";
+      } catch (error) {
+        knowledgeLoadError = error.message;
+        knowledgeVersion = sourceVersion;
+      }
+      knowledgeRenderedKey = "";
+    }
     render();
     restoreTaskComposerFocus(composerFocus);
   }
@@ -1758,6 +1925,16 @@
   $("task-project").onchange = () => { selectedProject = $("task-project").value; $("schedule-project").value = selectedProject; };
   $("home-project").onchange = () => { selectedProject = $("home-project").value; $("task-project").value = selectedProject; $("schedule-project").value = selectedProject; renderProjects(); };
   $("schedule-project").onchange = () => { selectedProject = $("schedule-project").value; $("task-project").value = selectedProject; };
+  $("knowledge-query").addEventListener("input", () => { knowledgeRenderedKey = ""; renderKnowledge(); });
+  $("knowledge-status-filter").addEventListener("change", () => { knowledgeRenderedKey = ""; renderKnowledge(); });
+  $("open-knowledge-file").onclick = async () => {
+    try {
+      const reply = await api("/api/knowledge/file/open", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      note(reply.message);
+    } catch (error) { note(error.message, true); }
+  };
 
   $("show-project-form").onclick = () => { $("project-create-panel").hidden = false; $("project-name").focus(); };
   $("cancel-project").onclick = () => { $("project-create-panel").hidden = true; };
