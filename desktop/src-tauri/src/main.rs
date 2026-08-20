@@ -36,6 +36,29 @@ fn is_project_root(path: &Path) -> bool {
         && path.join("profiles/sales-director/profile.json").is_file()
 }
 
+#[cfg(target_os = "macos")]
+fn configured_macos_project_root() -> Option<PathBuf> {
+    let home = env::var_os("HOME")?;
+    let marker = PathBuf::from(home)
+        .join("Library/Application Support/Agent4Market/install-root");
+    let metadata = std::fs::symlink_metadata(&marker).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+        return None;
+    }
+    let configured = std::fs::read_to_string(marker).ok()?;
+    let path = PathBuf::from(configured.trim());
+    if !path.is_absolute() {
+        return None;
+    }
+    let resolved = path.canonicalize().ok()?;
+    is_project_root(&resolved).then_some(resolved)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn configured_macos_project_root() -> Option<PathBuf> {
+    None
+}
+
 fn project_root() -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Ok(executable) = env::current_exe() {
@@ -45,6 +68,9 @@ fn project_root() -> Result<PathBuf, String> {
     }
     if let Ok(current) = env::current_dir() {
         candidates.push(current);
+    }
+    if let Some(configured) = configured_macos_project_root() {
+        candidates.push(configured);
     }
     for start in candidates {
         let mut cursor = Some(start.as_path());
@@ -56,7 +82,11 @@ fn project_root() -> Result<PathBuf, String> {
             cursor = path.parent();
         }
     }
-    Err("Agent4Market.exe 必须放在完整的销售总监助手安装目录中。".into())
+    Err(if cfg!(target_os = "macos") {
+        "Agent4Market.app 尚未关联完整运行目录；请先运行 scripts/setup-macos.sh。".into()
+    } else {
+        "Agent4Market.exe 必须放在完整的销售总监助手安装目录中。".into()
+    })
 }
 
 fn launcher_log(root: &Path) -> Result<File, String> {
@@ -128,7 +158,21 @@ fn show_startup_error(message: &str) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn show_startup_error(message: &str) {
+    let safe_message = message
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', " ")
+        .replace('\n', " ");
+    let script = format!(
+        "display alert \"销售总监智能助手启动失败\" message \"{}\" as critical buttons {{\"好\"}} default button \"好\"",
+        safe_message
+    );
+    let _ = Command::new("osascript").args(["-e", &script]).status();
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn show_startup_error(message: &str) {
     eprintln!("销售总监智能助手启动失败：{message}");
 }

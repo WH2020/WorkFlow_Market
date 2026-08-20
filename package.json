@@ -1,6 +1,6 @@
 {
   "name": "workflow-director-agent",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "type": "module",
   "description": "A single-role Sales Director AI Assistant with a Tauri desktop shell and governed Pi workflows.",
   "license": "MIT",
@@ -21,7 +21,8 @@
   "scripts": {
     "check:types": "tsc --noEmit",
     "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/data-adapters.test.ts pi/tests/source-readers.test.ts pi/tests/subagent-contracts.test.ts pi/tests/web-search.test.ts pi/tests/deck-builder.test.mjs",
-    "test:ppt-e2e": "node pi/tests/standalone-deck-e2e.mjs"
+    "test:ppt-e2e": "node pi/tests/standalone-deck-e2e.mjs",
+    "build:macos": "bash scripts/build-macos-desktop.sh"
   },
   "pi": {
     "extensions": [
@@ -43,6 +44,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.2",
+    "@tauri-apps/cli": "2.11.4",
     "@types/node": "^24.10.0",
     "typescript": "^5.9.3"
   },

@@ -43,6 +43,8 @@ cd WorkFlow_Market
 
 Windows 安装器使用 Tauri 2 构建根目录下的桌面程序 `Agent4Market.exe`。双击后直接打开“销售总监 AI 助手”窗口，不调用系统浏览器；程序默认以 RPC 子进程把销售总监 Pi 核心嵌入桌面应用，不再弹出 PowerShell。运行状态和最近记录可在“设置 → AI 核心”查看；只有用户主动开启“显示 AI 核心调试窗口”并重启应用时才显示独立终端。关闭桌面窗口时会回收工作台和 AI 核心进程树。EXE 不包含业务数据，也不依赖 Codex Desktop；移动 EXE 时仍必须连同整个已安装目录一起移动。
 
+macOS 安装器会构建同时支持 Apple Silicon 与 Intel 的 `Agent4Market.app`，复制到当前用户的 `~/Applications`，并用受保护的本地标记关联代码、依赖和业务数据目录。GitHub Actions 在每次 `main` 推送后上传通用 `.app.zip`、`.dmg` 和推荐的完整运行包；完整运行包包含应用与对应版本代码，解压后运行 `bash scripts/setup-macos.sh` 即可安装。当前公开构建使用 ad-hoc 签名而非 Apple Developer 公证，首次打开可能需要在 macOS“隐私与安全性”中确认。
+
 任务中心会展示结构化的“AI 处理过程”：当前阶段、已执行动作、可公开的判断依据、下一步和用户消息状态。它不是模型隐藏的逐字思维链。运行期间可以“排队补充”信息，或选择“调整当前方向”；消息先落到本地受控队列，再由 Pi 以 steering 方式在当前工具调用结束后、下一次模型调用前送达。方向调整不能绕过已完成节点、冻结载荷、权限边界或人工审批。
 
 macOS Terminal：

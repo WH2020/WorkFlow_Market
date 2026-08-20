@@ -104,5 +104,48 @@ python3 -m agent_platform validate
 python3 -m agent_platform doctor --require-ppt
 printf '%s\n' 'Independent PPT runtime detected: PptxGenJS + LibreOffice + PDF.js.'
 
-printf '%s\n' "Setup complete. Start the Agent with: bash scripts/start-macos.sh"
-printf '%s\n' "Start the local workbench in another terminal with: python3 ui/server.py"
+EXPECTED_VERSION="$(python3 -c 'import json; print(json.load(open("package.json", encoding="utf-8"))["version"])')"
+BUNDLED_APP="$PROJECT_ROOT/Agent4Market.app"
+BUNDLED_VERSION=""
+if [ -d "$BUNDLED_APP" ] && [ -f "$BUNDLED_APP/Contents/Info.plist" ]; then
+  BUNDLED_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$BUNDLED_APP/Contents/Info.plist" 2>/dev/null || true)"
+fi
+if [ "$BUNDLED_VERSION" = "$EXPECTED_VERSION" ]; then
+  APP_SOURCE="$BUNDLED_APP"
+else
+  command -v cargo >/dev/null 2>&1 || { printf '%s\n' 'Rust/Cargo is required to build Agent4Market.app. Install rustup and retry.' >&2; exit 2; }
+  command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'rustup is required to build the universal macOS app.' >&2; exit 2; }
+  bash "$PROJECT_ROOT/scripts/build-macos-desktop.sh"
+  APP_SOURCE="$PROJECT_ROOT/dist/macos/universal-apple-darwin/Agent4Market.app"
+fi
+[ -d "$APP_SOURCE" ] || { printf 'Agent4Market.app was not found: %s\n' "$APP_SOURCE" >&2; exit 2; }
+
+SUPPORT_DIR="$HOME/Library/Application Support/Agent4Market"
+[ ! -L "$SUPPORT_DIR" ] || { printf '%s\n' 'Refusing to use a symlinked Agent4Market support directory.' >&2; exit 2; }
+mkdir -p "$SUPPORT_DIR"
+chmod 700 "$SUPPORT_DIR"
+INSTALL_MARKER="$SUPPORT_DIR/install-root"
+[ ! -L "$INSTALL_MARKER" ] || { printf '%s\n' 'Refusing to replace a symlinked Agent4Market install marker.' >&2; exit 2; }
+if [ -e "$INSTALL_MARKER" ] && [ ! -f "$INSTALL_MARKER" ]; then
+  printf '%s\n' 'Agent4Market install marker exists but is not a regular file.' >&2
+  exit 2
+fi
+MARKER_TEMP="$(mktemp "$SUPPORT_DIR/.install-root.XXXXXX")"
+printf '%s\n' "$PROJECT_ROOT" > "$MARKER_TEMP"
+chmod 600 "$MARKER_TEMP"
+mv -f "$MARKER_TEMP" "$INSTALL_MARKER"
+
+USER_APPLICATIONS="$HOME/Applications"
+[ ! -L "$USER_APPLICATIONS" ] || { printf '%s\n' 'Refusing to install into a symlinked Applications directory.' >&2; exit 2; }
+mkdir -p "$USER_APPLICATIONS"
+INSTALL_APP="$USER_APPLICATIONS/Agent4Market.app"
+[ ! -L "$INSTALL_APP" ] || { printf '%s\n' 'Refusing to replace a symlinked Agent4Market.app.' >&2; exit 2; }
+if [ -e "$INSTALL_APP" ]; then
+  mv "$INSTALL_APP" "$USER_APPLICATIONS/Agent4Market.app.previous-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+ditto "$APP_SOURCE" "$INSTALL_APP"
+codesign --verify --deep --strict "$INSTALL_APP"
+"$INSTALL_APP/Contents/MacOS/Agent4Market" --self-test
+
+printf '%s\n' "Setup complete. Open $INSTALL_APP or run: open '$INSTALL_APP'"
+printf '%s\n' 'The app uses this checked-out directory as its local runtime and data root.'

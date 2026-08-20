@@ -1,6 +1,7 @@
 name: Cross-platform validation
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -58,3 +59,15 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           python -m unittest ui.test_server -v
+      - name: Upload universal macOS desktop package
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Agent4Market-macOS-universal-${{ github.sha }}
+          path: |
+            dist/macos/universal-apple-darwin/Agent4Market-universal-apple-darwin.dmg
+            dist/macos/universal-apple-darwin/Agent4Market-universal-apple-darwin-app.zip
+            dist/macos/universal-apple-darwin/Agent4Market-universal-apple-darwin-runtime.zip
+            dist/macos/universal-apple-darwin/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
