@@ -26,13 +26,13 @@ if (-not (Test-Path -LiteralPath $OutputDirectory -PathType Container)) {
 Copy-Item -LiteralPath $BuiltExecutable -Destination $OutputPath -Force
 
 if (-not $SkipSelfTest) {
-    & $OutputPath --self-test
-    if ($LASTEXITCODE -ne 0) {
+    $SelfTest = Start-Process -FilePath $OutputPath -ArgumentList "--self-test" -WindowStyle Hidden -Wait -PassThru
+    if ($SelfTest.ExitCode -ne 0) {
         $LauncherLog = Join-Path $ProjectRoot ".pi\director-runtime\desktop-launcher.log"
         $Diagnostic = if (Test-Path -LiteralPath $LauncherLog -PathType Leaf) {
             (@(Get-Content -LiteralPath $LauncherLog -Tail 20 -ErrorAction SilentlyContinue) -join " | ")
         } else { "no desktop launcher log" }
-        throw "Tauri desktop self-test failed with exit code ${LASTEXITCODE}: $Diagnostic"
+        throw "Tauri desktop self-test failed with exit code $($SelfTest.ExitCode): $Diagnostic"
     }
 }
 

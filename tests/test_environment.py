@@ -20,6 +20,8 @@ class EnvironmentTests(unittest.TestCase):
             self.assertIn("--ignore-scripts", script)
         self.assertIn("build-windows-desktop.ps1", windows)
         self.assertIn("--self-test", desktop_build)
+        self.assertIn("Start-Process -FilePath $OutputPath", desktop_build)
+        self.assertIn("$SelfTest.ExitCode", desktop_build)
         self.assertIn("BurntSushi.ripgrep.MSVC", windows)
         self.assertIn("sharkdp.fd", windows)
         self.assertIn("$env:Path, $UserPath, $MachinePath", windows)
@@ -28,6 +30,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('env("PYTHONUTF8", "1")', desktop_source)
         self.assertIn('env("PYTHONUNBUFFERED", "1")', desktop_source)
         self.assertIn("Duration::from_secs(60)", desktop_source)
+        self.assertIn("import sys; print(sys.executable)", desktop_source)
         self.assertIn('const PROFILE_ID: &str = "sales-director"', desktop_source)
         self.assertNotIn("OpenBrowser", desktop_source)
 

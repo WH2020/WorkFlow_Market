@@ -186,13 +186,25 @@ fn python_command() -> Result<(String, Vec<String>), String> {
     for (program, prefix) in candidates {
         let output = Command::new(program)
             .args(&prefix)
-            .arg("--version")
+            .args(["-c", "import sys; print(sys.executable)"])
             .output();
-        if output.as_ref().is_ok_and(|value| value.status.success()) {
-            return Ok((
-                program.to_string(),
-                prefix.into_iter().map(str::to_string).collect(),
-            ));
+        if let Ok(output) = output {
+            if !output.status.success() {
+                continue;
+            }
+            let executable = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if executable.is_empty() || !Path::new(&executable).is_file() {
+                continue;
+            }
+            if Command::new(&executable)
+                .arg("--version")
+                .output()
+                .is_ok_and(|value| value.status.success())
+            {
+                // Launch the interpreter itself, not a Store/py shim that can
+                // exit after spawning an untracked server process.
+                return Ok((executable, Vec::new()));
+            }
         }
     }
     Err("未找到 Python 3.11+；请先运行安装脚本。".into())
