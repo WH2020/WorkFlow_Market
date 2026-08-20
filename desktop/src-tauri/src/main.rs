@@ -435,6 +435,17 @@ fn self_test() -> i32 {
             .flatten()
             .map_or_else(|| "still running".to_string(), |status| status.to_string());
         eprintln!("Agent4Market self-test health check failed; workbench child is {child_state}.");
+        let log_path = root.join(".pi/director-runtime/desktop-launcher.log");
+        if let Ok(log) = std::fs::read_to_string(&log_path) {
+            let tail_start = log
+                .char_indices()
+                .rev()
+                .nth(3_999)
+                .map_or(0, |(index, _)| index);
+            eprintln!("Agent4Market workbench log tail:\n{}", &log[tail_start..]);
+        } else {
+            eprintln!("Agent4Market workbench log is unavailable at {}.", log_path.display());
+        }
     } else if !pi_ok {
         eprintln!("Agent4Market self-test could not validate the Pi runtime.");
     }
