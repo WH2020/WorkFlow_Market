@@ -1,7 +1,7 @@
 {
   "id": "shared.reporting.weekly-deck-v2",
   "plugin": "shared.weekly-report",
-  "display_name": "每周工作汇报（PPT 工作室）",
+  "display_name": "每周工作汇报（演示文稿工作室）",
   "entry_nodes": ["collect_week"],
   "output_nodes": ["render_deck"],
   "nodes": [

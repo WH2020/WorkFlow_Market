@@ -75,6 +75,46 @@ AGENT_LEASE_FRESH_SECONDS = 15
 TASK_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 PUBLIC_SEARCH_SERVICES = {"industry-research", "government-proposal", "presentation-studio"}
 BRAVE_DASHBOARD_URL = "https://api-dashboard.search.brave.com/app/keys"
+NODE_DISPLAY_NAMES = {
+    "scope": "明确研究范围", "clarify": "梳理合作目标", "load_accounts": "读取客户记录",
+    "analyze": "分析客户进展", "confirm": "确认销售更新", "update": "更新销售台账",
+    "validate_updates": "校验销售变更", "policy_search": "检索政策来源",
+    "public_research": "检索公开资料", "search_public_sources": "检索公开资料",
+    "research": "检索公开资料", "open_sources": "核验来源正文",
+    "open_public_sources": "核验来源正文", "open_policy_sources": "核验政策正文",
+    "internal_evidence": "读取知识库", "search_knowledge": "读取知识库",
+    "join_evidence": "汇总内外部证据", "synthesize": "形成综合判断",
+    "draft": "撰写方案", "independent_review": "执行独立复核", "validate": "校验内容",
+    "approval": "确认合作方案", "frame_problem": "明确机会问题",
+    "opportunity_brief": "形成机会简报", "evidence_gate": "校验证据质量",
+    "approve_knowledge": "确认知识入库", "update_knowledge": "更新知识库",
+    "persist_knowledge": "写入知识库", "load_goal": "读取指标目标",
+    "design": "设计指标方案", "approve_measurement": "确认指标方案",
+    "collect_release": "收集发布资料", "review": "复核发布准备",
+    "gate": "检查发布门槛", "decision": "确认发布决策", "record_decision": "记录发布决策",
+    "grill": "核对需求边界", "draft_prd": "起草产品需求", "validate_prd": "校验产品需求",
+    "approve_scope": "确认需求范围", "load_inputs": "读取规划输入", "prioritize": "评估优先级",
+    "approve_roadmap": "确认路线规划", "collect": "收集文件依据", "quality_gate": "检查文件质量",
+    "create_brief": "明确演示需求", "propose_outline": "编排演示大纲", "save_outline": "保存演示大纲",
+    "confirm_outline": "确认演示大纲", "build_storyboard": "制作逐页故事板",
+    "select_design_system": "选择视觉体系", "save_final_plan": "保存完整演示方案",
+    "validate_and_freeze": "校验并冻结正式内容", "approve_render": "确认生成正式文件",
+    "render_deck": "生成正式演示文稿", "fanout": "并行收集证据", "extract_knowledge": "提取知识条目",
+    "read_pdf": "读取电子文档", "validate_evidence": "校验证据记录", "collect_week": "汇总本周记录",
+    "build_plan": "规划周报结构", "save_plan": "保存周报方案", "build_payload": "组织汇报内容",
+    "validate_payload": "校验汇报内容", "approve": "确认正式生成",
+}
+NODE_TYPE_DISPLAY_NAMES = {
+    "agent": "智能分析", "tool": "资料处理", "validator": "规则校验", "approval": "人工确认",
+    "subagent": "独立复核", "parallel": "并行处理", "join": "结果汇总",
+}
+TASK_STATUS_DISPLAY_NAMES = {
+    "requested": "等待智能核心接手", "running": "正在处理", "waiting_approval": "等待你的审批",
+    "interrupted": "已中断", "cancelling": "正在取消", "resuming": "正在恢复",
+    "restarting": "正在重新开始", "superseded": "已替代", "completed": "已完成",
+    "cancelled": "已取消", "rejected": "已驳回", "failed": "处理失败",
+}
+PROJECT_STATUS_DISPLAY_NAMES = {"active": "使用中", "archived": "已归档"}
 
 
 def now() -> str:
@@ -112,7 +152,7 @@ def exclusive_task(path: Path):
     try:
         descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError as error:
-        raise RuntimeError("任务正在由 Pi 或另一个窗口更新，请刷新后重试") from error
+        raise RuntimeError("任务正在由智能核心或另一个窗口更新，请刷新后重试") from error
     nonce = uuid.uuid4().hex
     payload = json.dumps({"pid": os.getpid(), "nonce": nonce, "created_at": now()}).encode("utf-8")
     os.write(descriptor, payload)
@@ -236,7 +276,7 @@ def desktop_settings() -> dict[str, Any]:
 def save_desktop_settings(payload: dict[str, Any]) -> dict[str, Any]:
     show_window = payload.get("show_ai_core_window")
     if not isinstance(show_window, bool):
-        raise ValueError("AI 核心窗口设置必须为开启或关闭")
+        raise ValueError("智能核心窗口设置必须为开启或关闭")
     value = {"schema_version": "1.0", "show_ai_core_window": show_window}
     atomic_json(DESKTOP_SETTINGS, value)
     return {**value, "restart_required": True}
@@ -265,11 +305,11 @@ def desktop_runtime_summary() -> dict[str, Any]:
     leases = fresh_agent_leases()
     current = max(leases, key=lambda lease: str(lease.get("heartbeat_at") or ""), default=None)
     if current is None:
-        status, label = "offline", "AI 核心未连接"
+        status, label = "offline", "智能核心未连接"
     elif current.get("task_id"):
-        status, label = "working", "AI 核心正在处理任务"
+        status, label = "working", "智能核心正在处理任务"
     else:
-        status, label = "idle", "AI 核心已就绪"
+        status, label = "idle", "智能核心已就绪"
     settings = desktop_settings()
     return {
         "status": status, "label": label,
@@ -373,17 +413,7 @@ def task_progress_records() -> dict[str, list[dict[str, Any]]]:
 
 def readable_node(node_id: Any) -> str:
     value = str(node_id or "").strip()
-    exact = {
-        "scope": "明确任务范围", "clarify": "梳理合作目标", "load_accounts": "读取客户记录",
-        "analyze": "分析客户进展", "public_research": "检索公开资料", "search_public_sources": "检索公开资料",
-        "open_sources": "核验来源正文", "open_public_sources": "核验来源正文", "open_policy_sources": "核验政策正文",
-        "internal_evidence": "读取知识库", "search_knowledge": "读取知识库", "synthesize": "形成综合判断",
-        "draft": "撰写方案", "validate": "校验内容", "validate_updates": "校验销售变更",
-        "build_payload": "组织汇报内容", "build_plan": "规划演示结构", "propose_outline": "编排演示大纲",
-        "build_storyboard": "制作逐页故事板", "select_design_system": "选择视觉体系",
-        "validate_and_freeze": "校验并冻结正式内容", "render_deck": "生成正式 PPT",
-    }
-    return exact.get(value, value.replace("_", " ") or "准备下一步")
+    return NODE_DISPLAY_NAMES.get(value, "处理下一阶段" if value else "准备下一步")
 
 
 def task_progress_timeline(
@@ -417,7 +447,7 @@ def task_progress_timeline(
             continue
         timeline.append({
             "event_id": event["event_id"], "at": event["created_at"], "kind": "assistant",
-            "title": phase_titles.get(str(event.get("phase")), "AI 处理进度"), "summary": event["summary"],
+            "title": phase_titles.get(str(event.get("phase")), "智能助手处理进度"), "summary": event["summary"],
             "basis": str(event.get("basis") or "")[:300], "next_step": str(event.get("next_step") or "")[:240],
             "status": "done",
         })
@@ -436,7 +466,7 @@ def task_progress_timeline(
         if display_status == "waiting_approval":
             title, summary = "等待你的确认", "内容已到人工确认关口；新消息不会替代批准或驳回。"
         elif display_status == "interrupted":
-            title, summary = "任务已中断", "AI 核心没有继续执行，可选择继续任务或重新开始。"
+            title, summary = "任务已中断", "智能核心没有继续执行，可选择继续任务或重新开始。"
         else:
             title, summary = "当前处理阶段", node
         timeline.append({
@@ -450,36 +480,36 @@ def task_progress_timeline(
 def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
     prefix, suffix = "[PRESENTATION_BRIEF]", "[/PRESENTATION_BRIEF]"
     if not request_text.startswith(prefix) or not request_text.endswith(suffix):
-        raise ValueError("PPT 工作室请求必须使用结构化 brief")
+        raise ValueError("演示文稿工作室请求必须使用结构化需求")
     value = json.loads(request_text[len(prefix):-len(suffix)].strip())
     if not isinstance(value, dict) or value.get("schema_version") != "1.0":
-        raise ValueError("PPT brief 版本无效")
+        raise ValueError("演示文稿需求版本无效")
     limits = {"topic": 240, "audience": 240, "purpose": 500, "occasion": 240, "language": 40}
     for field, maximum in limits.items():
         candidate = value.get(field)
         if not isinstance(candidate, str) or not candidate.strip() or len(candidate) > maximum:
-            raise ValueError(f"PPT brief.{field} 无效或超过 {maximum} 字")
+            raise ValueError(f"演示文稿需求字段 {field} 无效或超过 {maximum} 字")
     if value.get("scene") not in {"weekly", "industry", "government", "custom"}:
-        raise ValueError("PPT brief 场景无效")
+        raise ValueError("演示文稿场景无效")
     if value.get("mode") not in {"quick", "standard", "strict"}:
-        raise ValueError("PPT brief 模式无效")
+        raise ValueError("演示文稿处理模式无效")
     if value.get("confidentiality") not in {"internal", "restricted", "public"}:
-        raise ValueError("PPT brief 保密等级无效")
+        raise ValueError("演示文稿保密等级无效")
     if value.get("source_scope") != "public-web-and-profile-knowledge":
-        raise ValueError("PPT 工作室首版只支持公开网页与当前 Profile 知识库")
+        raise ValueError("演示文稿工作室首版只支持公开网页与当前角色知识库")
     if not isinstance(value.get("target_slides"), int) or not 4 <= value["target_slides"] <= 10:
-        raise ValueError("PPT brief 页数必须为 4–10")
+        raise ValueError("演示文稿页数必须为 4–10")
     if not isinstance(value.get("duration_minutes"), int) or not 3 <= value["duration_minutes"] <= 120:
-        raise ValueError("PPT brief 时长必须为 3–120 分钟")
+        raise ValueError("演示文稿时长必须为 3–120 分钟")
     decision = value.get("expected_decision")
     if not isinstance(decision, str) or not decision.strip() or len(decision) > 500:
-        raise ValueError("PPT brief 期望决策无效或超过 500 字")
+        raise ValueError("演示文稿期望决策无效或超过 500 字")
     design = value.get("design_system")
     if not isinstance(design, dict) or design.get("token_id") not in {"management-report", "government-program", "technology-research"}:
-        raise ValueError("PPT brief 设计令牌无效")
+        raise ValueError("演示文稿设计风格无效")
     output_name = value.get("output_name")
     if not isinstance(output_name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx", output_name) is None:
-        raise ValueError("PPT brief 输出文件名无效")
+        raise ValueError("演示文稿输出文件名无效")
     return value
 
 
@@ -495,7 +525,7 @@ def canonical_plan_json(value: Any) -> str:
         return str(value)
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ValueError("PPT plan 只能包含有限数字")
+            raise ValueError("演示方案只能包含有限数字")
         if value == 0:
             return "0"
         if value.is_integer():
@@ -509,7 +539,7 @@ def canonical_plan_json(value: Any) -> str:
             for key, child in sorted(value.items(), key=lambda item: str(item[0]))
         )
         return f"{{{','.join(pairs)}}}"
-    raise ValueError("PPT plan 必须是有限 JSON 数据")
+    raise ValueError("演示方案必须是有限的结构化数据")
 
 
 def presentation_plan_sha256(plan: dict[str, Any]) -> str:
@@ -547,9 +577,15 @@ def workflows() -> dict[str, dict[str, Any]]:
         if allowed_workflows is not None and workflow.get("id") not in allowed_workflows:
             continue
         result[workflow["id"]] = {
-            "id": workflow["id"], "display_name": workflow.get("display_name", workflow["id"]),
-            "nodes": [{key: node.get(key) for key in ("id", "type", "depends_on", "tool", "skill", "check", "policy")}
-                      for node in workflow.get("nodes", [])],
+            "id": workflow["id"], "display_name": workflow.get("display_name") or "业务工作流",
+            "nodes": [
+                {
+                    **{key: node.get(key) for key in ("id", "type", "depends_on", "tool", "skill", "check", "policy")},
+                    "display_name": readable_node(node.get("id")),
+                    "type_display_name": NODE_TYPE_DISPLAY_NAMES.get(str(node.get("type") or ""), "处理阶段"),
+                }
+                for node in workflow.get("nodes", [])
+            ],
         }
     return result
 
@@ -965,6 +1001,8 @@ def task_summaries() -> list[dict[str, Any]]:
             if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
                 continue
             summary["display_status"], summary["runtime_state"] = task_display_state(task, leases)
+            summary["current_node_display_name"] = readable_node(task.get("current_node"))
+            summary["waiting_node_display_name"] = readable_node(task.get("waiting_node")) if task.get("waiting_node") else None
             task_id = str(task.get("task_id") or "")
             task_messages = messages_by_task.get(task_id, [])
             summary["progress"] = task_progress_timeline(
@@ -1118,6 +1156,15 @@ def _snippet(values: list[Any], maximum: int = 220) -> str:
     return text[:maximum]
 
 
+def service_display_name(service_id: Any) -> str:
+    value = str(service_id or "").strip()
+    for profile in profiles():
+        for service in profile.get("services", []):
+            if service.get("id") == value:
+                return str(service.get("display_name") or "销售任务")
+    return "销售任务"
+
+
 def _csv_rows(relative: str, limit: int = 5000) -> list[dict[str, str]]:
     path = ROOT / relative
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
@@ -1151,11 +1198,11 @@ def local_search(payload: dict[str, Any]) -> dict[str, Any]:
     if "projects" in scopes:
         for project in project_records():
             if _match_text(query, [project["name"], project["description"]]):
-                add("项目", project["name"], project["status"], project["description"], project["project_id"], project["project_id"])
+                add("项目", project["name"], PROJECT_STATUS_DISPLAY_NAMES.get(project["status"], "状态未知"), project["description"], project["project_id"], project["project_id"])
     if "tasks" in scopes:
         for task in task_summaries():
             if _match_text(query, [task.get("service_id"), task.get("request"), task.get("status")]):
-                add("任务", str(task.get("service_id") or "销售任务"), str(task.get("status") or ""), str(task.get("request") or ""), str(task.get("task_id") or ""), str(task.get("project_id") or DEFAULT_PROJECT_ID))
+                add("任务", service_display_name(task.get("service_id")), TASK_STATUS_DISPLAY_NAMES.get(str(task.get("status") or ""), "状态未知"), str(task.get("request") or ""), str(task.get("task_id") or ""), str(task.get("project_id") or DEFAULT_PROJECT_ID))
     if "knowledge" in scopes:
         for row in _csv_rows("data/knowledge/source-register.csv"):
             fields = [row.get(key) for key in ("title", "publisher", "region", "topic", "notes", "status")]
@@ -1233,10 +1280,10 @@ class ControlHandler(SimpleHTTPRequestHandler):
             any(ord(character) < 32 for character in filename) or
             Path(filename).suffix.lower() not in ALLOWED_UPLOAD_SUFFIXES
         ):
-            raise ValueError("文件名无效；仅支持 PDF、Word、Excel、CSV、TXT、Markdown 和 PPTX")
+            raise ValueError("文件名无效；仅支持电子文档、文字文档、表格、文本和演示文稿文件")
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > MAX_UPLOAD_BYTES:
-            raise ValueError("上传文件必须为 1 字节至 32 MiB")
+            raise ValueError("上传文件必须为 1 字节至 32 兆字节")
         projects_root = INPUTS / "projects"
         if INPUTS.is_symlink() or projects_root.is_symlink():
             raise ValueError("项目资料目录不能是符号链接")
@@ -1356,12 +1403,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.reset_search()
             elif route == "/api/search-settings/open-dashboard":
                 if not webbrowser.open(BRAVE_DASHBOARD_URL, new=2):
-                    raise RuntimeError("无法打开系统浏览器；请手动访问 Brave Search API 控制台")
-                self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开 Brave Search API 控制台。"})
+                    raise RuntimeError("无法打开系统浏览器；请手动访问公开检索服务控制台")
+                self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开公开检索服务控制台。"})
             elif route == "/api/desktop-settings":
                 self.send_json(HTTPStatus.OK, {
                     **save_desktop_settings(payload),
-                    "message": "运行方式已保存，关闭并重新打开 Agent4Market 后生效。",
+            "message": "运行方式已保存，关闭并重新打开销售总监智能工作台后生效。",
                 })
             elif route.startswith("/api/tasks/") and route.endswith("/decision"):
                 self.decide(route.split("/")[3], payload)
@@ -1387,13 +1434,13 @@ class ControlHandler(SimpleHTTPRequestHandler):
         normalized = normalize_base_url(base_url, allow_private_network=allow_private)
         api_key = supplied_key or load_model_secret(ROOT, normalized)
         if not api_key:
-            raise ModelProviderError("请填写 API Key；已保存的密钥只可用于同一个网关地址")
+            raise ModelProviderError("请填写接口密钥；已保存的密钥只可用于同一个网关地址")
         normalized, models = discover_models(
             normalized, api_key, allow_private_network=allow_private
         )
         self.send_json(HTTPStatus.OK, {
             "base_url": normalized, "models": models,
-            "message": f"已从网关读取 {len(models)} 个模型，API Key 未写入页面或模型目录。",
+            "message": f"已从网关读取 {len(models)} 个模型，接口密钥未写入页面或模型目录。",
         })
 
     def configure_model(self, payload: dict[str, Any]) -> None:
@@ -1410,7 +1457,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, {
             **result,
             "restart_required": True,
-            "message": "模型配置已保存。请关闭并重新打开 Agent4Market，使新模型接管后续任务。",
+            "message": "模型配置已保存。请关闭并重新打开销售总监智能工作台，使新模型接管后续任务。",
         })
 
     def reset_model(self) -> None:
@@ -1418,7 +1465,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, {
             **result,
             "restart_required": True,
-            "message": "已恢复为 Pi 默认模型。请关闭并重新打开 Agent4Market 后生效。",
+            "message": "已恢复为智能核心默认模型。请关闭并重新打开销售总监智能工作台后生效。",
         })
 
     def configure_search(self, payload: dict[str, Any]) -> None:
@@ -1429,7 +1476,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, {
             **result,
             "restart_required": True,
-            "message": "Brave Search 已验证并使用系统保护存储保存。请关闭并重新打开 Agent4Market 后重试检索任务。",
+            "message": "公开检索服务已验证并使用系统保护存储保存。请关闭并重新打开销售总监智能工作台后重试检索任务。",
         })
 
     def reset_search(self) -> None:
@@ -1437,7 +1484,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, {
             **result,
             "restart_required": True,
-            "message": "公开检索密钥已删除。请关闭并重新打开 Agent4Market，使运行时停止使用旧密钥。",
+            "message": "公开检索密钥已删除。请关闭并重新打开销售总监智能工作台，使运行时停止使用旧密钥。",
         })
 
     def create_request(self, payload: dict[str, Any]) -> None:
@@ -1457,9 +1504,9 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if service_id in PUBLIC_SEARCH_SERVICES:
             search = search_settings_summary(ROOT)
             if search.get("status") != "configured":
-                raise ValueError("该任务需要公开检索；请先在“设置 > 公开检索”配置 Brave Search API Key")
+                raise ValueError("该任务需要公开检索；请先在“设置 > 公开检索”配置公开检索接口密钥")
             if search.get("restart_required"):
-                raise ValueError("公开检索密钥已保存，但 AI 核心尚未加载；请关闭并重新打开 Agent4Market 后重试")
+                raise ValueError("公开检索密钥已保存，但智能核心尚未加载；请关闭并重新打开销售总监智能工作台后重试")
         if service_id in {"presentation-studio", "weekly-deck"}:
             validate_presentation_brief_request(request_text)
         runtime_selection = task_runtime_selection(payload)
@@ -1535,7 +1582,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     self.send_json(HTTPStatus.CONFLICT, {"error": "任务已更新，请刷新后重试", "task": task})
                     return
                 if task.get("approval_request") is not None:
-                    self.send_json(HTTPStatus.CONFLICT, {"error": "已有操作正在等待 Pi 处理，请稍后刷新"})
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "已有操作正在等待智能核心处理，请稍后刷新"})
                     return
                 if decision in {"approve", "reject"} and task.get("status") != "waiting_approval":
                     self.send_json(HTTPStatus.CONFLICT, {"error": "只有等待审批的任务可以批准或驳回"})
@@ -1578,7 +1625,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         except RuntimeError as error:
             self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
             return
-        message = "正在从最后一个安全节点恢复；如有已批准但未提交的写入，将重新等待你确认。" if decision == "resume" else "操作已提交，等待 Pi 工作流确认。"
+        message = "正在从最后一个安全节点恢复；如有已批准但未提交的写入，将重新等待你确认。" if decision == "resume" else "操作已提交，等待智能核心确认。"
         self.send_json(HTTPStatus.ACCEPTED, {"task": task, "message": message})
 
     def restart_task(self, task_id: str, payload: dict[str, Any]) -> None:
@@ -1604,7 +1651,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     self.send_json(HTTPStatus.CONFLICT, {"error": "只有已中断或历史任务可以重新创建"})
                     return
                 if task.get("approval_request") is not None:
-                    self.send_json(HTTPStatus.CONFLICT, {"error": "已有操作正在等待 Pi 处理，请稍后刷新"})
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "已有操作正在等待智能核心处理，请稍后刷新"})
                     return
                 pending_write = task.get("pending_write")
                 if isinstance(pending_write, dict) and pending_write.get("status") == "committing":
@@ -1726,7 +1773,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                         atomic_json(request_path, prepared)
                     self.send_json(HTTPStatus.CREATED, {
                         "request_id": request_id, "task": task,
-                        "message": "修订任务已从中断点恢复，等待 Pi 接手。",
+                        "message": "修订任务已从中断点恢复，等待智能核心接手。",
                     })
                     return
                 if task.get("version") != expected_version:
@@ -1740,21 +1787,21 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     return
                 plan = presentation_plan(task_id)
                 if not plan or plan.get("phase") not in {"outline", "final"}:
-                    self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务没有可修订的 PPT 计划"})
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务没有可修订的演示方案"})
                     return
                 if plan.get("profile_id") != task.get("profile_id") or plan.get("plan_sha256") != expected_plan_sha256:
-                    self.send_json(HTTPStatus.CONFLICT, {"error": "PPT 计划已变化，请刷新后重试"})
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "演示方案已变化，请刷新后重试"})
                     return
                 service_id = str(task.get("service_id", ""))
                 profile_id = str(task.get("profile_id", ""))
                 project_id = safe_id(str(task.get("project_id") or DEFAULT_PROJECT_ID))
                 workflow_id = str(task.get("workflow_id", ""))
                 if service_id != "presentation-studio" or workflow_id != "shared.presentation.studio":
-                    self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务不是可修订的 PPT 工作室任务"})
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务不是可修订的演示文稿工作室任务"})
                     return
                 profile = next((item for item in profiles() if item["id"] == profile_id), None)
                 if profile is None or not any(service.get("id") == service_id for service in profile["services"]):
-                    self.send_json(HTTPStatus.CONFLICT, {"error": "PPT 工作室服务与当前角色不匹配"})
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "演示文稿工作室服务与当前角色不匹配"})
                     return
                 revision = {
                     "schema_version": "1.0", "source_task_id": task_id,

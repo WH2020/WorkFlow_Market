@@ -63,6 +63,7 @@ class ControlCentreTests(unittest.TestCase):
         server.ACTIVE_PROFILE_ID = "sales-director"
         profiles = server.profiles()
         self.assertEqual([profile["id"] for profile in profiles], ["sales-director"])
+        self.assertEqual(profiles[0]["display_name"], "销售总监智能助手")
         service_ids = {service["id"] for service in profiles[0]["services"]}
         self.assertIn("sales-review", service_ids)
         self.assertIn("government-proposal", service_ids)
@@ -70,6 +71,10 @@ class ControlCentreTests(unittest.TestCase):
         workflow_ids = set(server.workflows())
         self.assertIn("market.government.proposal", workflow_ids)
         self.assertFalse(any(workflow_id.startswith("product.") for workflow_id in workflow_ids))
+        government_nodes = server.workflows()["market.government.proposal"]["nodes"]
+        policy_search = next(node for node in government_nodes if node["id"] == "policy_search")
+        self.assertEqual(policy_search["display_name"], "检索政策来源")
+        self.assertEqual(policy_search["type_display_name"], "资料处理")
 
     def test_sales_workbench_uses_guided_forms_and_one_click_weekly_report(self):
         ui_root = Path(server.__file__).parent
@@ -103,6 +108,11 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function guidedRequest()", javascript)
         self.assertIn("function renderModelSettings", javascript)
         self.assertIn("function renderSearchSettings", javascript)
+        self.assertIn("function localizeStaticInterface", javascript)
+        self.assertIn('item.textContent = node.display_name || "处理阶段"', javascript)
+        self.assertNotIn("item.textContent = node.id", javascript)
+        self.assertIn("task.waiting_node_display_name", javascript)
+        self.assertIn("function displayTaskRequest", javascript)
         self.assertIn('api("/api/search-settings"', javascript)
         self.assertIn('api("/api/search-settings/open-dashboard"', javascript)
         self.assertIn("function renderRuntimeSettings", javascript)
@@ -221,7 +231,7 @@ class ControlCentreTests(unittest.TestCase):
         })
         summary = server.desktop_runtime_summary()
         self.assertEqual(summary["status"], "idle")
-        self.assertEqual(summary["label"], "AI 核心已就绪")
+        self.assertEqual(summary["label"], "智能核心已就绪")
         self.assertEqual(summary["window_mode"], "visible")
 
     def test_embedded_ai_core_log_is_bounded_and_redacts_credentials(self):
@@ -263,6 +273,7 @@ class ControlCentreTests(unittest.TestCase):
         })
         summary = server.task_summaries()[0]
         self.assertEqual(summary["queued_message_count"], 1)
+        self.assertEqual(summary["current_node_display_name"], "分析客户进展")
         self.assertTrue(any(item["title"] == "你调整了任务方向" and item["status"] == "queued" for item in summary["progress"]))
         self.assertTrue(any(item.get("basis") == "客户记录尚未确认预算负责人。" for item in summary["progress"]))
 
@@ -489,7 +500,7 @@ class ControlCentreTests(unittest.TestCase):
     def test_exclusive_task_rejects_a_concurrent_writer(self):
         target = server.TASKS / "task-a.json"
         with server.exclusive_task(target):
-            with self.assertRaisesRegex(RuntimeError, "正在由 Pi"):
+            with self.assertRaisesRegex(RuntimeError, "正在由智能核心"):
                 with server.exclusive_task(target):
                     pass
         self.assertFalse(Path(f"{target}.lock").exists())

@@ -1,7 +1,7 @@
 {
   "id": "shared.research.frontier-subagent",
   "plugin": "shared.research",
-  "display_name": "行业专题研究（隔离 Subagent）",
+  "display_name": "行业专题研究（隔离研究员）",
   "entry_nodes": ["scope"],
   "output_nodes": ["persist_knowledge"],
   "nodes": [

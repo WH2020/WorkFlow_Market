@@ -25,6 +25,56 @@
   };
   if (viewTitles[window.location.hash.slice(1)]) currentView = window.location.hash.slice(1);
 
+  const staticChineseLabels = new Map([
+    ["SALES DIRECTOR · LOCAL", "销售总监 · 本机运行"],
+    ["GUIDED WORK", "引导式工作"],
+    ["GUIDED TASK", "任务引导"],
+    ["SALES PRESENTATION", "销售演示文稿"],
+    ["TASK CENTRE", "任务中心"],
+    ["CUSTOMERS & SALES", "客户与销售"],
+    ["KNOWLEDGE BASE", "知识库"],
+    ["WEEKLY REPORT", "每周汇报"],
+    ["OUTPUT CENTRE", "输出中心"],
+    ["PROJECT SPACE", "项目空间"],
+    ["DAILY AUTOMATION", "每日自动任务"],
+    ["CUSTOM SEARCH", "自定义搜索"],
+    ["SETTINGS", "系统设置"],
+    ["AI 工作台", "智能工作台"],
+    ["PPT 工作室", "演示文稿工作室"],
+    ["创建销售 PPT", "创建销售演示文稿"],
+    ["要做什么 PPT？", "要制作什么演示文稿？"],
+    ["开始制作 PPT", "开始制作演示文稿"],
+    ["AI 核心", "智能核心"],
+    ["显示 AI 核心调试窗口", "显示智能核心调试窗口"],
+    ["连接 Brave Search API", "连接公开检索服务"],
+    ["Brave Search API Key", "公开检索接口密钥"],
+    ["申请 API Key", "申请接口密钥"],
+    ["连接 NewAPI / OpenAI 兼容网关", "连接兼容模型网关"],
+    ["API Key", "接口密钥"],
+  ]);
+
+  function localizeStaticInterface() {
+    document.title = "销售总监智能工作台";
+    document.querySelectorAll(".section-kicker").forEach((element) => {
+      const translated = staticChineseLabels.get(element.textContent.trim());
+      if (translated) element.textContent = translated;
+    });
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const tokenReplacements = [
+      [/\bAI\b/gu, "智能助手"], [/\bPPT\b/gu, "演示文稿"], [/\bPDF\b/gu, "电子文档"],
+      [/\bAPI Key\b/gu, "接口密钥"], [/\bBrave Search\b/gu, "公开检索服务"],
+      [/\bWord\b/gu, "文字文档"], [/\bExcel\b/gu, "表格"], [/\bCSV\b/gu, "逗号分隔表格"],
+    ];
+    let node = walker.nextNode();
+    while (node) {
+      const value = node.nodeValue.trim();
+      const translated = staticChineseLabels.get(value);
+      if (translated) node.nodeValue = node.nodeValue.replace(value, translated);
+      else tokenReplacements.forEach(([pattern, replacement]) => { node.nodeValue = node.nodeValue.replace(pattern, replacement); });
+      node = walker.nextNode();
+    }
+  }
+
   const guidedServices = {
     "sales-review": {
       title: "客户推进与销售复盘",
@@ -47,7 +97,7 @@
       instruction: "先检索和核验来源，再结合销售场景形成结论、机会、风险和建议动作；不确定信息明确标注待验证。",
       fields: [
         { id: "topic", label: "研究谁或什么方向？", type: "text", required: true, placeholder: "例如：某客户所在行业、脑机接口、具身智能或数据采集" },
-        { id: "purpose", label: "研究结果用来做什么？", type: "select", default: "支持客户沟通与机会判断", options: ["支持客户沟通与机会判断", "形成内部行业简报", "准备销售方案或 PPT", "识别竞品、合作方与风险"] },
+        { id: "purpose", label: "研究结果用来做什么？", type: "select", default: "支持客户沟通与机会判断", options: ["支持客户沟通与机会判断", "形成内部行业简报", "准备销售方案或演示文稿", "识别竞品、合作方与风险"] },
         { id: "period", label: "优先关注的时间范围", type: "select", default: "近 12 个月，并补充关键历史背景", options: ["近 3 个月", "近 12 个月，并补充关键历史背景", "近 3 年趋势", "不限定，按相关性筛选"] },
       ],
       presets: [
@@ -57,11 +107,11 @@
       ],
     },
     "pdf-import": {
-      title: "PDF 资料入库",
-      intro: "填写已放入 inputs 或 data/inbox 的 PDF 路径，助手会按页提取、标注来源并生成待审批的知识记录。",
-      instruction: "只读取指定的受控目录 PDF；保留页码与文件指纹，提取失败时停止，不把摘要当作已证实事实。",
+      title: "电子文档资料入库",
+      intro: "填写已放入受控资料目录的电子文档路径，助手会按页提取、标注来源并生成待审批的知识记录。",
+      instruction: "只读取指定的受控目录电子文档；保留页码与文件指纹，提取失败时停止，不把摘要当作已证实事实。",
       fields: [
-        { id: "path", label: "PDF 相对路径", type: "text", required: true, placeholder: "例如：inputs/customer-report.pdf" },
+        { id: "path", label: "电子文档相对路径", type: "text", required: true, placeholder: "例如：inputs/customer-report.pdf" },
         { id: "goal", label: "入库后主要怎么用？", type: "select", default: "提取可引用证据并写入知识库", options: ["提取可引用证据并写入知识库", "分析客户材料并提炼销售机会", "提取政策要点和政府合作依据", "形成文档摘要与待验证问题"] },
         { id: "focus", label: "重点关注（可选）", type: "text", placeholder: "例如：客户业务、预算、试点条件、政策支持或关键数据" },
       ],
@@ -92,7 +142,7 @@
       instruction: "按使用对象和场合生成可审阅的销售文件，明确事实、假设、待确认项和下一步动作；正式文件生成前等待审批。",
       fields: [
         { id: "document", label: "要制作什么文件？", type: "select", default: "客户销售方案", options: ["客户销售方案", "内部资源协调单", "会议纪要与行动清单", "客户沟通邮件或函件", "项目阶段汇报"] },
-        { id: "audience", label: "给谁使用或阅读？", type: "text", required: true, placeholder: "例如：客户 CTO、公司技术团队、总经理办公会" },
+        { id: "audience", label: "给谁使用或阅读？", type: "text", required: true, placeholder: "例如：客户技术负责人、公司技术团队、总经理办公会" },
         { id: "materials", label: "依据哪些现有信息？", type: "textarea", required: true, placeholder: "粘贴关键事实，或写明要结合的客户、任务、知识库资料和已有文件。" },
       ],
       presets: [
@@ -107,7 +157,7 @@
   const label = {
     waiting_approval: "等待你的审批",
     running: "正在处理",
-    requested: "等待 Pi 接手",
+    requested: "等待智能核心接手",
     interrupted: "已中断",
     cancelling: "正在取消",
     resuming: "正在恢复",
@@ -138,6 +188,25 @@
   function currentProfile() { return model.profiles.find((profile) => profile.id === selectedProfile); }
   function currentService() { return currentProfile()?.services.find((service) => service.id === selectedService); }
   function serviceById(serviceId) { return currentProfile()?.services.find((service) => service.id === serviceId); }
+
+  function displayModelName(value) {
+    const text = String(value || "").trim();
+    if (!text) return "智能核心默认模型";
+    return text.includes("/") ? text.slice(text.lastIndexOf("/") + 1) : text;
+  }
+
+  function displayTaskRequest(task) {
+    const request = String(task?.request || "").trim();
+    if (request.startsWith("[PRESENTATION_BRIEF]")) {
+      try {
+        const end = request.indexOf("[/PRESENTATION_BRIEF]");
+        const brief = JSON.parse(request.slice("[PRESENTATION_BRIEF]".length, end).trim());
+        return `演示文稿主题：${brief.topic || "未命名主题"}；受众：${brief.audience || "未指定"}；目标：${brief.expected_decision || brief.purpose || "待确认"}`;
+      } catch { return "演示文稿制作任务"; }
+    }
+    if (request.startsWith("[PRESENTATION_PLAN_REVISION]")) return "演示文稿大纲修订任务";
+    return request;
+  }
   function displayStatus(task) { return task.display_status || task.status || ""; }
   function isHistoricalTask(task) { return ["completed", "cancelled", "rejected", "failed", "superseded"].includes(displayStatus(task)); }
   function projectById(projectId) { return model?.projects?.find((project) => project.project_id === projectId); }
@@ -217,15 +286,15 @@
     panel.classList.toggle("configured", settings.configured && settings.status === "configured");
     panel.classList.toggle("error", settings.status === "error" || settings.status === "missing_key");
     if (settings.status === "error") $("model-current").textContent = `配置异常：${settings.error}`;
-    else if (settings.status === "missing_key") $("model-current").textContent = `密钥不可用：${settings.provider_id}/${settings.selected_model}，请重新填写并保存`;
-    else if (settings.configured) $("model-current").textContent = `${settings.provider_id}/${settings.selected_model} · ${settings.base_url}`;
-    else $("model-current").textContent = "沿用 Pi 当前默认模型；尚未配置 NewAPI 网关";
+    else if (settings.status === "missing_key") $("model-current").textContent = `密钥不可用：${displayModelName(settings.selected_model)}，请重新填写并保存`;
+    else if (settings.configured) $("model-current").textContent = `当前模型：${displayModelName(settings.selected_model)} · ${settings.base_url}`;
+    else $("model-current").textContent = "沿用智能核心默认模型；尚未配置自定义模型网关";
     if (modelSettingsInitialized && !force) return;
     modelSettingsInitialized = true;
     $("model-base-url").value = settings.base_url || "";
     $("model-private-network").checked = Boolean(settings.allow_private_network);
     $("model-api-key").value = "";
-    $("model-api-key").placeholder = settings.has_api_key ? "已保存；留空则继续使用" : "请输入网关 API Key";
+    $("model-api-key").placeholder = settings.has_api_key ? "已保存；留空则继续使用" : "请输入网关接口密钥";
     populateModelOptions(settings.models || [], settings.selected_model || "");
   }
 
@@ -237,7 +306,7 @@
     panel.classList.toggle("error", settings.status === "error");
     if (settings.status === "error") $("search-current").textContent = `配置异常：${settings.error}`;
     else if (settings.restart_required) $("search-current").textContent = "配置已变更 · 关闭并重新打开应用后生效";
-    else if (ready) $("search-current").textContent = "Brave Search 已就绪 · 政策与行业检索可用";
+    else if (ready) $("search-current").textContent = "公开检索服务已就绪 · 政策与行业检索可用";
     else $("search-current").textContent = "尚未配置 · 政策检索和公开调研暂不可用";
     $("public-search-status").textContent = ready
       ? "公开检索服务已就绪。"
@@ -250,7 +319,7 @@
     $("search-api-key").value = "";
     $("search-api-key").placeholder = settings.has_api_key
       ? "已安全保存；留空可重新验证"
-      : "粘贴 Brave Search API Key";
+      : "粘贴公开检索接口密钥";
   }
 
   function publicSearchReady(serviceId, guide = false) {
@@ -280,7 +349,7 @@
       fallback.value = "";
       fallback.textContent = settings.configured && settings.selected_model
         ? `默认：${settings.selected_model}`
-        : "Pi 默认模型";
+        : "智能核心默认模型";
       options.push(fallback);
       available.forEach((item) => {
         const option = document.createElement("option");
@@ -319,11 +388,11 @@
   }
 
   function renderRuntimeSettings(force = false) {
-    const runtime = model?.desktop_runtime || { status: "offline", label: "AI 核心未连接", show_ai_core_window: false, log_tail: [] };
+    const runtime = model?.desktop_runtime || { status: "offline", label: "智能核心未连接", show_ai_core_window: false, log_tail: [] };
     const top = $("runtime-status");
     top.classList.toggle("offline", runtime.status === "offline");
     top.classList.toggle("working", runtime.status === "working");
-    top.querySelector("b").textContent = runtime.label || "AI 核心未连接";
+    top.querySelector("b").textContent = runtime.label || "智能核心未连接";
     $("runtime-settings-status").textContent = runtime.heartbeat_at
       ? `${runtime.label} · 最近心跳 ${new Date(runtime.heartbeat_at).toLocaleTimeString("zh-CN", { hour12: false })}`
       : runtime.label;
@@ -415,8 +484,8 @@
     workflow.nodes.forEach((node) => {
       const item = document.createElement("span");
       item.className = `node ${done.includes(node.id) ? "done" : ""} ${(task?.current_node === node.id || task?.waiting_node === node.id) ? "current" : ""} ${node.type === "approval" ? "approval" : ""}`;
-      item.textContent = node.id;
-      item.title = node.type;
+      item.textContent = node.display_name || "处理阶段";
+      item.title = node.type_display_name || "处理阶段";
       flow.append(item);
     });
     box.append(flow);
@@ -467,10 +536,11 @@
     const header = document.createElement("div");
     header.className = "presentation-review-header";
     const title = document.createElement("h3");
-    title.textContent = "PPT 大纲便利贴";
+    title.textContent = "演示文稿大纲";
     const meta = document.createElement("span");
     meta.className = "deck-meta";
-    meta.textContent = `${slides.length} 页 · ${plan.mode || plan.brief?.mode || "标准"}模式`;
+    const modeLabels = { standard: "标准", quick: "快速", strict: "严格" };
+    meta.textContent = `${slides.length} 页 · ${modeLabels[plan.mode || plan.brief?.mode] || "标准"}模式`;
     header.append(title, meta);
     review.append(header);
     const grid = document.createElement("div");
@@ -561,7 +631,12 @@
     }
     const title = document.createElement("p");
     title.className = "write-intent-title";
-    title.textContent = `待写入内容（${task.pending_write.logical_tool} · ${task.pending_write.status}）`;
+    const toolLabels = {
+      "knowledge.write": "写入知识库", "sales.write": "更新销售台账",
+      "presentation.plan.write": "保存演示方案", "artifact.deck.write": "生成演示文稿",
+    };
+    const writeStatusLabels = { prepared: "待确认", committing: "正在提交", committed: "已完成" };
+    title.textContent = `待写入内容（${toolLabels[task.pending_write.logical_tool] || "受控写入"} · ${writeStatusLabels[task.pending_write.status] || "等待处理"}）`;
     const hash = document.createElement("small");
     hash.className = "write-intent-hash";
     hash.textContent = `校验码：${task.pending_write.payload_sha256}`;
@@ -584,7 +659,7 @@
     header.className = "task-progress-header";
     const heading = document.createElement("div");
     const title = document.createElement("h3");
-    title.textContent = "AI 处理过程";
+    title.textContent = "智能助手处理过程";
     const description = document.createElement("small");
     description.textContent = "显示阶段动作、判断依据和下一步，不展示隐藏的逐字思维链。";
     heading.append(title, description);
@@ -689,7 +764,7 @@
       composer.append(textarea, actions);
       if (task.status === "waiting_approval") {
         const warning = document.createElement("small");
-        warning.textContent = "当前正等待审批：消息可以补充上下文，但不会替代批准、驳回或 PPT 大纲修订。";
+        warning.textContent = "当前正等待审批：消息可以补充上下文，但不会替代批准、驳回或演示文稿大纲修订。";
         composer.append(warning);
       }
       section.append(composer);
@@ -719,14 +794,14 @@
       template.querySelector("strong").textContent = serviceName || task.service_id || "销售任务";
       const badge = template.querySelector(".status");
       const effectiveStatus = displayStatus(task);
-      badge.textContent = label[effectiveStatus] || effectiveStatus || "未知";
+      badge.textContent = label[effectiveStatus] || "未知状态";
       if (Object.hasOwn(label, effectiveStatus)) badge.classList.add(effectiveStatus);
       const scheduleMeta = task.schedule_id ? ` · 每日任务 ${task.scheduled_for || ""}` : "";
-      const nodeLabel = historical ? "任务已结束" : (task.waiting_node || task.current_node || "等待 Pi 接手");
-      const effectiveModel = task.effective_model || task.requested_model || "Pi 默认模型";
+      const nodeLabel = historical ? "任务已结束" : (task.waiting_node_display_name || task.current_node_display_name || "等待智能核心接手");
+      const effectiveModel = displayModelName(task.effective_model || task.requested_model);
       const effectiveThinking = thinkingLabels[task.effective_thinking_level || task.requested_thinking_level] || "默认";
       template.querySelector(".task-meta").textContent = `项目：${projectById(task.project_id)?.name || "日常工作"}${scheduleMeta} · 模型：${effectiveModel} · 思考：${effectiveThinking} · 节点：${nodeLabel} · 版本 ${task.version ?? "-"}`;
-      template.querySelector(".task-request").textContent = task.request || "";
+      template.querySelector(".task-request").textContent = displayTaskRequest(task);
       const actions = template.querySelector(".task-actions");
       const article = template.querySelector("article");
       renderTaskProgress(article, task, historical);
@@ -844,7 +919,7 @@
     const meta = document.createElement("small"); meta.textContent = `${item.path} · ${item.modified_at}`;
     copy.append(title, meta);
     const size = document.createElement("span"); size.className = "file-size"; size.textContent = fileSize(item.size || 0);
-    const use = document.createElement("button"); use.className = "secondary"; use.textContent = item.name.toLowerCase().endsWith(".pdf") ? "PDF 入库" : "用于任务";
+    const use = document.createElement("button"); use.className = "secondary"; use.textContent = item.name.toLowerCase().endsWith(".pdf") ? "电子文档入库" : "用于任务";
     use.onclick = () => {
       selectedProject = item.project_id;
       if (item.name.toLowerCase().endsWith(".pdf")) {
@@ -901,7 +976,7 @@
     const fileBox = $("project-files");
     fileBox.classList.toggle("empty", files.length === 0);
     if (files.length) fileBox.replaceChildren(...files.map(fileRow));
-    else { fileBox.replaceChildren(); fileBox.textContent = "当前项目还没有资料，可上传 PDF、Word、Excel、CSV、文本或 PPT。"; }
+    else { fileBox.replaceChildren(); fileBox.textContent = "当前项目还没有资料，可上传电子文档、文字文档、表格、逗号分隔文件、文本或演示文稿。"; }
     const artifactPaths = new Set((model.tasks || [])
       .filter((task) => task.project_id === selectedProject)
       .flatMap((task) => Array.isArray(task.artifacts) ? task.artifacts : [])
@@ -972,10 +1047,10 @@
         const row = document.createElement("button"); row.className = "compact-task";
         const copy = document.createElement("span");
         const title = document.createElement("strong"); title.textContent = serviceById(task.service_id)?.display_name || "销售任务";
-        const request = document.createElement("small"); request.textContent = String(task.request || "").replace(/\s+/gu, " ").slice(0, 60);
+        const request = document.createElement("small"); request.textContent = displayTaskRequest(task).replace(/\s+/gu, " ").slice(0, 60);
         copy.append(title, request);
         const effectiveStatus = displayStatus(task);
-        const status = document.createElement("i"); status.className = `status ${effectiveStatus}`; status.textContent = label[effectiveStatus] || effectiveStatus;
+        const status = document.createElement("i"); status.className = `status ${effectiveStatus}`; status.textContent = label[effectiveStatus] || "未知状态";
         row.append(copy, status); row.onclick = () => { switchView("tasks"); renderWorkflow(task); }; return row;
       }));
     };
@@ -991,8 +1066,8 @@
   async function createTask(request) {
     if (!publicSearchReady(selectedService, true)) {
       throw new Error(model?.search?.restart_required
-        ? "公开检索配置已保存，请关闭并重新打开 Agent4Market 后再创建该任务。"
-        : "该任务需要公开检索，请先在“设置 > 公开检索”配置 Brave Search API Key。");
+        ? "公开检索配置已保存，请关闭并重新打开销售总监智能工作台后再创建该任务。"
+        : "该任务需要公开检索，请先在“设置 > 公开检索”配置公开检索接口密钥。");
     }
     return api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1033,12 +1108,12 @@
     const expectedDecision = $("ppt-decision").value.trim() || "确认下一步行动与所需资源";
     const scene = $("ppt-scene").value;
     const occasions = { weekly: "周五销售例会", industry: "客户与行业专题汇报", government: "政府合作沟通会", custom: "销售或客户方案汇报" };
-    if (!topic) throw new Error("请先填写要制作的 PPT 主题。");
-    if (topic.length > 240) throw new Error("PPT 主题不能超过 240 字。");
+    if (!topic) throw new Error("请先填写要制作的演示文稿主题。");
+    if (topic.length > 240) throw new Error("演示文稿主题不能超过 240 字。");
     if (expectedDecision.length > 500) throw new Error("期望决策不能超过 500 字。");
     if (!Number.isInteger(duration) || duration < 3 || duration > 120) throw new Error("演讲时长必须是 3–120 分钟的整数。");
-    if (!Number.isInteger(pages) || pages < 4 || pages > 10) throw new Error("MVP 页数必须是 4–10 页。");
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx$/u.test(outputName)) throw new Error("输出文件名格式无效，请使用安全 ASCII 文件名并以 .pptx 结尾。");
+    if (!Number.isInteger(pages) || pages < 4 || pages > 10) throw new Error("首版页数必须是 4–10 页。");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx$/u.test(outputName)) throw new Error("输出文件名格式无效，请使用英文字母、数字、点、下划线或连字符，并以 .pptx 结尾。");
     return {
       schema_version: "1.0", scene, mode: $("ppt-mode").value, topic,
       audience: $("ppt-audience").value.trim() || "客户决策人和销售管理层",
@@ -1078,7 +1153,7 @@
       guidedDrafts[selectedService] = {};
       guidedNotes[selectedService] = "";
       renderGuidedForm(true);
-      note(`任务已登记（${response.request_id}），等待 Pi 工作流接手。`);
+      note(`任务已登记（${response.request_id}），等待智能核心接手。`);
     } catch (error) { note(error.message, true); }
   };
 
@@ -1107,7 +1182,7 @@
 
   async function uploadProjectFile(file) {
     if (!file) return;
-    if (file.size <= 0 || file.size > 32 * 1024 * 1024) throw new Error("单个资料必须为 1 字节至 32 MB。");
+    if (file.size <= 0 || file.size > 32 * 1024 * 1024) throw new Error("单个资料必须为 1 字节至 32 兆字节。");
     const response = await fetch("/api/project-files", {
       method: "POST",
       headers: {
@@ -1194,7 +1269,7 @@
     const query = $("search-query").value.trim();
     if (query.length < 2) { note("请先输入至少 2 个字的公开调研主题。", true); return; }
     if (!publicSearchReady("industry-research", true)) {
-      note(model?.search?.restart_required ? "请重启应用，让 AI 核心加载检索密钥。" : "请先配置公开检索服务。", true);
+      note(model?.search?.restart_required ? "请重启应用，让智能核心加载检索密钥。" : "请先配置公开检索服务。", true);
       return;
     }
     openService("industry-research");
@@ -1270,7 +1345,7 @@
       renderModelSettings(true);
       $("model-settings-panel").open = true;
       $("model-discovery-status").textContent = response.message;
-      note("模型已保存；关闭并重新打开 Agent4Market 后，后续任务将使用新模型。");
+      note("模型已保存；关闭并重新打开销售总监智能工作台后，后续任务将使用新模型。");
     } catch (error) {
       $("model-discovery-status").textContent = error.message;
       button.disabled = false;
@@ -1278,7 +1353,7 @@
   };
 
   $("reset-model-settings").onclick = async () => {
-    if (!confirm("恢复 Pi 默认模型？已保存的 NewAPI 密钥会从本机删除，重启应用后生效。")) return;
+    if (!confirm("恢复智能核心默认模型？已保存的模型网关密钥会从本机删除，重启应用后生效。")) return;
     const button = $("reset-model-settings");
     button.disabled = true;
     try {
@@ -1289,7 +1364,7 @@
       renderModelSettings(true);
       $("model-settings-panel").open = true;
       $("model-discovery-status").textContent = response.message;
-      note("已恢复默认模型；关闭并重新打开 Agent4Market 后生效。");
+      note("已恢复默认模型；关闭并重新打开销售总监智能工作台后生效。");
     } catch (error) {
       $("model-discovery-status").textContent = error.message;
     } finally { button.disabled = false; }
@@ -1298,7 +1373,7 @@
   $("save-search-settings").onclick = async () => {
     const button = $("save-search-settings");
     button.disabled = true;
-    $("search-settings-status").textContent = "正在连接 Brave Search 验证密钥…";
+    $("search-settings-status").textContent = "正在连接公开检索服务并验证密钥…";
     try {
       const response = await api("/api/search-settings", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1308,7 +1383,7 @@
       renderSearchSettings(true);
       $("search-settings-panel").open = true;
       $("search-settings-status").textContent = response.message;
-      note("检索密钥已安全保存；关闭并重新打开 Agent4Market 后即可重试政策检索。");
+      note("检索密钥已安全保存；关闭并重新打开销售总监智能工作台后即可重试政策检索。");
     } catch (error) {
       $("search-settings-status").textContent = error.message;
     } finally { button.disabled = false; }
@@ -1361,7 +1436,7 @@
       const brief = presentationBrief();
       const response = await createTask(`[PRESENTATION_BRIEF]\n${JSON.stringify(brief, null, 2)}\n[/PRESENTATION_BRIEF]`);
       $("ppt-topic").value = "";
-      note(`PPT 项目已登记（${response.request_id}），将先进入需求与证据阶段。`);
+      note(`演示文稿任务已登记（${response.request_id}），将先进入需求与证据阶段。`);
     } catch (error) { note(error.message, true); }
   };
 
@@ -1373,6 +1448,7 @@
     } catch (error) { note(error.message, true); }
   };
 
+  localizeStaticInterface();
   load().catch((error) => note(`无法读取工作台：${error.message}`, true));
   setInterval(() => load().catch(() => {}), 3000);
 })();

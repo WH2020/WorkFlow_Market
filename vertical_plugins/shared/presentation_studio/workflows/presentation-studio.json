@@ -1,7 +1,7 @@
 {
   "id": "shared.presentation.studio",
   "plugin": "shared.presentation-studio",
-  "display_name": "PPT 工作室",
+  "display_name": "演示文稿工作室",
   "entry_nodes": ["create_brief"],
   "output_nodes": ["render_deck"],
   "nodes": [

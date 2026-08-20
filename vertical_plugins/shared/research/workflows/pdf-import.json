@@ -1,7 +1,7 @@
 {
   "id": "shared.research.pdf-import",
   "plugin": "shared.research",
-  "display_name": "PDF 资料提取与入库",
+  "display_name": "电子文档资料提取与入库",
   "entry_nodes": ["read_pdf"],
   "output_nodes": ["persist_knowledge"],
   "nodes": [

@@ -112,9 +112,9 @@ fn log_launcher_event(root: &Path, event: &str) {
 
 #[cfg(windows)]
 fn show_startup_error(message: &str) {
-    let title: Vec<u16> = "销售总监 AI 助手启动失败\0".encode_utf16().collect();
+    let title: Vec<u16> = "销售总监智能助手启动失败\0".encode_utf16().collect();
     let body: Vec<u16> = format!(
-        "销售总监 AI 助手未能启动。\n\n{message}\n\n请关闭旧版本后重试；详细记录位于安装目录的 .pi\\director-runtime\\desktop-launcher.log。\0"
+        "销售总监智能助手未能启动。\n\n{message}\n\n请关闭旧版本后重试；详细记录位于安装目录的 .pi\\director-runtime\\desktop-launcher.log。\0"
     )
     .encode_utf16()
     .collect();
@@ -130,7 +130,7 @@ fn show_startup_error(message: &str) {
 
 #[cfg(not(windows))]
 fn show_startup_error(message: &str) {
-    eprintln!("销售总监 AI 助手启动失败：{message}");
+    eprintln!("销售总监智能助手启动失败：{message}");
 }
 
 fn python_command() -> Result<(String, Vec<String>), String> {
@@ -290,7 +290,7 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
             "/S",
             "/C",
             "start",
-            "Agent4Market AI Core",
+            "销售总监智能核心",
             "/WAIT",
             "powershell.exe",
             "-NoLogo",
@@ -411,7 +411,7 @@ fn main() {
                 "main",
                 WebviewUrl::External("http://127.0.0.1:8765/".parse().expect("static URL")),
             )
-            .title("销售总监 AI 助手")
+            .title("销售总监智能助手")
             .inner_size(1280.0, 860.0)
             .min_inner_size(980.0, 680.0)
             .center()
