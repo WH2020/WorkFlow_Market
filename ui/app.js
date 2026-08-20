@@ -12,6 +12,7 @@
   let currentView = "home";
   let selectedProject = "project-default";
   let noticeTimer = null;
+  let activeConfirmDismiss = null;
   let schedulePanelInitialized = false;
   const guidedDrafts = {};
   const guidedNotes = {};
@@ -41,6 +42,106 @@
     textarea.focus({ preventScroll: true });
     textarea.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd, snapshot.selectionDirection);
     textarea.scrollTop = snapshot.scrollTop;
+  }
+
+  function confirmAction({
+    title,
+    message,
+    confirmText = "确认",
+    cancelText = "取消",
+    tone = "primary",
+    detail = "",
+  }) {
+    return new Promise((resolve) => {
+      activeConfirmDismiss?.(false, true);
+      const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const overlay = document.createElement("div");
+      overlay.className = "app-confirm-overlay";
+      const dialog = document.createElement("section");
+      dialog.className = `app-confirm-dialog ${tone === "danger" ? "danger" : ""}`;
+      dialog.setAttribute("role", "alertdialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.setAttribute("aria-labelledby", "app-confirm-title");
+      dialog.setAttribute("aria-describedby", "app-confirm-message");
+      const header = document.createElement("header");
+      const icon = document.createElement("span");
+      icon.className = "app-confirm-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = tone === "danger" ? "!" : "✓";
+      const heading = document.createElement("div");
+      const eyebrow = document.createElement("small");
+      eyebrow.textContent = tone === "danger" ? "请谨慎确认" : "操作确认";
+      const titleNode = document.createElement("h2");
+      titleNode.id = "app-confirm-title";
+      titleNode.textContent = title;
+      heading.append(eyebrow, titleNode);
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "app-confirm-close";
+      close.setAttribute("aria-label", "关闭确认窗口");
+      close.textContent = "×";
+      header.append(icon, heading, close);
+      const body = document.createElement("div");
+      body.className = "app-confirm-body";
+      const messageNode = document.createElement("p");
+      messageNode.id = "app-confirm-message";
+      messageNode.textContent = message;
+      body.append(messageNode);
+      if (detail) {
+        const technical = document.createElement("details");
+        technical.className = "app-confirm-detail";
+        const summary = document.createElement("summary");
+        summary.textContent = "查看校验信息";
+        const code = document.createElement("code");
+        code.textContent = detail;
+        technical.append(summary, code);
+        body.append(technical);
+      }
+      const actions = document.createElement("footer");
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "secondary";
+      cancel.textContent = cancelText;
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.className = tone === "danger" ? "danger" : "primary";
+      confirm.textContent = confirmText;
+      actions.append(cancel, confirm);
+      dialog.append(header, body, actions);
+      overlay.append(dialog);
+      document.body.append(overlay);
+      document.body.classList.add("modal-open");
+      let settled = false;
+      const dismiss = (accepted, immediate = false) => {
+        if (settled) return;
+        settled = true;
+        activeConfirmDismiss = null;
+        overlay.classList.add("closing");
+        const finish = () => {
+          overlay.remove();
+          document.body.classList.remove("modal-open");
+          if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+          resolve(Boolean(accepted));
+        };
+        if (immediate) finish(); else window.setTimeout(finish, 140);
+      };
+      activeConfirmDismiss = dismiss;
+      close.addEventListener("click", () => dismiss(false));
+      cancel.addEventListener("click", () => dismiss(false));
+      confirm.addEventListener("click", () => dismiss(true));
+      overlay.addEventListener("click", (event) => { if (event.target === overlay) dismiss(false); });
+      overlay.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") { event.preventDefault(); dismiss(false); return; }
+        if (event.key !== "Tab") return;
+        const focusable = [close, cancel, confirm];
+        const index = focusable.indexOf(document.activeElement);
+        const next = event.shiftKey ? (index <= 0 ? focusable.length - 1 : index - 1) : (index + 1) % focusable.length;
+        event.preventDefault();
+        focusable[next].focus();
+      });
+      requestAnimationFrame(() => overlay.classList.add("visible"));
+      queueMicrotask(() => cancel.focus({ preventScroll: true }));
+    });
   }
 
   const viewTitles = {
@@ -815,10 +916,15 @@
     remove.disabled = Boolean(task.approval_request);
     remove.addEventListener("click", async () => {
       const lastCard = totalCards === 1;
-      const message = lastCard
-        ? "这是最后一张卡片。删除后本次将不再写入任何内容，任务会结束。确定删除吗？"
-        : "确定从本次待写入内容中删除这张卡片吗？这不会删除数据库中的已有记录。";
-      if (!window.confirm(message)) return;
+      const accepted = await confirmAction({
+        title: lastCard ? "删除最后一张待写入卡片？" : "删除这张待写入卡片？",
+        message: lastCard
+          ? "删除后，本次将不再写入任何内容，任务会安全结束。数据库中的已有记录不会受到影响。"
+          : "这张卡片只会从本次待写入批次中移除，数据库中的已有记录不会被删除。",
+        confirmText: lastCard ? "删除并结束任务" : "删除卡片",
+        tone: "danger",
+      });
+      if (!accepted) return;
       remove.disabled = true;
       try { await submitWriteCardRevision(task, mutation, "remove"); }
       catch (error) { showNotice(error.message, true); remove.disabled = false; }
@@ -987,7 +1093,11 @@
           title: card.querySelector(".sticky-title-input").value.trim(),
         }));
         if (outline.some((item) => !item.title)) { note("每页标题都不能为空。", true); return; }
-        if (!confirm("确认保存当前顺序和标题，并结束旧任务、创建一个新的修订任务？")) return;
+        if (!await confirmAction({
+          title: "按当前大纲创建修订任务？",
+          message: "当前页序和标题会用于创建一个新任务；旧任务将结束，但原任务和审批记录仍会保留。",
+          confirmText: "创建修订任务",
+        })) return;
         try {
           const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/presentation-revision`, {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -1254,8 +1364,19 @@
     button.className = `action ${decision}`;
     button.textContent = text;
     button.onclick = async () => {
-      const suffix = decision === "approve" && task.pending_write ? `\n\n本次批准将绑定校验码：\n${task.pending_write.payload_sha256}` : "";
-      if (!confirm(`确认${text}？${suffix}`)) return;
+      const destructive = decision === "reject" || decision === "cancel";
+      const accepted = await confirmAction({
+        title: `${text}？`,
+        message: decision === "approve" && task.pending_write
+          ? "确认后将按照当前待写入卡片执行操作。请确保内容已经核对无误。"
+          : destructive
+            ? "确认后将结束当前处理，不会执行尚未批准的写入。"
+            : "确认后，任务将进入下一处理阶段。",
+        confirmText: text,
+        tone: destructive ? "danger" : "primary",
+        detail: decision === "approve" && task.pending_write ? task.pending_write.payload_sha256 : "",
+      });
+      if (!accepted) return;
       const body = { decision, version: task.version };
       if (decision === "approve" && task.pending_write) { body.intent_id = task.pending_write.intent_id; body.payload_sha256 = task.pending_write.payload_sha256; }
       try {
@@ -1272,7 +1393,11 @@
     button.className = "action restart";
     button.textContent = text;
     button.onclick = async () => {
-      if (!confirm(`确认${text}？\n\n将复用原任务的说明、项目和服务创建一个全新任务，不会复用旧审批。`)) return;
+      if (!await confirmAction({
+        title: `${text}？`,
+        message: "系统会复用原任务的说明、项目和服务创建一个全新任务，但不会复用旧审批。",
+        confirmText: text,
+      })) return;
       try {
         const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/restart`, {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -1293,7 +1418,12 @@
     button.onclick = async (event) => {
       event.stopPropagation();
       const warning = "彻底删除后，任务卡、处理过程、排队消息和演示方案无法恢复。已生成文件、知识库和销售台账不会被删除。";
-      if (!confirm(`${warning}\n\n确认永久删除这条历史任务？`)) return;
+      if (!await confirmAction({
+        title: "永久删除这条历史任务？",
+        message: warning,
+        confirmText: "永久删除",
+        tone: "danger",
+      })) return;
       button.disabled = true;
       try {
         const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/delete`, {
@@ -1407,7 +1537,11 @@
       const archive = document.createElement("button"); archive.className = "secondary"; archive.textContent = project.status === "active" ? "归档" : "恢复";
       archive.onclick = async () => {
         const target = project.status === "active" ? "archived" : "active";
-        if (target === "archived" && !confirm("归档后，该项目的每日任务会暂停。继续吗？")) return;
+        if (target === "archived" && !await confirmAction({
+          title: "归档这个项目？",
+          message: "归档后，该项目的每日任务会暂停；项目资料和历史记录仍会保留。",
+          confirmText: "归档项目",
+        })) return;
         try { await api(`/api/projects/${encodeURIComponent(project.project_id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: target }) }); note(target === "active" ? "项目已恢复。" : "项目已归档，相关每日任务已暂停。"); await load(); } catch (error) { note(error.message, true); }
       };
       actions.append(archive);
@@ -1819,7 +1953,12 @@
   };
 
   $("reset-model-settings").onclick = async () => {
-    if (!confirm("恢复智能核心默认模型？已保存的模型网关密钥会从本机删除，重启应用后生效。")) return;
+    if (!await confirmAction({
+      title: "恢复默认模型？",
+      message: "已保存的模型网关密钥会从本机删除，关闭并重新打开应用后生效。",
+      confirmText: "恢复默认模型",
+      tone: "danger",
+    })) return;
     const button = $("reset-model-settings");
     button.disabled = true;
     try {
@@ -1866,7 +2005,12 @@
   };
 
   $("reset-search-settings").onclick = async () => {
-    if (!confirm("删除已保存的专用检索密钥？重启应用后会自动切换到免密公共检索。")) return;
+    if (!await confirmAction({
+      title: "删除专用检索密钥？",
+      message: "密钥会从本机删除，关闭并重新打开应用后将自动切换到免密公共检索。",
+      confirmText: "删除密钥",
+      tone: "danger",
+    })) return;
     const button = $("reset-search-settings");
     button.disabled = true;
     try {
@@ -1923,7 +2067,12 @@
   };
 
   $("reset-search-gateway").onclick = async () => {
-    if (!confirm("停用搜索聚合网关？已保存的 osr_ 令牌会从本机删除，重启后恢复使用原有公开检索。")) return;
+    if (!await confirmAction({
+      title: "停用搜索聚合网关？",
+      message: "已保存的聚合网关令牌会从本机删除，关闭并重新打开应用后恢复使用原有公开检索。",
+      confirmText: "停用网关",
+      tone: "danger",
+    })) return;
     const button = $("reset-search-gateway");
     button.disabled = true;
     try {

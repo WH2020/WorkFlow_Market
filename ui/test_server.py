@@ -174,6 +174,10 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('return "批准写入知识库"', javascript)
         self.assertIn(".write-review-card", styles)
         self.assertIn(".write-edit-overlay", styles)
+        self.assertIn("function confirmAction", javascript)
+        self.assertIn(".app-confirm-overlay", styles)
+        self.assertNotIn("window.confirm(", javascript)
+        self.assertNotRegex(javascript, r"(?<![A-Za-z])confirm\(")
         self.assertIn('redirect.textContent = "调整当前方向"', javascript)
         self.assertIn("/messages`,", javascript)
 
