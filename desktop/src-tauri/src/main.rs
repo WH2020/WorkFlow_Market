@@ -20,6 +20,8 @@ const PROFILE_ID: &str = "sales-director";
 const WORKBENCH_PORT: u16 = 8765;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(windows)]
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
 #[derive(Default)]
 struct RuntimeChildren(Mutex<Vec<Child>>);
@@ -344,16 +346,10 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
             .spawn()
             .map_err(|value| format!("嵌入式 Pi 销售总监运行时启动失败：{value}"));
     }
-    // Optional diagnostics mode keeps the original standalone console available.
-    Command::new("cmd.exe")
+    // Optional diagnostics mode gets its own console.  Launch PowerShell
+    // directly so cmd.exe cannot reinterpret a localized window title as a file.
+    Command::new("powershell.exe")
         .args([
-            "/D",
-            "/S",
-            "/C",
-            "start",
-            "销售总监智能核心",
-            "/WAIT",
-            "powershell.exe",
             "-NoLogo",
             "-NoProfile",
             "-NoExit",
@@ -367,7 +363,7 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
         .current_dir(root)
         .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID)
         .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NEW_CONSOLE)
         .spawn()
         .map_err(|value| format!("Pi 销售总监运行时启动失败：{value}"))
 }
