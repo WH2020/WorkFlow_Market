@@ -157,7 +157,7 @@
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
     knowledge: "知识库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
-    schedules: "每日定时任务", search: "自定义搜索", tools: "工具栏", settings: "设置",
+    schedules: "每日定时任务", search: "自定义操作", tools: "工具栏", settings: "设置",
   };
   if (viewTitles[window.location.hash.slice(1)]) currentView = window.location.hash.slice(1);
 
@@ -173,7 +173,7 @@
     ["OUTPUT CENTRE", "输出中心"],
     ["PROJECT SPACE", "项目空间"],
     ["DAILY AUTOMATION", "每日自动任务"],
-    ["CUSTOM SEARCH", "自定义搜索"],
+    ["CUSTOM ACTION", "自定义操作"],
     ["QUICK TOOLS", "快捷工具"],
     ["SETTINGS", "系统设置"],
     ["AI 工作台", "智能工作台"],

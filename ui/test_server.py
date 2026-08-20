@@ -141,6 +141,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('api("/api/desktop-settings"', javascript)
         for view in ("home", "projects", "schedules", "search"):
             self.assertIn(f'data-page="{view}"', html)
+        self.assertIn("自定义操作", html)
+        self.assertIn('search: "自定义操作"', javascript)
+        self.assertNotIn("自定义搜索", html)
         self.assertIn('id="project-file-input"', html)
         self.assertIn('id="project-quick-upload"', html)
         self.assertIn('id="open-data-directory"', html)
