@@ -16,6 +16,7 @@
   const guidedNotes = {};
   const taskMessageDrafts = {};
   const taskProgressScroll = {};
+  const taskCardExpansion = new Map();
   const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
 
   const viewTitles = {
@@ -51,6 +52,7 @@
     ["申请 API Key", "申请接口密钥"],
     ["连接 NewAPI / OpenAI 兼容网关", "连接兼容模型网关"],
     ["API Key", "接口密钥"],
+    ["已完成、已结束和已替代的任务保留在这里，可按原内容再次创建。", "历史任务默认折叠，可展开查看、再次创建或彻底删除记录。"],
   ]);
 
   function localizeStaticInterface() {
@@ -623,8 +625,9 @@
   function renderRawWriteIntent(article, task, presentationRendered) {
     if (!task.pending_write) return;
     const wrapper = document.createElement(presentationRendered ? "details" : "div");
+    wrapper.classList.add("task-details-section");
     if (presentationRendered) {
-      wrapper.className = "raw-details";
+      wrapper.classList.add("raw-details");
       const summary = document.createElement("summary");
       summary.textContent = "查看冻结载荷与校验码";
       wrapper.append(summary);
@@ -814,6 +817,27 @@
       if (effectiveStatus === "interrupted") addRestartAction(actions, task, "重新开始");
       if (effectiveStatus === "interrupted") addAction(actions, task, "cancel", "结束任务");
       if (historical) addRestartAction(actions, task, "再次创建");
+      if (historical) addDeleteAction(actions, task);
+      const expanded = taskCardExpansion.has(task.task_id) ? taskCardExpansion.get(task.task_id) : !historical;
+      article.classList.toggle("collapsed", !expanded);
+      const collapse = document.createElement("button");
+      collapse.type = "button";
+      collapse.className = "task-collapse";
+      collapse.textContent = expanded ? "收起详情" : "展开详情";
+      collapse.setAttribute("aria-expanded", String(expanded));
+      collapse.onclick = (event) => {
+        event.stopPropagation();
+        const nextExpanded = article.classList.contains("collapsed");
+        article.classList.toggle("collapsed", !nextExpanded);
+        taskCardExpansion.set(task.task_id, nextExpanded);
+        collapse.textContent = nextExpanded ? "收起详情" : "展开详情";
+        collapse.setAttribute("aria-expanded", String(nextExpanded));
+        if (nextExpanded) renderWorkflow(task);
+      };
+      const titleControls = document.createElement("div");
+      titleControls.className = "task-title-controls";
+      badge.replaceWith(titleControls);
+      titleControls.append(badge, collapse);
       article.onclick = (event) => { if (!event.target.closest("button,summary,input,textarea,select")) renderWorkflow(task); };
       box.append(template);
       });
@@ -855,6 +879,29 @@
         note(reply.message);
         await load();
       } catch (error) { note(error.message, true); await load(); }
+    };
+    box.append(button);
+  }
+
+  function addDeleteAction(box, task) {
+    const button = document.createElement("button");
+    button.className = "action delete";
+    button.textContent = "彻底删除";
+    button.onclick = async () => {
+      const warning = "彻底删除后，任务卡、处理过程、排队消息和演示方案无法恢复。已生成文件、知识库和销售台账不会被删除。";
+      if (!confirm(`${warning}\n\n确认继续？`)) return;
+      const confirmation = prompt("请再次确认：输入“永久删除”后执行。", "");
+      if (confirmation !== "永久删除") { note("已取消删除：确认文字不正确。", true); return; }
+      button.disabled = true;
+      try {
+        const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/delete`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ version: task.version, confirmation }),
+        });
+        taskCardExpansion.delete(task.task_id);
+        note(reply.message);
+        await load();
+      } catch (error) { note(error.message, true); button.disabled = false; await load(); }
     };
     box.append(button);
   }

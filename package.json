@@ -1,6 +1,6 @@
 {
   "name": "workflow-director-agent",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "type": "module",
   "description": "A single-role Sales Director AI Assistant with a Tauri desktop shell and governed Pi workflows.",
   "license": "MIT",

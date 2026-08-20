@@ -1414,6 +1414,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.decide(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/restart"):
                 self.restart_task(route.split("/")[3], payload)
+            elif route.startswith("/api/tasks/") and route.endswith("/delete"):
+                self.delete_task(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/messages"):
                 self.create_task_message(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/presentation-revision"):
@@ -1559,6 +1561,79 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.ACCEPTED, {
             **record,
             "message": "方向调整已排队，将在当前工具调用结束后优先生效。" if mode == "redirect" else "补充信息已排队，将在下一处理步骤前加入任务。",
+        })
+
+    def delete_task(self, task_id: str, payload: dict[str, Any]) -> None:
+        task_id = safe_id(task_id)
+        expected_version = payload.get("version")
+        if not isinstance(expected_version, int):
+            raise ValueError("缺少任务版本")
+        if payload.get("confirmation") != "永久删除":
+            raise ValueError("永久删除确认文字不正确")
+        if TASKS.is_symlink() or not TASKS.is_dir():
+            raise ValueError("任务目录不安全")
+        task_path = TASKS / f"{task_id}.json"
+        if task_path.is_symlink() or not task_path.is_file():
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在或已经删除"})
+            return
+        removed = 0
+        try:
+            with exclusive_task(task_path):
+                task = load_json(task_path)
+                if task.get("task_id") != task_id:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务记录与文件名不一致"})
+                    return
+                if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
+                    self.send_json(HTTPStatus.FORBIDDEN, {"error": "该任务不属于当前销售总监版本"})
+                    return
+                if task.get("version") != expected_version:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务已更新，请刷新后重试", "task": task})
+                    return
+                if task.get("status") not in {"completed", "rejected", "cancelled", "failed"}:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "只能彻底删除已经结束的历史任务"})
+                    return
+                if task.get("approval_request") is not None or task_id in live_agent_task_leases():
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务仍有处理请求或运行会话，暂不能删除"})
+                    return
+                pending_write = task.get("pending_write")
+                if isinstance(pending_write, dict) and pending_write.get("status") == "committing":
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务仍在提交写入，完成恢复后才能删除"})
+                    return
+                task_path.unlink()
+                removed += 1
+        except RuntimeError as error:
+            self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
+            return
+
+        exact_records = [
+            REQUESTS / f"{task_id}.json",
+            PRESENTATION_PLANS / f"{task_id}.json",
+            RUNTIME / "evidence" / f"{task_id}.json",
+        ]
+        for path in exact_records:
+            if path.parent.is_dir() and not path.parent.is_symlink() and (path.is_symlink() or path.is_file()):
+                path.unlink(missing_ok=True)
+                removed += 1
+        if TASK_EVENTS.is_dir() and not TASK_EVENTS.is_symlink():
+            for path in list(TASK_EVENTS.glob(f"event-{task_id}-*.json"))[:4000]:
+                if path.is_symlink() or path.is_file():
+                    path.unlink(missing_ok=True)
+                    removed += 1
+        if TASK_MESSAGES.is_dir() and not TASK_MESSAGES.is_symlink():
+            for path in list(TASK_MESSAGES.glob("message-*.json"))[:5000]:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                try:
+                    belongs_to_task = load_json(path).get("task_id") == task_id
+                except (OSError, ValueError, json.JSONDecodeError):
+                    belongs_to_task = False
+                if belongs_to_task:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+        self.send_json(HTTPStatus.OK, {
+            "task_id": task_id,
+            "removed_records": removed,
+            "message": "任务记录及其运行过程已彻底删除；已生成文件、知识库和销售台账未受影响。",
         })
 
     def decide(self, task_id: str, payload: dict[str, Any]) -> None:

@@ -113,6 +113,11 @@ class ControlCentreTests(unittest.TestCase):
         self.assertNotIn("item.textContent = node.id", javascript)
         self.assertIn("task.waiting_node_display_name", javascript)
         self.assertIn("function displayTaskRequest", javascript)
+        self.assertIn("taskCardExpansion", javascript)
+        self.assertIn("function addDeleteAction", javascript)
+        self.assertIn('/delete`', javascript)
+        styles = (ui_root / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".task.collapsed .task-progress-panel", styles)
         self.assertIn('api("/api/search-settings"', javascript)
         self.assertIn('api("/api/search-settings/open-dashboard"', javascript)
         self.assertIn("function renderRuntimeSettings", javascript)
@@ -511,6 +516,53 @@ class ControlCentreTests(unittest.TestCase):
         with server.exclusive_task(target):
             lock.write_text(json.dumps({"pid": 999, "nonce": "replacement"}), encoding="utf-8")
         self.assertTrue(lock.exists())
+
+    def test_historical_task_can_be_permanently_deleted_without_removing_artifact_receipts(self):
+        task_id = "task-delete"
+        task_path = server.TASKS / f"{task_id}.json"
+        server.atomic_json(task_path, {
+            "task_id": task_id, "profile_id": "sales-director", "service_id": "sales-review",
+            "workflow_id": "market.sales.pipeline-review", "status": "cancelled", "version": 3,
+            "approval_request": None, "artifacts": ["outputs/retained.pptx"],
+        })
+        server.atomic_json(server.REQUESTS / f"{task_id}.json", {"request_id": task_id, "status": "accepted"})
+        server.atomic_json(server.PRESENTATION_PLANS / f"{task_id}.json", {"task_id": task_id})
+        server.atomic_json(server.RUNTIME / "evidence" / f"{task_id}.json", {"task_id": task_id})
+        event = server.TASK_EVENTS / f"event-{task_id}-12345678-1234-4234-8234-123456789abc.json"
+        server.atomic_json(event, {"task_id": task_id})
+        message = server.TASK_MESSAGES / "message-delete.json"
+        server.atomic_json(message, {"task_id": task_id})
+        receipt = server.RUNTIME / "artifact-commits" / "retained.json"
+        server.atomic_json(receipt, {"task_id": task_id, "output": "outputs/retained.pptx"})
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+
+        handler.delete_task(task_id, {"version": 3, "confirmation": "永久删除"})
+
+        self.assertEqual(replies[-1][0], HTTPStatus.OK)
+        self.assertFalse(task_path.exists())
+        self.assertFalse((server.REQUESTS / f"{task_id}.json").exists())
+        self.assertFalse((server.PRESENTATION_PLANS / f"{task_id}.json").exists())
+        self.assertFalse((server.RUNTIME / "evidence" / f"{task_id}.json").exists())
+        self.assertFalse(event.exists())
+        self.assertFalse(message.exists())
+        self.assertTrue(receipt.exists())
+
+    def test_active_task_cannot_be_permanently_deleted(self):
+        task_id = "task-active"
+        task_path = server.TASKS / f"{task_id}.json"
+        server.atomic_json(task_path, {
+            "task_id": task_id, "profile_id": "sales-director", "status": "running", "version": 1,
+        })
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+
+        handler.delete_task(task_id, {"version": 1, "confirmation": "永久删除"})
+
+        self.assertEqual(replies[-1][0], HTTPStatus.CONFLICT)
+        self.assertTrue(task_path.exists())
 
     def test_file_summary_does_not_return_csv_content(self):
         data = Path(self.temporary.name) / "data" / "sales"
