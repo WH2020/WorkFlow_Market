@@ -1518,6 +1518,9 @@ class ControlHandler(SimpleHTTPRequestHandler):
         max_results = payload.get("max_results", 8)
         if isinstance(max_results, bool) or not isinstance(max_results, int):
             raise SearchGatewayError("每次查询结果数必须是 1–10 的整数")
+        selected_providers = payload.get("selected_providers", [])
+        if not isinstance(selected_providers, list):
+            raise SearchGatewayError("搜索来源选项格式无效")
         result = configure_search_gateway(
             ROOT,
             base_url=str(payload.get("base_url", "")),
@@ -1525,6 +1528,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
             mode=str(payload.get("mode", "parallel")),
             max_results=max_results,
             allow_private_network=payload.get("allow_private_network") is True,
+            selected_providers=selected_providers,
         )
         self.send_json(HTTPStatus.OK, {
             **result,

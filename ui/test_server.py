@@ -226,11 +226,13 @@ class ControlCentreTests(unittest.TestCase):
             handler.configure_search_gateway({
                 "base_url": "http://127.0.0.1:8080", "token": "osr_test",
                 "mode": "parallel", "max_results": 6, "allow_private_network": True,
+                "selected_providers": ["brave", "tavily"],
             })
         configure.assert_called_once_with(
             server.ROOT,
             base_url="http://127.0.0.1:8080", token="osr_test", mode="parallel",
             max_results=6, allow_private_network=True,
+            selected_providers=["brave", "tavily"],
         )
         self.assertEqual(replies[-1][0], HTTPStatus.OK)
         self.assertTrue(replies[-1][1]["restart_required"])

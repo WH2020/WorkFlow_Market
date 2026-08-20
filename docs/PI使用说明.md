@@ -50,11 +50,11 @@ Pi 接手请求后会先切换模型，再设置思考等级，最后才创建�
 
 1. 先在本机、局域网或可信服务器单独部署 [One Search](https://github.com/CncCbz/one-search)。Agent4Market 不安装 Docker 服务，也不管理 One Search 的提供商密钥、缓存和审计库。
 2. 在 One Search 中创建权限受限的 `osr_` 外部检索令牌。不要把 `oak_` 管理员超级凭据填入 Agent4Market；界面和后端都会拒绝它。
-3. 打开“设置 > 搜索聚合网关”，填写根地址（不要附加 `/v1/search`）、`osr_` 令牌、聚合方式和每次最多结果数。本机或局域网地址需显式勾选允许。
+3. 打开“设置 > 搜索聚合网关”，填写根地址（不要附加 `/v1/search`）、`osr_` 令牌、搜索策略和每次最多结果数。本机或局域网地址需显式勾选允许。第一次验证默认使用 One Search 中全部可用来源；验证成功后，设置卡片会列出实际可用的 Exa、Tavily、Jina、Brave 等来源，可继续保持自动全选，也可指定一个或多个来源。
 4. 点击“测试并启用”。工作台会调用 `/v1/providers` 验证地址、令牌和提供商目录；不接受重定向，并限制响应时间、类型和大小。保存后重启应用。
 5. 启用后，受控 `web.search` 优先调用 `/v1/search`；结果保留具体上游提供商名称，但仍只是候选来源，必须继续由 `web.open` 核验正文。网关失败会直接提示修复或停用，不会把同一查询静默发送到 Brave 或免密公共接口。
 
-聚合方式对应 One Search 的 `parallel`（并行）、`fallback`（依次尝试）和 `single`（单提供商）。Windows 令牌由当前用户的 DPAPI 加密，macOS 写入系统钥匙串；Pi 子进程启动时才临时得到 `ONE_SEARCH_BASE_URL`、`ONE_SEARCH_API_TOKEN`、`ONE_SEARCH_MODE`、`ONE_SEARCH_MAX_RESULTS` 和私网许可。运行时每次连接都会重新解析网关主机，并把连接固定到已核验地址；公网 HTTP、未授权私网、未指定地址、多播地址和保留地址会被拒绝。能力与流程参考了 [One Search 文章](https://linux.do/t/topic/2581154)；管理员令牌边界见 [官方说明](https://github.com/CncCbz/one-search/blob/main/docs/admin-api-key.md)。
+搜索策略对应 One Search 的 `parallel`（自动聚合）、`fallback`（稳定优先）和 `single`（单一来源）；选择 `single` 时必须且只能选择一个已验证来源。Windows 令牌由当前用户的 DPAPI 加密，macOS 写入系统钥匙串；Pi 子进程启动时才临时得到 `ONE_SEARCH_BASE_URL`、`ONE_SEARCH_API_TOKEN`、`ONE_SEARCH_MODE`、`ONE_SEARCH_MAX_RESULTS`、`ONE_SEARCH_PROVIDERS` 和私网许可。运行时只把所选来源提交给 One Search；自动全选时省略 `providers` 参数，跟随网关当前启用的来源。每次连接都会重新解析网关主机，并把连接固定到已核验地址；公网 HTTP、未授权私网、未指定地址、多播地址和保留地址会被拒绝。能力与流程参考了 [One Search 文章](https://linux.do/t/topic/2581154)；管理员令牌边界见 [官方说明](https://github.com/CncCbz/one-search/blob/main/docs/admin-api-key.md)。
 
 `web.search` 提供 `auto`、`broad`、`official`、`chinese_policy` 和 `recent` 五种场景，可选 `site`、发布日期区间、每项数量和摘要长度。`auto` 会根据政策、时效、标准/论文等关键词选择场景；中文政策默认限定 `gov.cn`，近期信息默认使用 30 天采集窗口。广泛发现优先专用 Brave（已配置时）；中文政策、站点或日期限定优先免密公共检索；未配置专用密钥时其他场景也自动使用免密接口。跨查询 URL 会去重，官方/学术域名只作为本地排序提示。所有搜索结果均标记为 `discovery_only`，摘要不能作为事实证据，必须由受控 `web.open` 读取选中的正文。正文连接固定到已核验的公网地址，DNS 与连接空闲各限 10 秒，网页下载及在线 PDF 提取合计限 30 秒，并拒绝重定向。公开查询若疑似含邮箱、手机号、身份证号、口令或密钥会在发送前被拒绝。[Keenable 免密接口与限流](https://docs.keenable.ai/authentication)，[Brave 官方认证说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 

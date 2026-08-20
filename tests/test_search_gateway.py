@@ -13,8 +13,10 @@ from agent_platform.search_gateway import (
     BASE_URL_ENV,
     MAX_RESULTS_ENV,
     MODE_ENV,
+    PROVIDERS_ENV,
     TOKEN_ENV,
     SearchGatewayError,
+    configure_search_gateway,
     load_gateway_secret,
     mark_search_gateway_runtime_applied,
     normalize_gateway_url,
@@ -147,16 +149,47 @@ class SearchGatewayTests(unittest.TestCase):
         settings_path(self.root).write_text(json.dumps({
             "version": 1, "provider_id": "one-search", "base_url": base_url,
             "mode": "parallel", "max_results": 6, "allow_private_network": False,
-            "providers": ["brave"], "updated_at": "2026-08-20T12:00:00+08:00",
+            "providers": ["brave", "tavily"], "selected_providers": ["brave"],
+            "updated_at": "2026-08-20T12:00:00+08:00",
         }), encoding="utf-8")
         environment = search_gateway_runtime_environment(self.root, environ={})
         self.assertEqual(environment[BASE_URL_ENV], base_url)
         self.assertEqual(environment[TOKEN_ENV], "osr_private_value")
         self.assertEqual(environment[MODE_ENV], "parallel")
         self.assertEqual(environment[MAX_RESULTS_ENV], "6")
+        self.assertEqual(json.loads(environment[PROVIDERS_ENV]), ["brave"])
         summary = search_gateway_settings_summary(self.root)
         self.assertTrue(summary["configured"])
         self.assertNotIn("osr_private_value", json.dumps(summary))
+
+    def test_selected_providers_must_be_available_and_single_mode_is_exact(self):
+        with (
+            patch("agent_platform.search_gateway.normalize_gateway_url", return_value="https://search.example.com"),
+            patch(
+                "agent_platform.search_gateway.validate_search_gateway",
+                return_value=("https://search.example.com", ["brave", "tavily"]),
+            ),
+            patch("agent_platform.search_gateway.save_gateway_secret"),
+            patch("agent_platform.search_gateway.load_gateway_secret", return_value="osr_test"),
+        ):
+            configured = configure_search_gateway(
+                self.root, base_url="https://search.example.com", token="osr_test",
+                mode="fallback", max_results=8, allow_private_network=False,
+                selected_providers=["tavily", "brave"],
+            )
+            self.assertEqual(configured["selected_providers"], ["tavily", "brave"])
+            with self.assertRaisesRegex(SearchGatewayError, "当前不可用"):
+                configure_search_gateway(
+                    self.root, base_url="https://search.example.com", token="osr_test",
+                    mode="parallel", max_results=8, allow_private_network=False,
+                    selected_providers=["unknown"],
+                )
+            with self.assertRaisesRegex(SearchGatewayError, "必须且只能选择一个"):
+                configure_search_gateway(
+                    self.root, base_url="https://search.example.com", token="osr_test",
+                    mode="single", max_results=8, allow_private_network=False,
+                    selected_providers=[],
+                )
 
     def test_restart_flag_is_removed_only_after_runtime_applies_configuration(self):
         restart_flag_path(self.root).parent.mkdir(parents=True, exist_ok=True)

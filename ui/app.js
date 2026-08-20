@@ -358,6 +358,78 @@
         : "专用密钥只保存在本机；搜索结果仍需读取正文后才能作为证据。");
   }
 
+  function renderSearchGatewayProviderOptions(settings) {
+    const container = $("search-gateway-providers");
+    const available = Array.isArray(settings.providers) ? settings.providers : [];
+    const selected = new Set(Array.isArray(settings.selected_providers) ? settings.selected_providers : []);
+    container.replaceChildren();
+
+    const automaticLabel = document.createElement("label");
+    automaticLabel.className = "gateway-provider-option automatic";
+    const automatic = document.createElement("input");
+    automatic.type = "checkbox";
+    automatic.id = "search-gateway-provider-auto";
+    automatic.checked = selected.size === 0;
+    automaticLabel.append(automatic, document.createTextNode("自动使用全部可用来源（推荐）"));
+    container.append(automaticLabel);
+
+    available.forEach((provider) => {
+      const label = document.createElement("label");
+      label.className = "gateway-provider-option";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = provider;
+      input.dataset.gatewayProvider = "true";
+      input.checked = selected.has(provider);
+      label.append(input, document.createTextNode(provider));
+      container.append(label);
+    });
+
+    const sync = (selectDefault = false) => {
+      const providerInputs = [...container.querySelectorAll("input[data-gateway-provider=true]")];
+      const single = $("search-gateway-mode").value === "single";
+      if (single) {
+        automatic.checked = false;
+        automatic.disabled = true;
+        providerInputs.forEach((input) => { input.disabled = false; });
+        const checked = providerInputs.filter((input) => input.checked);
+        if (selectDefault && checked.length !== 1 && providerInputs.length) {
+          providerInputs.forEach((input, index) => { input.checked = index === 0; });
+        } else if (checked.length > 1) {
+          checked.slice(1).forEach((input) => { input.checked = false; });
+        }
+        $("search-gateway-provider-help").textContent = providerInputs.length
+          ? "单一来源模式只能选择一个。"
+          : "请先用自动聚合完成一次连接，再选择单一来源。";
+      } else {
+        automatic.disabled = false;
+        providerInputs.forEach((input) => { input.disabled = automatic.checked; });
+        $("search-gateway-provider-help").textContent = available.length
+          ? `已发现 ${available.length} 个可用来源；可自动全选，也可指定多个。`
+          : "首次连接默认使用全部可用来源；连接成功后可在这里指定。";
+      }
+    };
+    automatic.onchange = () => sync();
+    container.querySelectorAll("input[data-gateway-provider=true]").forEach((input) => {
+      input.onchange = () => {
+        if ($("search-gateway-mode").value === "single" && input.checked) {
+          container.querySelectorAll("input[data-gateway-provider=true]").forEach((other) => {
+            if (other !== input) other.checked = false;
+          });
+        }
+      };
+    });
+    $("search-gateway-mode").onchange = () => sync(true);
+    sync();
+  }
+
+  function selectedSearchGatewayProviders() {
+    const automatic = $("search-gateway-provider-auto");
+    if (automatic?.checked) return [];
+    return [...$("search-gateway-providers").querySelectorAll("input[data-gateway-provider=true]:checked")]
+      .map((input) => input.value);
+  }
+
   function renderSearchGatewaySettings(force = false) {
     const settings = model?.search_gateway || { configured: false, status: "disabled" };
     const panel = $("search-gateway-panel");
@@ -366,7 +438,7 @@
     panel.classList.toggle("error", settings.status === "error" || settings.status === "missing_token");
     if (settings.status === "error") $("search-gateway-current").textContent = `配置异常：${settings.error}`;
     else if (settings.restart_required) $("search-gateway-current").textContent = "配置已变更 · 关闭并重新打开应用后生效";
-    else if (ready) $("search-gateway-current").textContent = `已启用 · ${settings.mode === "parallel" ? "并行检索" : settings.mode === "fallback" ? "依次尝试" : "单提供商"} · 最多 ${settings.max_results} 条`;
+    else if (ready) $("search-gateway-current").textContent = `已启用 · ${settings.mode === "parallel" ? "自动聚合" : settings.mode === "fallback" ? "稳定优先" : "单一来源"} · 最多 ${settings.max_results} 条`;
     else if (settings.status === "missing_token") $("search-gateway-current").textContent = "检索令牌不可用 · 请重新填写";
     else $("search-gateway-current").textContent = "未启用 · 继续使用原有公开检索";
     if (searchGatewaySettingsInitialized && !force) return;
@@ -379,6 +451,7 @@
     $("search-gateway-mode").value = settings.mode || "parallel";
     $("search-gateway-max-results").value = String(settings.max_results || 8);
     $("search-gateway-private-network").checked = Boolean(settings.allow_private_network);
+    renderSearchGatewayProviderOptions(settings);
     $("search-gateway-status").textContent = settings.status === "error"
       ? settings.error
       : ready
@@ -1541,6 +1614,15 @@
       $("search-gateway-status").textContent = "每次查询结果数必须是 1–10 的整数。";
       return;
     }
+    const selectedProviders = selectedSearchGatewayProviders();
+    if (!$("search-gateway-provider-auto")?.checked && selectedProviders.length === 0) {
+      $("search-gateway-status").textContent = "请至少选择一个搜索来源，或启用自动使用全部来源。";
+      return;
+    }
+    if ($("search-gateway-mode").value === "single" && selectedProviders.length !== 1) {
+      $("search-gateway-status").textContent = "单一来源模式必须先选择一个可用搜索来源。";
+      return;
+    }
     button.disabled = true;
     $("search-gateway-status").textContent = "正在连接 One Search、验证令牌并读取提供商…";
     try {
@@ -1552,6 +1634,7 @@
           mode: $("search-gateway-mode").value,
           max_results: maxResults,
           allow_private_network: $("search-gateway-private-network").checked,
+          selected_providers: selectedProviders,
         }),
       });
       model.search_gateway = response;

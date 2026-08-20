@@ -83,7 +83,8 @@ test("public search stops reading a streamed response beyond the byte budget", a
 test("configured One Search gateway takes priority and keeps upstream provenance", async () => {
   const names = [
     "ONE_SEARCH_BASE_URL", "ONE_SEARCH_API_TOKEN", "ONE_SEARCH_MODE",
-    "ONE_SEARCH_MAX_RESULTS", "ONE_SEARCH_ALLOW_PRIVATE_NETWORK", "DIRECTOR_SEARCH_PROVIDER",
+    "ONE_SEARCH_MAX_RESULTS", "ONE_SEARCH_ALLOW_PRIVATE_NETWORK", "ONE_SEARCH_PROVIDERS",
+    "DIRECTOR_SEARCH_PROVIDER",
   ] as const;
   const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   let received: Record<string, unknown> = {};
@@ -109,6 +110,7 @@ test("configured One Search gateway takes priority and keeps upstream provenance
     process.env.ONE_SEARCH_MODE = "parallel";
     process.env.ONE_SEARCH_MAX_RESULTS = "3";
     process.env.ONE_SEARCH_ALLOW_PRIVATE_NETWORK = "1";
+    process.env.ONE_SEARCH_PROVIDERS = JSON.stringify(["brave", "tavily"]);
     delete process.env.DIRECTOR_SEARCH_PROVIDER;
     const response = await searchPublicWeb({ queries: ["具身智能政策"], mode: "chinese_policy", count: 8 });
     assert.equal(response.provider, "one-search");
@@ -117,6 +119,7 @@ test("configured One Search gateway takes priority and keeps upstream provenance
     assert.equal(response.applied_filters.count, 3);
     assert.equal(received.mode, "parallel");
     assert.equal(received.limit, 3);
+    assert.deepEqual(received.providers, ["brave", "tavily"]);
     assert.match(String(received.query), /site:gov\.cn/u);
   } finally {
     await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));

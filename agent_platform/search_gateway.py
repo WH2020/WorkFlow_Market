@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import socket
 import ssl
 import subprocess
@@ -28,7 +29,9 @@ TOKEN_ENV = "ONE_SEARCH_API_TOKEN"
 MODE_ENV = "ONE_SEARCH_MODE"
 MAX_RESULTS_ENV = "ONE_SEARCH_MAX_RESULTS"
 ALLOW_PRIVATE_ENV = "ONE_SEARCH_ALLOW_PRIVATE_NETWORK"
+PROVIDERS_ENV = "ONE_SEARCH_PROVIDERS"
 ALLOWED_MODES = {"parallel", "fallback", "single"}
+PROVIDER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _GATEWAY_CONFIG_LOCK = threading.Lock()
 
@@ -263,8 +266,8 @@ def validate_search_gateway(
     providers: list[str] = []
     for item in raw_providers:
         name = item if isinstance(item, str) else item.get("id") or item.get("name") or item.get("provider") if isinstance(item, dict) else None
-        if isinstance(name, str) and name.strip():
-            providers.append(name.strip()[:120])
+        if isinstance(name, str) and PROVIDER_PATTERN.fullmatch(name.strip()):
+            providers.append(name.strip())
     return normalized, sorted(set(providers), key=str.casefold)
 
 
@@ -382,6 +385,7 @@ def load_gateway_settings(project_root: Path | str) -> dict[str, Any] | None:
     base_url = value.get("base_url")
     parsed = urlsplit(base_url) if isinstance(base_url, str) else None
     providers = value.get("providers", [])
+    selected_providers = value.get("selected_providers", [])
     if (
         value.get("version") != 1 or value.get("provider_id") != PROVIDER_ID
         or parsed is None or parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -390,7 +394,18 @@ def load_gateway_settings(project_root: Path | str) -> dict[str, Any] | None:
         or not isinstance(value.get("max_results"), int) or not 1 <= value["max_results"] <= 10
         or not isinstance(value.get("allow_private_network"), bool)
         or not isinstance(providers, list) or len(providers) > 100
-        or any(not isinstance(provider, str) or not provider or len(provider) > 120 for provider in providers)
+        or any(not isinstance(provider, str) or PROVIDER_PATTERN.fullmatch(provider) is None for provider in providers)
+        or not isinstance(selected_providers, list) or len(selected_providers) > 20
+        or any(
+            not isinstance(provider, str) or PROVIDER_PATTERN.fullmatch(provider) is None
+            for provider in selected_providers
+        )
+        or len(set(selected_providers)) != len(selected_providers)
+        or any(provider not in providers for provider in selected_providers)
+        or (
+            value.get("mode") == "single" and "selected_providers" in value
+            and len(selected_providers) != 1
+        )
     ):
         raise SearchGatewayError("本地聚合检索配置格式无效")
     return value
@@ -410,11 +425,13 @@ def configure_search_gateway(
     mode: str,
     max_results: int,
     allow_private_network: bool,
+    selected_providers: list[str] | None = None,
 ) -> dict[str, Any]:
     with _GATEWAY_CONFIG_LOCK:
         return _configure_search_gateway_unlocked(
             project_root, base_url=base_url, token=token, mode=mode,
             max_results=max_results, allow_private_network=allow_private_network,
+            selected_providers=selected_providers,
         )
 
 
@@ -426,12 +443,23 @@ def _configure_search_gateway_unlocked(
     mode: str,
     max_results: int,
     allow_private_network: bool,
+    selected_providers: list[str] | None,
 ) -> dict[str, Any]:
     root = Path(project_root).resolve()
     if mode not in ALLOWED_MODES:
         raise SearchGatewayError("聚合模式仅支持并行、依次尝试或单提供商")
     if not isinstance(max_results, int) or not 1 <= max_results <= 10:
         raise SearchGatewayError("每次查询结果数必须是 1–10 的整数")
+    requested_providers = [] if selected_providers is None else selected_providers
+    if (
+        not isinstance(requested_providers, list) or len(requested_providers) > 20
+        or any(
+            not isinstance(provider, str) or PROVIDER_PATTERN.fullmatch(provider) is None
+            for provider in requested_providers
+        )
+        or len(set(requested_providers)) != len(requested_providers)
+    ):
+        raise SearchGatewayError("搜索来源选项格式无效")
     provisional = normalize_gateway_url(base_url, allow_private_network=allow_private_network)
     key = (token or "").strip() or load_gateway_secret(root, provisional)
     if not key:
@@ -439,6 +467,11 @@ def _configure_search_gateway_unlocked(
     normalized, providers = validate_search_gateway(
         provisional, key, allow_private_network=allow_private_network
     )
+    unavailable = sorted(set(requested_providers) - set(providers), key=str.casefold)
+    if unavailable:
+        raise SearchGatewayError(f"所选搜索来源当前不可用：{', '.join(unavailable)}")
+    if mode == "single" and len(requested_providers) != 1:
+        raise SearchGatewayError("单一来源模式必须且只能选择一个搜索来源")
     if token and token.strip():
         save_gateway_secret(root, key, normalized)
     _atomic_json(settings_path(root), {
@@ -446,6 +479,7 @@ def _configure_search_gateway_unlocked(
         "mode": mode, "max_results": max_results,
         "allow_private_network": allow_private_network,
         "providers": providers, "updated_at": _now(),
+        "selected_providers": requested_providers,
     })
     _mark_restart_required(root)
     return search_gateway_settings_summary(root)
@@ -501,6 +535,7 @@ def search_gateway_settings_summary(project_root: Path | str) -> dict[str, Any]:
         "max_results": settings["max_results"],
         "allow_private_network": settings["allow_private_network"],
         "providers": settings.get("providers", []),
+        "selected_providers": settings.get("selected_providers", []),
         "has_token": has_token,
         "updated_at": settings.get("updated_at"),
         "restart_required": restart_flag_path(root).is_file(),
@@ -525,11 +560,17 @@ def search_gateway_runtime_environment(
     if not token:
         raise SearchGatewayError("One Search 配置缺少可用的 osr_ 检索令牌")
     _validate_token(token)
-    return {
+    selected_providers = settings.get("selected_providers", [])
+    runtime = {
         BASE_URL_ENV: settings["base_url"], TOKEN_ENV: token,
         MODE_ENV: settings["mode"], MAX_RESULTS_ENV: str(settings["max_results"]),
         ALLOW_PRIVATE_ENV: "1" if settings["allow_private_network"] else "0",
     }
+    if "selected_providers" in settings:
+        runtime[PROVIDERS_ENV] = json.dumps(
+            selected_providers, ensure_ascii=True, separators=(",", ":")
+        )
+    return runtime
 
 
 def mark_search_gateway_runtime_applied(project_root: Path | str) -> None:

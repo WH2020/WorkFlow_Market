@@ -290,7 +290,14 @@ async function resolveGatewayTarget(url: URL, allowPrivate: boolean): Promise<Ne
   return { address: selected.address, family: selected.family };
 }
 
-function oneSearchConfiguration(): { base: URL; token: string; mode: OneSearchMode; maxResults: number; allowPrivate: boolean } | undefined {
+function oneSearchConfiguration(): {
+  base: URL;
+  token: string;
+  mode: OneSearchMode;
+  maxResults: number;
+  allowPrivate: boolean;
+  providers: string[];
+} | undefined {
   const baseValue = process.env.ONE_SEARCH_BASE_URL?.trim() ?? "";
   const token = process.env.ONE_SEARCH_API_TOKEN?.trim() ?? "";
   if (!baseValue && !token) return undefined;
@@ -305,7 +312,28 @@ function oneSearchConfiguration(): { base: URL; token: string; mode: OneSearchMo
   if (!["parallel", "fallback", "single"].includes(mode)) throw new Error("One Search 聚合方式无效");
   const maxResults = Number(process.env.ONE_SEARCH_MAX_RESULTS ?? "8");
   if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 10) throw new Error("One Search 结果数配置必须是 1–10 的整数");
-  return { base, token, mode, maxResults, allowPrivate: process.env.ONE_SEARCH_ALLOW_PRIVATE_NETWORK === "1" };
+  const providersConfigured = process.env.ONE_SEARCH_PROVIDERS !== undefined;
+  let providers: unknown;
+  try {
+    providers = JSON.parse(process.env.ONE_SEARCH_PROVIDERS ?? "[]") as unknown;
+  } catch {
+    throw new Error("One Search 搜索来源配置不是有效 JSON");
+  }
+  if (
+    !Array.isArray(providers) || providers.length > 20
+    || providers.some((provider) => typeof provider !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(provider))
+    || new Set(providers).size !== providers.length
+  ) {
+    throw new Error("One Search 搜索来源配置无效");
+  }
+  if (providersConfigured && mode === "single" && providers.length !== 1) {
+    throw new Error("One Search 单一来源模式必须且只能配置一个搜索来源");
+  }
+  return {
+    base, token, mode, maxResults,
+    allowPrivate: process.env.ONE_SEARCH_ALLOW_PRIVATE_NETWORK === "1",
+    providers,
+  };
 }
 
 function pinnedGatewayRequest(url: URL, target: NetworkTarget, token: string, body: string, signal: AbortSignal): Promise<Response> {
@@ -350,7 +378,13 @@ async function oneSearch(
   if (endpoint.protocol === "http:" && gatewayAddressKind(target.address) === "public") {
     throw new Error("公网 One Search 网关必须使用 HTTPS");
   }
-  const body = JSON.stringify({ query, mode: configuration.mode, limit: Math.min(count, configuration.maxResults), dedupe: true });
+  const body = JSON.stringify({
+    query,
+    mode: configuration.mode,
+    limit: Math.min(count, configuration.maxResults),
+    dedupe: true,
+    ...(configuration.providers.length ? { providers: configuration.providers } : {}),
+  });
   const response = await pinnedGatewayRequest(endpoint, target, configuration.token, body, signal);
   if (!response.ok) throw new Error(`One Search 聚合检索失败（HTTP ${response.status}）；请检查网关状态、osr_ 令牌和提供商配置`);
   const payload = await readBoundedJson(response) as { results?: Array<Record<string, unknown>>; data?: { results?: Array<Record<string, unknown>> } };
