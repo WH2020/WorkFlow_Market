@@ -694,6 +694,136 @@
     return [inserts ? `新增 ${inserts} 条` : "", updates ? `修改 ${updates} 条` : ""].filter(Boolean).join("、");
   }
 
+  function stableWriteField(task, payload) {
+    if (task.pending_write?.logical_tool === "knowledge.write") return "source_id";
+    return { customers: "customer_id", activities: "activity_id", resource_requests: "request_id", sales_assets: "asset_id" }[payload?.table] || "";
+  }
+
+  async function submitWriteCardRevision(task, mutation, operation, changes) {
+    const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/write-intent-revision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        version: task.version,
+        intent_id: task.pending_write.intent_id,
+        payload_sha256: task.pending_write.payload_sha256,
+        operation,
+        record_id: mutation.record_id,
+        ...(changes ? { changes } : {}),
+      }),
+    });
+    showNotice(reply.message || "待写入内容修改已提交");
+    await load();
+  }
+
+  function openWriteCardEditor(task, payload, mutation) {
+    document.querySelector(".write-edit-overlay")?.remove();
+    const changes = mutation?.changes && typeof mutation.changes === "object" ? mutation.changes : {};
+    const stableField = stableWriteField(task, payload);
+    const editable = Object.entries(changes).filter(([field, value]) => field !== stableField && typeof value === "string");
+    if (!editable.length) {
+      showNotice("这张卡片没有可直接编辑的文字字段", true);
+      return;
+    }
+    const overlay = document.createElement("div");
+    overlay.className = "write-edit-overlay";
+    overlay.setAttribute("role", "presentation");
+    const form = document.createElement("form");
+    form.className = "write-edit-dialog";
+    form.setAttribute("role", "dialog");
+    form.setAttribute("aria-modal", "true");
+    const header = document.createElement("header");
+    const heading = document.createElement("div");
+    const title = document.createElement("h3");
+    title.textContent = "编辑待写入卡片";
+    const help = document.createElement("p");
+    help.textContent = "保存后会生成新的校验码，并重新等待你确认；不会直接修改数据库。";
+    heading.append(title, help);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "write-edit-close";
+    close.textContent = "关闭";
+    header.append(heading, close);
+    const fields = document.createElement("div");
+    fields.className = "write-edit-fields";
+    const controls = new Map();
+    editable.forEach(([field, value]) => {
+      const label = document.createElement("label");
+      const caption = document.createElement("strong");
+      caption.textContent = writeFieldLabels[field] || field.replaceAll("_", " ");
+      const multiline = value.length > 80 || ["notes", "risks", "summary", "limitations", "interpretation", "next_action", "request_summary", "business_reason"].includes(field);
+      const control = document.createElement(multiline ? "textarea" : "input");
+      if (!multiline) control.type = "text";
+      control.value = value;
+      control.maxLength = 10000;
+      control.dataset.field = field;
+      controls.set(field, control);
+      label.append(caption, control);
+      fields.append(label);
+    });
+    const actions = document.createElement("div");
+    actions.className = "write-edit-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "secondary";
+    cancel.textContent = "取消";
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.textContent = "保存并重新确认";
+    actions.append(cancel, save);
+    form.append(header, fields, actions);
+    overlay.append(form);
+    document.body.append(overlay);
+    const dismiss = () => overlay.remove();
+    close.addEventListener("click", dismiss);
+    cancel.addEventListener("click", dismiss);
+    overlay.addEventListener("click", (event) => { if (event.target === overlay) dismiss(); });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const revisedChanges = { ...changes };
+      controls.forEach((control, field) => { revisedChanges[field] = control.value; });
+      save.disabled = true;
+      try {
+        await submitWriteCardRevision(task, mutation, "edit", revisedChanges);
+        dismiss();
+      } catch (error) {
+        showNotice(error.message, true);
+        save.disabled = false;
+      }
+    });
+    queueMicrotask(() => controls.values().next().value?.focus());
+  }
+
+  function addWriteCardActions(header, task, payload, mutation, totalCards) {
+    const controls = document.createElement("div");
+    controls.className = "write-card-actions";
+    const operation = document.createElement("span");
+    operation.className = "write-operation";
+    operation.textContent = writeValueLabels[mutation?.operation] || "变更";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "编辑";
+    edit.disabled = Boolean(task.approval_request);
+    edit.addEventListener("click", () => openWriteCardEditor(task, payload, mutation));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-text";
+    remove.textContent = "删除";
+    remove.disabled = Boolean(task.approval_request);
+    remove.addEventListener("click", async () => {
+      const lastCard = totalCards === 1;
+      const message = lastCard
+        ? "这是最后一张卡片。删除后本次将不再写入任何内容，任务会结束。确定删除吗？"
+        : "确定从本次待写入内容中删除这张卡片吗？这不会删除数据库中的已有记录。";
+      if (!window.confirm(message)) return;
+      remove.disabled = true;
+      try { await submitWriteCardRevision(task, mutation, "remove"); }
+      catch (error) { showNotice(error.message, true); remove.disabled = false; }
+    });
+    controls.append(operation, edit, remove);
+    header.append(controls);
+  }
+
   function renderWriteIntentReview(wrapper, task, parsedPayload, presentationRendered) {
     const review = document.createElement("section");
     review.className = "write-review";
@@ -731,9 +861,8 @@
         const header = document.createElement("header");
         const title = document.createElement("strong");
         title.textContent = String(changes.title || changes.customer_name || changes.summary || changes.request_summary || changes.next_action || mutation?.record_id || `第 ${index + 1} 条`);
-        const operation = document.createElement("span");
-        operation.textContent = writeValueLabels[mutation?.operation] || "变更";
-        header.append(title, operation);
+        header.append(title);
+        addWriteCardActions(header, task, parsedPayload, mutation, mutations.length);
         card.append(header);
         const fields = task.pending_write.logical_tool === "knowledge.write"
           ? knowledgeFields

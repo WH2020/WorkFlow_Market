@@ -22,6 +22,7 @@ import {
   rejectApproval,
   proposeWriteIntent,
   recoverWriteFailure,
+  revisePreparedWriteIntent,
   type RuntimeWorkflow,
 } from "../pi/extensions/task-runtime.ts";
 
@@ -231,6 +232,51 @@ test("external UI approval request consumes exactly one reserved version", () =>
   assert.throws(
     () => consumeApprovalRequest({ ...requested, version: baseVersion + 2 }, linearWorkflow),
     VersionConflictError,
+  );
+});
+
+test("a user card edit invalidates the old hash and remains at the approval checkpoint", () => {
+  const task = readyForApproval();
+  const revisedPayload = {
+    mutations: [{ operation: "insert", record_id: "src-2", changes: { title: "修订后的来源", status: "new" } }],
+  };
+  const requested = {
+    ...task,
+    version: task.version + 1,
+    approval_request: {
+      decision: "revise" as const,
+      requested_at: "2026-08-20T00:00:00.000Z",
+      requested_by: "local-workbench-write-card",
+      expected_version: task.version,
+      intent_id: task.pending_write!.intent_id,
+      payload_sha256: task.pending_write!.payload_sha256,
+      revised_payload: revisedPayload,
+    },
+  };
+  const revised = consumeApprovalRequest(requested, linearWorkflow);
+  assert.equal(revised.status, "waiting_approval");
+  assert.equal(revised.waiting_node, "approve");
+  assert.notEqual(revised.pending_write?.intent_id, task.pending_write?.intent_id);
+  assert.notEqual(revised.pending_write?.payload_sha256, task.pending_write?.payload_sha256);
+  assert.deepEqual(JSON.parse(revised.pending_write!.canonical_payload), revisedPayload);
+  assert.equal(revised.pending_write?.revision_base_payload, task.pending_write?.canonical_payload);
+  assert.equal(revised.audit.at(-1)?.action, "write_intent_revised");
+});
+
+test("card revisions cannot add records or change a mutation identity", () => {
+  const task = readyForApproval();
+  assert.throws(
+    () => revisePreparedWriteIntent(task, {
+      mutations: [
+        ...writePayload.mutations,
+        { operation: "insert", record_id: "src-added", changes: { title: "越权新增", status: "new" } },
+      ],
+    }, task.version),
+    /cannot add records/,
+  );
+  assert.throws(
+    () => revisePreparedWriteIntent(task, { mutations: [] }, task.version),
+    /1-100 mutations/,
   );
 });
 

@@ -1634,7 +1634,14 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         }
         const intent = activeTask?.pending_write;
         if (!intent || intent.status !== "committing") throw new Error("写入提交状态未能持久化");
-        return { intent_id: intent.intent_id, payload_sha256: intent.payload_sha256, task_id: state.task_id, profile_id: state.profile_id, authorized_urls: authorizedUrls };
+        return {
+          intent_id: intent.intent_id,
+          payload_sha256: intent.payload_sha256,
+          task_id: state.task_id,
+          profile_id: state.profile_id,
+          authorized_urls: authorizedUrls,
+          revision_base_payload: intent.revision_base_payload,
+        };
       }
       return { task_id: state.task_id, profile_id: state.profile_id, authorized_urls: authorizedUrls };
     },

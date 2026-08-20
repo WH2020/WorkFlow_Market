@@ -71,12 +71,13 @@ export type WorkflowTask = {
   artifacts: string[];
   pending_write?: PendingWriteIntent;
   approval_request?: {
-    decision: "approve" | "reject" | "cancel" | "resume";
+    decision: "approve" | "reject" | "cancel" | "resume" | "revise";
     requested_at: string;
     requested_by: string;
     expected_version: number;
     intent_id?: string;
     payload_sha256?: string;
+    revised_payload?: unknown;
   };
   created_at: string;
   updated_at: string;
@@ -94,6 +95,9 @@ export type PendingWriteIntent = {
   approved_at?: string;
   approved_by_node?: string;
   committed_at?: string;
+  revision_base_payload?: string;
+  revision_of_payload_sha256?: string;
+  revised_at?: string;
 };
 
 export type StructuredWriteTool = "knowledge.write" | "sales.write" | "artifact.deck.write";
@@ -443,6 +447,124 @@ export function proposeWriteIntent(
   return state;
 }
 
+type EditableMutation = {
+  operation: "insert" | "update";
+  record_id: string;
+  changes: Record<string, string>;
+  expected_version?: string;
+};
+
+function editableMutations(payload: unknown, label: string): EditableMutation[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new TaskTransitionError(`${label} must be an object`);
+  }
+  const mutations = (payload as Record<string, unknown>).mutations;
+  if (!Array.isArray(mutations) || mutations.length < 1 || mutations.length > 100) {
+    throw new TaskTransitionError(`${label} must contain 1-100 mutations`);
+  }
+  const seen = new Set<string>();
+  return mutations.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new TaskTransitionError(`${label} contains an invalid mutation`);
+    }
+    const mutation = value as Record<string, unknown>;
+    if (
+      (mutation.operation !== "insert" && mutation.operation !== "update") ||
+      typeof mutation.record_id !== "string" ||
+      mutation.record_id.length > 128 || !mutation.record_id.trim() || /[\0\r\n]/u.test(mutation.record_id) ||
+      !mutation.changes || typeof mutation.changes !== "object" || Array.isArray(mutation.changes) ||
+      (mutation.expected_version !== undefined && typeof mutation.expected_version !== "string")
+    ) {
+      throw new TaskTransitionError(`${label} contains an invalid mutation contract`);
+    }
+    if (seen.has(mutation.record_id)) throw new TaskTransitionError(`${label} contains duplicate record IDs`);
+    seen.add(mutation.record_id);
+    for (const [field, fieldValue] of Object.entries(mutation.changes as Record<string, unknown>)) {
+      if (!/^[A-Za-z0-9_]{1,128}$/u.test(field) || typeof fieldValue !== "string" || fieldValue.length > 10_000) {
+        throw new TaskTransitionError(`${label} contains an invalid editable field`);
+      }
+      if (/^[\t\r]/u.test(fieldValue) || /^\s*[=+\-@]/u.test(fieldValue)) {
+        throw new TaskTransitionError(`${label} contains a spreadsheet formula prefix`);
+      }
+    }
+    return mutation as unknown as EditableMutation;
+  });
+}
+
+export function revisePreparedWriteIntent(
+  source: WorkflowTask,
+  revisedPayload: unknown,
+  expectedVersion: number,
+  note?: string,
+): WorkflowTask {
+  assertExpectedVersion(source, expectedVersion);
+  if (source.status !== "waiting_approval" || source.waiting_nodes.length !== 1) {
+    throw new TaskTransitionError("Only one waiting approval may revise a frozen write intent");
+  }
+  const currentIntent = source.pending_write;
+  if (!currentIntent || currentIntent.status !== "prepared") {
+    throw new TaskTransitionError("Task has no prepared write intent to revise");
+  }
+  if (currentIntent.logical_tool === "artifact.deck.write") {
+    throw new TaskTransitionError("Deck payload revisions must use the presentation revision workflow");
+  }
+  const currentPayload = JSON.parse(currentIntent.canonical_payload) as Record<string, unknown>;
+  if (!revisedPayload || typeof revisedPayload !== "object" || Array.isArray(revisedPayload)) {
+    throw new TaskTransitionError("Revised write payload must be an object");
+  }
+  const revisedRecord = revisedPayload as Record<string, unknown>;
+  const currentWithoutMutations = { ...currentPayload };
+  const revisedWithoutMutations = { ...revisedRecord };
+  delete currentWithoutMutations.mutations;
+  delete revisedWithoutMutations.mutations;
+  if (canonicalJson(currentWithoutMutations) !== canonicalJson(revisedWithoutMutations)) {
+    throw new TaskTransitionError("A card revision cannot change the write target or batch contract");
+  }
+  const currentMutations = editableMutations(currentPayload, "Current payload");
+  const revisedMutations = editableMutations(revisedPayload, "Revised payload");
+  const currentById = new Map(currentMutations.map((mutation) => [mutation.record_id, mutation]));
+  for (const mutation of revisedMutations) {
+    const previous = currentById.get(mutation.record_id);
+    if (
+      !previous ||
+      previous.operation !== mutation.operation ||
+      previous.expected_version !== mutation.expected_version
+    ) {
+      throw new TaskTransitionError("A card revision cannot add records or change their identity/version contract");
+    }
+  }
+  const canonical = canonicalJson(revisedPayload);
+  if (Buffer.byteLength(canonical, "utf8") > 256 * 1024) {
+    throw new TaskTransitionError("Revised write intent payload exceeds the 256 KiB safety limit");
+  }
+  if (canonical === currentIntent.canonical_payload) throw new TaskTransitionError("Revised write intent did not change");
+
+  const state = clone(source);
+  const revisedAt = now();
+  state.pending_write = {
+    intent_id: randomUUID(),
+    logical_tool: currentIntent.logical_tool,
+    canonical_payload: canonical,
+    payload_sha256: createHash("sha256").update(canonical, "utf8").digest("hex"),
+    proposed_at: revisedAt,
+    proposed_by_node: currentIntent.proposed_by_node,
+    status: "prepared",
+    revision_base_payload: currentIntent.revision_base_payload ?? currentIntent.canonical_payload,
+    revision_of_payload_sha256: currentIntent.payload_sha256,
+    revised_at: revisedAt,
+  };
+  state.version += 1;
+  state.updated_at = revisedAt;
+  appendAudit(
+    state,
+    "write_intent_revised",
+    "user",
+    state.waiting_nodes[0],
+    `${currentIntent.payload_sha256} -> ${state.pending_write.payload_sha256}${note ? `; ${note}` : ""}`,
+  );
+  return state;
+}
+
 export function assertApprovedWriteIntent(
   state: WorkflowTask,
   logicalTool: string,
@@ -676,7 +798,7 @@ export function consumeResumeRequest(
       `External resume expected base version ${request.expected_version}, found ${source.version}`,
     );
   }
-  if (request.intent_id !== undefined || request.payload_sha256 !== undefined) {
+  if (request.intent_id !== undefined || request.payload_sha256 !== undefined || request.revised_payload !== undefined) {
     throw new TaskTransitionError("External resume cannot approve a frozen write intent");
   }
   const clean: WorkflowTask = clone(source);
@@ -706,6 +828,18 @@ export function consumeApprovalRequest(
   }
   const clean: WorkflowTask = clone(source);
   delete clean.approval_request;
+  const note = `${request.requested_by} @ ${request.requested_at}`;
+  if (request.decision === "revise") {
+    if (
+      !clean.pending_write || clean.pending_write.status !== "prepared" ||
+      request.intent_id !== clean.pending_write.intent_id ||
+      request.payload_sha256 !== clean.pending_write.payload_sha256 ||
+      request.revised_payload === undefined
+    ) {
+      throw new TaskTransitionError("External revision is not bound to the current frozen write intent");
+    }
+    return revisePreparedWriteIntent(clean, request.revised_payload, clean.version, note);
+  }
   if (request.decision === "approve" && clean.pending_write?.status === "prepared") {
     if (
       request.intent_id !== clean.pending_write.intent_id ||
@@ -713,10 +847,9 @@ export function consumeApprovalRequest(
     ) {
       throw new TaskTransitionError("External approval is not bound to the current frozen write intent");
     }
-  } else if (request.intent_id !== undefined || request.payload_sha256 !== undefined) {
+  } else if (request.intent_id !== undefined || request.payload_sha256 !== undefined || request.revised_payload !== undefined) {
     throw new TaskTransitionError("External approval supplied a write intent for a task without one");
   }
-  const note = `${request.requested_by} @ ${request.requested_at}`;
   if (request.decision === "cancel") return cancelTask(clean, clean.version, note);
   if (clean.status !== "waiting_approval" || clean.waiting_nodes.length !== 1) {
     throw new TaskTransitionError("External approve/reject requires exactly one current approval node");

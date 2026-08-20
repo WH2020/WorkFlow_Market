@@ -163,13 +163,92 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("followLatest: distanceFromBottom <= 24", javascript)
         self.assertIn("previousScroll?.followLatest === false", javascript)
         self.assertIn("function renderWriteIntentReview", javascript)
+        self.assertIn("function openWriteCardEditor", javascript)
+        self.assertIn("function addWriteCardActions", javascript)
+        self.assertIn("/write-intent-revision`,", javascript)
+        self.assertIn('remove.textContent = "删除"', javascript)
+        self.assertIn('edit.textContent = "编辑"', javascript)
         self.assertIn('summary.textContent = "查看技术明细与校验码"', javascript)
         self.assertIn("saved.reviewTop = cards.scrollTop", javascript)
         self.assertIn("saved.rawTop = payload.scrollTop", javascript)
         self.assertIn('return "批准写入知识库"', javascript)
         self.assertIn(".write-review-card", styles)
+        self.assertIn(".write-edit-overlay", styles)
         self.assertIn('redirect.textContent = "调整当前方向"', javascript)
         self.assertIn("/messages`,", javascript)
+
+    def test_write_card_edit_is_version_bound_and_reapproval_does_not_leak_payload_in_summary(self):
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        intent_id = "11111111-1111-4111-8111-111111111111"
+        payload = {
+            "table": "customers",
+            "mutations": [{
+                "operation": "insert", "record_id": "customer-a",
+                "changes": {"customer_name": "客户甲", "stage": "需求确认"},
+            }],
+        }
+        canonical = server.canonical_plan_json(payload)
+        payload_hash = server.hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        task = {
+            "task_id": "task-write-edit", "profile_id": "sales-director",
+            "service_id": "sales-review", "workflow_id": "market.sales.review",
+            "status": "waiting_approval", "version": 7, "waiting_node": "confirm",
+            "waiting_nodes": ["confirm"], "completed_nodes": [], "artifacts": [],
+            "created_at": server.now(), "updated_at": server.now(), "audit": [],
+            "pending_write": {
+                "intent_id": intent_id, "logical_tool": "sales.write",
+                "canonical_payload": canonical, "payload_sha256": payload_hash,
+                "status": "prepared", "proposed_by_node": "validate_updates", "proposed_at": server.now(),
+            },
+        }
+        server.atomic_json(server.TASKS / "task-write-edit.json", task)
+        handler.revise_write_intent("task-write-edit", {
+            "version": 7, "intent_id": intent_id, "payload_sha256": payload_hash,
+            "operation": "edit", "record_id": "customer-a",
+            "changes": {"customer_name": "客户甲（修订）", "stage": "方案沟通"},
+        })
+        self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
+        stored = server.load_json(server.TASKS / "task-write-edit.json")
+        self.assertEqual(stored["version"], 8)
+        self.assertEqual(stored["approval_request"]["decision"], "revise")
+        self.assertEqual(
+            stored["approval_request"]["revised_payload"]["mutations"][0]["changes"]["stage"],
+            "方案沟通",
+        )
+        summary = next(item for item in server.task_summaries() if item["task_id"] == "task-write-edit")
+        self.assertNotIn("revised_payload", summary["approval_request"])
+
+    def test_removing_the_last_write_card_requests_a_safe_rejection(self):
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        intent_id = "22222222-2222-4222-8222-222222222222"
+        payload = {
+            "mutations": [{
+                "operation": "insert", "record_id": "source-a",
+                "changes": {"title": "来源甲", "status": "pending"},
+            }],
+        }
+        canonical = server.canonical_plan_json(payload)
+        payload_hash = server.hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        server.atomic_json(server.TASKS / "task-write-delete.json", {
+            "task_id": "task-write-delete", "profile_id": "sales-director",
+            "status": "waiting_approval", "version": 3,
+            "pending_write": {
+                "intent_id": intent_id, "logical_tool": "knowledge.write",
+                "canonical_payload": canonical, "payload_sha256": payload_hash, "status": "prepared",
+            },
+        })
+        handler.revise_write_intent("task-write-delete", {
+            "version": 3, "intent_id": intent_id, "payload_sha256": payload_hash,
+            "operation": "remove", "record_id": "source-a",
+        })
+        self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
+        stored = server.load_json(server.TASKS / "task-write-delete.json")
+        self.assertEqual(stored["approval_request"]["decision"], "reject")
+        self.assertNotIn("revised_payload", stored["approval_request"])
 
     def test_project_space_is_created_and_task_summaries_default_to_general_project(self):
         project = server.create_project_record({"name": "江苏客户项目", "description": "试点机会"})

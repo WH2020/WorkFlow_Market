@@ -123,6 +123,35 @@ TASK_STATUS_DISPLAY_NAMES = {
     "cancelled": "已取消", "rejected": "已驳回", "failed": "处理失败",
 }
 PROJECT_STATUS_DISPLAY_NAMES = {"active": "使用中", "archived": "已归档"}
+KNOWLEDGE_WRITE_FIELDS = {
+    "source_id", "title", "url", "publisher", "published_date", "accessed_date", "region",
+    "topic", "source_type", "quality", "exposure_status", "status", "notes",
+}
+SALES_WRITE_FIELDS = {
+    "customers": {
+        "customer_id", "customer_name", "region", "sector", "owner", "stage", "health",
+        "key_contact", "decision_maker", "budget_path", "next_action", "next_action_due",
+        "last_evidence_date", "risks", "updated_at",
+    },
+    "activities": {
+        "activity_id", "customer_id", "salesperson_id", "occurred_at", "channel", "activity_type",
+        "summary", "evidence_path", "commitment", "next_action", "next_action_due", "created_at",
+    },
+    "resource_requests": {
+        "request_id", "customer_id", "salesperson_id", "requested_at", "resource_type",
+        "request_summary", "business_reason", "deadline", "owner", "status", "decision",
+        "decision_reason", "updated_at",
+    },
+    "sales_assets": {
+        "asset_id", "asset_type", "title", "scope", "customer_id", "audience_role", "sales_stage",
+        "use_case", "owner", "status", "authorization_status", "deidentification_status", "version",
+        "source_path", "evidence_refs", "last_validated_at", "next_review_at", "usage_feedback", "updated_at",
+    },
+}
+WRITE_STABLE_KEYS = {
+    "knowledge.write": "source_id", "customers": "customer_id", "activities": "activity_id",
+    "resource_requests": "request_id", "sales_assets": "asset_id",
+}
 
 
 def now() -> str:
@@ -459,7 +488,8 @@ def task_progress_timeline(
     timeline: list[dict[str, Any]] = []
     audit_titles = {
         "task_started": "任务已接收", "node_completed": "阶段分析完成", "tool_completed": "资料处理完成",
-        "write_intent_prepared": "待写入内容已冻结", "write_commit_started": "开始提交已批准内容",
+        "write_intent_prepared": "待写入内容已冻结", "write_intent_revised": "你修改了待写入内容",
+        "write_commit_started": "开始提交已批准内容",
         "write_commit_rolled_back": "写入已安全回滚", "write_commit_ambiguous": "写入状态需要人工检查",
         "approval_granted": "你已批准继续", "approval_rejected": "你已驳回当前方案",
         "task_resumed": "任务已恢复", "task_cancelled": "任务已结束", "task_completed": "任务已完成",
@@ -577,6 +607,76 @@ def canonical_plan_json(value: Any) -> str:
         )
         return f"{{{','.join(pairs)}}}"
     raise ValueError("演示方案必须是有限的结构化数据")
+
+
+def _validate_write_mutation_changes(
+    logical_tool: str, payload: dict[str, Any], mutation: dict[str, Any]
+) -> None:
+    table = str(payload.get("table", ""))
+    allowed = KNOWLEDGE_WRITE_FIELDS if logical_tool == "knowledge.write" else SALES_WRITE_FIELDS.get(table)
+    stable_key = WRITE_STABLE_KEYS.get(logical_tool if logical_tool == "knowledge.write" else table)
+    if allowed is None or stable_key is None:
+        raise ValueError("当前待写入目标不支持卡片编辑")
+    record_id = mutation.get("record_id")
+    changes = mutation.get("changes")
+    if (
+        mutation.get("operation") not in {"insert", "update"}
+        or not isinstance(record_id, str)
+        or not record_id.strip() or len(record_id) > 128 or any(character in record_id for character in "\x00\r\n")
+        or not isinstance(changes, dict)
+        or len(changes) > len(allowed)
+    ):
+        raise ValueError("待写入卡片结构无效")
+    for field, value in changes.items():
+        if field not in allowed or not isinstance(value, str) or len(value) > 10_000:
+            raise ValueError(f"字段 {field} 不可编辑或内容过长")
+        if value.startswith(("\t", "\r")) or re.match(r"^\s*[=+\-@]", value):
+            raise ValueError(f"字段 {field} 含有表格公式前缀，不能保存")
+    if stable_key in changes and changes[stable_key] != record_id:
+        raise ValueError(f"不能修改稳定编号 {stable_key}")
+    if mutation.get("operation") == "update" and not isinstance(mutation.get("expected_version"), str):
+        raise ValueError("更新记录缺少原始版本，不能安全修改")
+
+
+def revised_write_payload(
+    logical_tool: str, current_payload: dict[str, Any], operation: str,
+    record_id: str, replacement_changes: Any,
+) -> dict[str, Any] | None:
+    if logical_tool not in {"knowledge.write", "sales.write"}:
+        raise ValueError("演示文稿请使用专用修订流程")
+    if logical_tool == "sales.write" and str(current_payload.get("table", "")) not in SALES_WRITE_FIELDS:
+        raise ValueError("销售台账类型无效")
+    mutations = current_payload.get("mutations")
+    if not isinstance(mutations, list) or not 1 <= len(mutations) <= 100:
+        raise ValueError("当前待写入内容缺少有效卡片")
+    matches = [index for index, mutation in enumerate(mutations) if isinstance(mutation, dict) and mutation.get("record_id") == record_id]
+    if len(matches) != 1:
+        raise ValueError("目标卡片已变化，请刷新后重试")
+    revised = json.loads(json.dumps(current_payload, ensure_ascii=False))
+    revised_mutations = revised["mutations"]
+    if operation == "remove":
+        revised_mutations.pop(matches[0])
+        if not revised_mutations:
+            return None
+    elif operation == "edit":
+        if not isinstance(replacement_changes, dict):
+            raise ValueError("请提交完整的卡片字段")
+        revised_mutations[matches[0]]["changes"] = replacement_changes
+    else:
+        raise ValueError("卡片操作无效")
+    seen: set[str] = set()
+    for mutation in revised_mutations:
+        if not isinstance(mutation, dict):
+            raise ValueError("待写入卡片结构无效")
+        candidate_id = mutation.get("record_id")
+        if not isinstance(candidate_id, str) or candidate_id in seen:
+            raise ValueError("待写入卡片编号无效或重复")
+        seen.add(candidate_id)
+        _validate_write_mutation_changes(logical_tool, revised, mutation)
+    canonical = canonical_plan_json(revised)
+    if len(canonical.encode("utf-8")) > 256 * 1024:
+        raise ValueError("修改后的待写入内容超过 256 KiB 上限")
+    return revised
 
 
 def presentation_plan_sha256(plan: dict[str, Any]) -> str:
@@ -1035,6 +1135,10 @@ def task_summaries() -> list[dict[str, Any]]:
                 "approval_request", "pending_write", "artifacts", "request", "restarted_from_task_id", "superseded_by_task_id",
                 "requested_model", "requested_thinking_level", "effective_model", "effective_thinking_level"
             )}
+            if isinstance(summary.get("approval_request"), dict):
+                summary["approval_request"] = {
+                    key: value for key, value in summary["approval_request"].items() if key != "revised_payload"
+                }
             if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
                 continue
             summary["display_status"], summary["runtime_state"] = task_display_state(task, leases)
@@ -1481,6 +1585,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.create_task_message(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/presentation-revision"):
                 self.create_presentation_revision(route.split("/")[3], payload)
+            elif route.startswith("/api/tasks/") and route.endswith("/write-intent-revision"):
+                self.revise_write_intent(route.split("/")[3], payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError) as error:
@@ -1730,6 +1836,85 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "task_id": task_id,
             "removed_records": removed,
             "message": "任务记录及其运行过程已彻底删除；已生成文件、知识库和销售台账未受影响。",
+        })
+
+    def revise_write_intent(self, task_id: str, payload: dict[str, Any]) -> None:
+        task_id = safe_id(task_id)
+        expected_version = payload.get("version")
+        operation = str(payload.get("operation", ""))
+        record_id = str(payload.get("record_id", ""))
+        intent_id = str(payload.get("intent_id", ""))
+        payload_sha256 = str(payload.get("payload_sha256", ""))
+        if not isinstance(expected_version, int):
+            raise ValueError("缺少任务版本")
+        if operation not in {"edit", "remove"}:
+            raise ValueError("请选择编辑或删除卡片")
+        if not record_id.strip() or len(record_id) > 128 or any(character in record_id for character in "\x00\r\n"):
+            raise ValueError("待修改卡片编号无效")
+        if re.fullmatch(r"[A-Fa-f0-9-]{16,64}", intent_id) is None or re.fullmatch(r"[a-f0-9]{64}", payload_sha256) is None:
+            raise ValueError("缺少当前待写入内容的有效校验信息")
+        task_path = TASKS / f"{task_id}.json"
+        if task_path.is_symlink() or not task_path.is_file():
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在"})
+            return
+        try:
+            with exclusive_task(task_path):
+                task = load_json(task_path)
+                if task.get("task_id") != task_id:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务记录与文件名不一致"})
+                    return
+                if ACTIVE_PROFILE_ID is not None and task.get("profile_id") != ACTIVE_PROFILE_ID:
+                    self.send_json(HTTPStatus.FORBIDDEN, {"error": "该任务不属于当前销售总监版本"})
+                    return
+                if task.get("version") != expected_version:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "任务已更新，请刷新后重试", "task": task})
+                    return
+                if task.get("status") != "waiting_approval" or task.get("approval_request") is not None:
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "只有尚未处理的待写入内容可以修改"})
+                    return
+                pending = task.get("pending_write")
+                if (
+                    not isinstance(pending, dict) or pending.get("status") != "prepared"
+                    or pending.get("intent_id") != intent_id or pending.get("payload_sha256") != payload_sha256
+                ):
+                    self.send_json(HTTPStatus.CONFLICT, {"error": "待写入内容已变化，请刷新后重试"})
+                    return
+                logical_tool = str(pending.get("logical_tool", ""))
+                try:
+                    current_payload = json.loads(str(pending.get("canonical_payload", "")))
+                except json.JSONDecodeError as error:
+                    raise ValueError("当前待写入内容不是有效结构化数据") from error
+                if not isinstance(current_payload, dict):
+                    raise ValueError("当前待写入内容结构无效")
+                revised = revised_write_payload(
+                    logical_tool, current_payload, operation, record_id, payload.get("changes")
+                )
+                requested_at = now()
+                if revised is None:
+                    task["approval_request"] = {
+                        "decision": "reject", "requested_at": requested_at,
+                        "requested_by": "local-workbench-write-card", "expected_version": expected_version,
+                    }
+                    message = "已删除最后一张卡片；本次没有内容需要写入，任务将安全结束。"
+                else:
+                    revised_canonical = canonical_plan_json(revised)
+                    if revised_canonical == str(pending.get("canonical_payload", "")):
+                        raise ValueError("卡片内容没有变化")
+                    task["approval_request"] = {
+                        "decision": "revise", "requested_at": requested_at,
+                        "requested_by": "local-workbench-write-card", "expected_version": expected_version,
+                        "intent_id": intent_id, "payload_sha256": payload_sha256,
+                        "revised_payload": revised,
+                    }
+                    message = "修改请求已提交；旧校验码已作废，智能核心将生成新的待审批内容。"
+                task["updated_at"] = requested_at
+                task["version"] = expected_version + 1
+                atomic_json(task_path, task)
+        except RuntimeError as error:
+            self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
+            return
+        self.send_json(HTTPStatus.ACCEPTED, {
+            "task_id": task_id, "version": task["version"], "message": message,
         })
 
     def decide(self, task_id: str, payload: dict[str, Any]) -> None:

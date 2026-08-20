@@ -33,6 +33,7 @@ export type AdapterHooks = {
     task_id?: string;
     profile_id?: string;
     authorized_urls?: string[];
+    revision_base_payload?: string;
   } | void;
   afterLogicalTool: (logicalTool: string, params: unknown, details: unknown) => void;
   onLogicalToolError: (
@@ -2367,6 +2368,15 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
       const commit = hooks.beforeLogicalTool("knowledge.write", params);
       if (!commit?.intent_id || !commit.payload_sha256) throw new Error("写入缺少受管提交上下文");
       const registered = loadEvidence(commit).mutations;
+      let revisionBase = new Map<string, Mutation>();
+      if (commit.revision_base_payload) {
+        let parsed: unknown;
+        try { parsed = JSON.parse(commit.revision_base_payload); } catch { throw new Error("人工修订缺少有效的原始冻结载荷"); }
+        const mutations = parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).mutations)
+          ? (parsed as { mutations: Mutation[] }).mutations
+          : [];
+        revisionBase = new Map(mutations.map((mutation) => [mutation.record_id, mutation]));
+      }
       for (const mutation of params.mutations) {
         const expected = registered?.get(mutation.record_id);
         if (mutation.operation === "insert" && registered.size > 0 && !expected) {
@@ -2376,7 +2386,10 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
           throw new Error(`工具来源 ${mutation.record_id} 缺少本任务证据 registry`);
         }
         if (expected && canonicalEvidence(mutation) !== expected) {
-          throw new Error(`知识来源 ${mutation.record_id} 与本任务读取证据的冻结 mutation 不一致`);
+          const original = revisionBase.get(mutation.record_id);
+          if (!original || canonicalEvidence(original) !== expected) {
+            throw new Error(`知识来源 ${mutation.record_id} 与本任务读取证据或人工修订基线不一致`);
+          }
         }
       }
       let path: string | undefined;
