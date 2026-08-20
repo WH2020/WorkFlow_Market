@@ -771,7 +771,7 @@ export function validateGovernedSubagentResultForTests(
 ): { output: string; model?: string; runId?: string } {
   if (!details || typeof details !== "object") throw new Error("Subagent result is missing structured details");
   const value = details as { mode?: unknown; runId?: unknown; results?: unknown };
-  if (value.mode !== "single" || !Array.isArray(value.results) || value.results.length !== 1) {
+  if ((value.mode !== "single" && value.mode !== "workflow") || !Array.isArray(value.results) || value.results.length !== 1) {
     throw new Error("Governed Subagent must return exactly one foreground child result");
   }
   const result = value.results[0] as Record<string, unknown>;
@@ -814,6 +814,39 @@ export function validateGovernedSubagentResultForTests(
     output,
     ...(typeof result.model === "string" && result.model ? { model: result.model } : {}),
     ...(typeof value.runId === "string" && value.runId ? { runId: value.runId } : {}),
+  };
+}
+
+export function buildGovernedSubagentToolInputForTests(input: {
+  agent: string;
+  task: string;
+  context: "fresh" | "fork";
+  role: GovernedSubagentRole;
+  maxTurns: number;
+}): Record<string, unknown> {
+  return {
+    agent: input.agent,
+    task: input.task,
+    async: false,
+    context: input.context,
+    isolation: "none",
+    mission: false,
+    chatProgress: "off",
+    timeoutMs: input.role === "research-scout" ? 600_000 : 360_000,
+    turnBudget: { maxTurns: input.maxTurns, graceTurns: 1 },
+    acceptance: { level: "none", reason: "受管只读节点由主 Agent DAG 和本地证据回执验收" },
+    suppressRoutineResultIntercom: true,
+    share: false,
+    ...(input.role === "research-scout"
+      ? {
+          toolTimeoutMs: 120_000,
+          toolBudget: {
+            soft: Math.max(2, input.maxTurns),
+            hard: Math.min(40, input.maxTurns * 2 + 2),
+            block: "*",
+          },
+        }
+      : {}),
   };
 }
 
@@ -1926,31 +1959,13 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         };
         pendingSubagentCalls.set(event.toolCallId, pending);
         inFlightSubagentNodes.add(nodeKey);
-        const controlledInput: Record<string, unknown> = {
+        const controlledInput = buildGovernedSubagentToolInputForTests({
           agent: launch.agent,
           task: launch.task,
-          async: false,
           context: launch.context,
-          isolation: "none",
-          mission: false,
-          clarify: false,
-          chatProgress: "off",
-          timeoutMs: role === "research-scout" ? 600_000 : 360_000,
-          turnBudget: { maxTurns: node.boundary.max_turns, graceTurns: 1 },
-          acceptance: { level: "none", reason: "受管只读节点由主 Agent DAG 和本地证据回执验收" },
-          suppressRoutineResultIntercom: true,
-          share: false,
-          ...(role === "research-scout"
-            ? {
-                toolTimeoutMs: 120_000,
-                toolBudget: {
-                  soft: Math.max(2, node.boundary.max_turns),
-                  hard: Math.min(40, node.boundary.max_turns * 2 + 2),
-                  block: "*",
-                },
-              }
-            : {}),
-        };
+          role,
+          maxTurns: node.boundary.max_turns,
+        });
         replaceToolInput(event.input as Record<string, unknown>, controlledInput);
         return;
       } catch (error) {

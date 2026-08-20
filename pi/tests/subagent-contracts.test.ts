@@ -16,6 +16,7 @@ import {
 } from "../extensions/subagent-contracts.ts";
 import {
   buildGovernedSubagentLaunchForTests,
+  buildGovernedSubagentToolInputForTests,
   validateGovernedSubagentResultForTests,
 } from "../extensions/vertical-workflow.ts";
 
@@ -64,6 +65,12 @@ test("governed subagent contract freezes identity and produces a hashed local re
 });
 
 test("governed launch binds role, context, tools and rejects forged result tools", () => {
+  const agentDefinition = readFileSync(
+    join(process.cwd(), "pi", "subagents", "agents", "director-research-scout.md"),
+    "utf8",
+  );
+  assert.match(agentDefinition, /subagentOnlyExtensions: \.\/pi\/extensions\/subagent-readonly\.ts/u);
+  assert.doesNotMatch(agentDefinition, /subagentOnlyExtensions: .*\.\.\//u);
   const root = mkdtempSync(join(tmpdir(), "agent4market-subagent-result-"));
   try {
     const contract = createGovernedSubagentContract(root, {
@@ -106,8 +113,18 @@ test("governed launch binds role, context, tools and rejects forged result tools
     assert.equal(launch.agent, "director-research-scout");
     assert.equal(launch.context, "fresh");
     assert.ok(launch.task.includes(contract.contract_id));
+    const toolInput = buildGovernedSubagentToolInputForTests({
+      agent: launch.agent,
+      task: launch.task,
+      context: launch.context,
+      role: "research-scout",
+      maxTurns: 8,
+    });
+    assert.equal(toolInput.async, false);
+    assert.equal(toolInput.agent, "director-research-scout");
+    assert.equal(Object.hasOwn(toolInput, "clarify"), false);
     const details = {
-      mode: "single",
+      mode: "workflow",
       runId: "run-a",
       results: [{
         agent: launch.agent,
@@ -127,6 +144,15 @@ test("governed launch binds role, context, tools and rejects forged result tools
       role: "research-scout",
       allowed_tool_names: launch.allowedToolNames,
     }, loaded).output, "来源 A 已核验。");
+    assert.throws(
+      () => validateGovernedSubagentResultForTests({ ...details, results: [] }, {
+        agent: launch.agent,
+        context: launch.context,
+        role: "research-scout",
+        allowed_tool_names: launch.allowedToolNames,
+      }, loaded),
+      /exactly one foreground child result/,
+    );
     details.results[0]!.toolCalls.push({ name: "write" });
     assert.throws(
       () => validateGovernedSubagentResultForTests(details, {

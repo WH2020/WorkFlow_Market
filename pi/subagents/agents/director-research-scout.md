@@ -3,7 +3,7 @@ name: director-research-scout
 description: 仅为受管销售总监任务检索和核验公开来源，不形成最终业务结论
 tools: director_child_web_search, director_child_web_open
 extensions:
-subagentOnlyExtensions: ../../extensions/subagent-readonly.ts
+subagentOnlyExtensions: ./pi/extensions/subagent-readonly.ts
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false
