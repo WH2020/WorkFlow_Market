@@ -18,6 +18,12 @@ from .search_provider import (
     search_runtime_environment,
     search_settings_summary,
 )
+from .search_gateway import (
+    SearchGatewayError,
+    mark_search_gateway_runtime_applied,
+    search_gateway_runtime_environment,
+    search_gateway_settings_summary,
+)
 from .subagents import (
     ensure_subagent_configuration,
     subagent_doctor_check,
@@ -249,6 +255,7 @@ def doctor_report(
         "optional": {
             "public_search_ready": bool(search_settings_summary(root, environ=environment).get("configured")),
             "brave_search_configured": bool(search_settings_summary(root, environ=environment).get("has_api_key")),
+            "search_gateway_configured": bool(search_gateway_settings_summary(root).get("configured")),
             "local_data_initialized": local_data,
         },
     }
@@ -285,6 +292,10 @@ def launch_pi(
     except SearchProviderError as error:
         raise RuntimeError(f"Public search configuration is invalid: {error}") from error
     try:
+        environment.update(search_gateway_runtime_environment(root, environ=environment))
+    except SearchGatewayError as error:
+        raise RuntimeError(f"Search gateway configuration is invalid: {error}") from error
+    try:
         model_runtime = model_runtime_configuration(root)
     except (ModelProviderError, OSError):
         # Keep the workbench reachable so the user can repair an invalid local model setting.
@@ -299,6 +310,7 @@ def launch_pi(
             launch_arguments = ["--model", selected_model, *launch_arguments]
     if not utility_only:
         mark_search_runtime_applied(root)
+        mark_search_gateway_runtime_applied(root)
     completed = subprocess.run([str(pi_path), *launch_arguments], cwd=root, env=environment, check=False)
     return completed.returncode, ppt_ready
 

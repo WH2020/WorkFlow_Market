@@ -6,6 +6,7 @@
   let guidedRenderedService = null;
   let modelSettingsInitialized = false;
   let searchSettingsInitialized = false;
+  let searchGatewaySettingsInitialized = false;
   let runtimeSettingsInitialized = false;
   let taskRuntimeCatalogKey = "";
   let currentView = "home";
@@ -18,6 +19,28 @@
   const taskProgressScroll = {};
   const taskCardExpansion = new Map();
   const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
+
+  function captureTaskComposerFocus() {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLTextAreaElement) || !active.matches(".task-message-composer textarea")) return null;
+    return {
+      taskId: active.dataset.taskId || "",
+      selectionStart: active.selectionStart,
+      selectionEnd: active.selectionEnd,
+      selectionDirection: active.selectionDirection,
+      scrollTop: active.scrollTop,
+    };
+  }
+
+  function restoreTaskComposerFocus(snapshot) {
+    if (!snapshot?.taskId) return;
+    const textarea = [...document.querySelectorAll(".task-message-composer textarea")]
+      .find((candidate) => candidate.dataset.taskId === snapshot.taskId);
+    if (!textarea) return;
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd, snapshot.selectionDirection);
+    textarea.scrollTop = snapshot.scrollTop;
+  }
 
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
@@ -302,6 +325,8 @@
 
   function renderSearchSettings(force = false) {
     const settings = model?.search || { configured: false, status: "unconfigured" };
+    const gateway = model?.search_gateway || { status: "disabled" };
+    const gatewayReady = gateway.status === "configured" && !gateway.restart_required;
     const panel = $("search-settings-panel");
     const ready = settings.status === "configured" && !settings.restart_required;
     panel.classList.toggle("configured", ready);
@@ -312,7 +337,9 @@
     else if (ready) $("search-current").textContent = "专用公开检索已就绪 · 场景化检索可用";
     else $("search-current").textContent = "尚未配置 · 政策检索和公开调研暂不可用";
     $("public-search-status").textContent = ready
-      ? settings.keyless
+      ? gatewayReady
+        ? "One Search 聚合网关已就绪；候选来源仍会继续核验正文。"
+        : settings.keyless
         ? "免密公共检索已就绪；繁忙时可在设置中填写专用密钥。"
         : "专用公开检索已就绪。"
       : settings.restart_required
@@ -331,14 +358,44 @@
         : "专用密钥只保存在本机；搜索结果仍需读取正文后才能作为证据。");
   }
 
+  function renderSearchGatewaySettings(force = false) {
+    const settings = model?.search_gateway || { configured: false, status: "disabled" };
+    const panel = $("search-gateway-panel");
+    const ready = settings.status === "configured" && !settings.restart_required;
+    panel.classList.toggle("configured", ready);
+    panel.classList.toggle("error", settings.status === "error" || settings.status === "missing_token");
+    if (settings.status === "error") $("search-gateway-current").textContent = `配置异常：${settings.error}`;
+    else if (settings.restart_required) $("search-gateway-current").textContent = "配置已变更 · 关闭并重新打开应用后生效";
+    else if (ready) $("search-gateway-current").textContent = `已启用 · ${settings.mode === "parallel" ? "并行检索" : settings.mode === "fallback" ? "依次尝试" : "单提供商"} · 最多 ${settings.max_results} 条`;
+    else if (settings.status === "missing_token") $("search-gateway-current").textContent = "检索令牌不可用 · 请重新填写";
+    else $("search-gateway-current").textContent = "未启用 · 继续使用原有公开检索";
+    if (searchGatewaySettingsInitialized && !force) return;
+    searchGatewaySettingsInitialized = true;
+    $("search-gateway-url").value = settings.base_url || "";
+    $("search-gateway-token").value = "";
+    $("search-gateway-token").placeholder = settings.has_token
+      ? "已安全保存；地址不变时可留空重新验证"
+      : "只填写 osr_ 开头的业务令牌；不要填写 oak_ 管理凭据";
+    $("search-gateway-mode").value = settings.mode || "parallel";
+    $("search-gateway-max-results").value = String(settings.max_results || 8);
+    $("search-gateway-private-network").checked = Boolean(settings.allow_private_network);
+    $("search-gateway-status").textContent = settings.status === "error"
+      ? settings.error
+      : ready
+        ? `后续公开检索优先使用 ${settings.base_url}；已发现 ${(settings.providers || []).length} 个提供商。`
+        : "Agent4Market 不会安装或管理 One Search 服务本身。";
+  }
+
   function publicSearchReady(serviceId, guide = false) {
     if (!["industry-research", "government-proposal", "presentation-studio"].includes(serviceId)) return true;
     const settings = model?.search || {};
-    if (settings.status === "configured" && !settings.restart_required) return true;
+    const gateway = model?.search_gateway || {};
+    const gatewayHealthy = !gateway.status || ["disabled", "configured"].includes(gateway.status);
+    if (settings.status === "configured" && !settings.restart_required && !gateway.restart_required && gatewayHealthy) return true;
     if (guide) {
       switchView("settings");
-      $("search-settings-panel").open = true;
-      $("search-api-key").focus();
+      if (gateway.restart_required) $("search-gateway-panel").open = true;
+      else { $("search-settings-panel").open = true; $("search-api-key").focus(); }
     }
     return false;
   }
@@ -740,6 +797,7 @@
       const composer = document.createElement("div");
       composer.className = "task-message-composer";
       const textarea = document.createElement("textarea");
+      textarea.dataset.taskId = task.task_id;
       textarea.maxLength = 1200;
       textarea.placeholder = "继续补充客户信息，或告诉助手需要调整的方向…";
       textarea.value = taskMessageDrafts[task.task_id] || "";
@@ -824,7 +882,6 @@
       if (effectiveStatus === "interrupted") addRestartAction(actions, task, "重新开始");
       if (effectiveStatus === "interrupted") addAction(actions, task, "cancel", "结束任务");
       if (historical) addRestartAction(actions, task, "再次创建");
-      if (historical) addDeleteAction(actions, task);
       const expanded = taskCardExpansion.has(task.task_id) ? taskCardExpansion.get(task.task_id) : !historical;
       article.classList.toggle("collapsed", !expanded);
       const collapse = document.createElement("button");
@@ -845,6 +902,7 @@
       titleControls.className = "task-title-controls";
       badge.replaceWith(titleControls);
       titleControls.append(badge, collapse);
+      if (historical) addDeleteAction(titleControls, task);
       article.onclick = (event) => { if (!event.target.closest("button,summary,input,textarea,select")) renderWorkflow(task); };
       box.append(template);
       });
@@ -892,18 +950,18 @@
 
   function addDeleteAction(box, task) {
     const button = document.createElement("button");
-    button.className = "action delete";
+    button.className = "task-delete";
     button.textContent = "彻底删除";
-    button.onclick = async () => {
+    button.title = "永久删除这条历史任务记录";
+    button.onclick = async (event) => {
+      event.stopPropagation();
       const warning = "彻底删除后，任务卡、处理过程、排队消息和演示方案无法恢复。已生成文件、知识库和销售台账不会被删除。";
-      if (!confirm(`${warning}\n\n确认继续？`)) return;
-      const confirmation = prompt("请再次确认：输入“永久删除”后执行。", "");
-      if (confirmation !== "永久删除") { note("已取消删除：确认文字不正确。", true); return; }
+      if (!confirm(`${warning}\n\n确认永久删除这条历史任务？`)) return;
       button.disabled = true;
       try {
         const reply = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/delete`, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ version: task.version, confirmation }),
+          body: JSON.stringify({ version: task.version, confirmation: "永久删除" }),
         });
         taskCardExpansion.delete(task.task_id);
         note(reply.message);
@@ -1113,13 +1171,17 @@
   }
 
   function render() {
-    renderModelSettings(); renderSearchSettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
+    renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); switchView(currentView);
   }
 
   async function createTask(request) {
     if (!publicSearchReady(selectedService, true)) {
-      throw new Error(model?.search?.restart_required
+      throw new Error(["error", "missing_token"].includes(model?.search_gateway?.status)
+        ? "搜索聚合网关配置异常，请前往“设置 > 搜索聚合网关”修复或停用。"
+        : model?.search_gateway?.restart_required
+        ? "搜索聚合网关配置已变更，请关闭并重新打开销售总监智能工作台后再创建该任务。"
+        : model?.search?.restart_required
         ? "公开检索配置已保存，请关闭并重新打开销售总监智能工作台后再创建该任务。"
         : "公开检索服务暂不可用，请前往“设置 > 公开检索”查看状态。");
     }
@@ -1194,11 +1256,13 @@
 
   async function load() {
     model = await api("/api/bootstrap");
+    const composerFocus = captureTaskComposerFocus();
     requestToken = model.request_token;
     if (!selectedProfile || !model.profiles.some((item) => item.id === selectedProfile)) { selectedProfile = model.profiles.find((item) => item.id === "sales-director")?.id || model.profiles[0]?.id; selectedService = currentProfile()?.default_service; }
     if (!currentProfile()?.services.some((item) => item.id === selectedService)) selectedService = currentProfile()?.default_service;
     if (!projectById(selectedProject) || projectById(selectedProject)?.status !== "active") selectedProject = model.projects?.find((item) => item.status === "active")?.project_id || "project-default";
     render();
+    restoreTaskComposerFocus(composerFocus);
   }
 
   $("create").onclick = async () => {
@@ -1468,6 +1532,62 @@
       note(response.message);
     } catch (error) { $("search-settings-status").textContent = error.message; }
     finally { button.disabled = false; }
+  };
+
+  $("save-search-gateway").onclick = async () => {
+    const button = $("save-search-gateway");
+    const maxResults = Number($("search-gateway-max-results").value);
+    if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 10) {
+      $("search-gateway-status").textContent = "每次查询结果数必须是 1–10 的整数。";
+      return;
+    }
+    button.disabled = true;
+    $("search-gateway-status").textContent = "正在连接 One Search、验证令牌并读取提供商…";
+    try {
+      const response = await api("/api/search-gateway", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          base_url: $("search-gateway-url").value.trim(),
+          token: $("search-gateway-token").value.trim(),
+          mode: $("search-gateway-mode").value,
+          max_results: maxResults,
+          allow_private_network: $("search-gateway-private-network").checked,
+        }),
+      });
+      model.search_gateway = response;
+      renderSearchGatewaySettings(true);
+      $("search-gateway-panel").open = true;
+      $("search-gateway-status").textContent = response.message;
+      note("搜索聚合网关已保存；关闭并重新打开工作台后生效。");
+    } catch (error) {
+      $("search-gateway-status").textContent = error.message;
+    } finally { button.disabled = false; }
+  };
+
+  $("reset-search-gateway").onclick = async () => {
+    if (!confirm("停用搜索聚合网关？已保存的 osr_ 令牌会从本机删除，重启后恢复使用原有公开检索。")) return;
+    const button = $("reset-search-gateway");
+    button.disabled = true;
+    try {
+      const response = await api("/api/search-gateway/reset", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      model.search_gateway = response;
+      renderSearchGatewaySettings(true);
+      $("search-gateway-panel").open = true;
+      $("search-gateway-status").textContent = response.message;
+      note(response.message);
+    } catch (error) { $("search-gateway-status").textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+
+  $("open-search-gateway").onclick = async () => {
+    try {
+      const response = await api("/api/search-gateway/open-dashboard", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      note(response.message);
+    } catch (error) { $("search-gateway-status").textContent = error.message; }
   };
 
   $("save-runtime-settings").onclick = async () => {

@@ -84,6 +84,12 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="quick-prompts"', html)
         self.assertIn('id="model-settings-panel"', html)
         self.assertIn('id="search-settings-panel"', html)
+        self.assertIn('id="search-gateway-panel"', html)
+        self.assertIn('id="search-gateway-url"', html)
+        self.assertIn('id="search-gateway-token"', html)
+        self.assertIn('id="search-gateway-mode"', html)
+        self.assertIn('id="search-gateway-max-results"', html)
+        self.assertIn("不要填写 oak_ 管理凭据", html)
         self.assertIn('id="search-api-key"', html)
         self.assertIn('id="save-search-settings"', html)
         self.assertIn("默认即可使用免密公共检索", html)
@@ -109,6 +115,10 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function guidedRequest()", javascript)
         self.assertIn("function renderModelSettings", javascript)
         self.assertIn("function renderSearchSettings", javascript)
+        self.assertIn("function renderSearchGatewaySettings", javascript)
+        self.assertIn('api("/api/search-gateway"', javascript)
+        self.assertIn('api("/api/search-gateway/reset"', javascript)
+        self.assertIn('api("/api/search-gateway/open-dashboard"', javascript)
         self.assertIn("免密公共检索已就绪", javascript)
         self.assertIn("function localizeStaticInterface", javascript)
         self.assertIn('item.textContent = node.display_name || "处理阶段"', javascript)
@@ -117,6 +127,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function displayTaskRequest", javascript)
         self.assertIn("taskCardExpansion", javascript)
         self.assertIn("function addDeleteAction", javascript)
+        self.assertIn("addDeleteAction(titleControls, task)", javascript)
+        self.assertNotIn('prompt("请再次确认', javascript)
+        self.assertIn('confirmation: "永久删除"', javascript)
         self.assertIn('/delete`', javascript)
         styles = (ui_root / "styles.css").read_text(encoding="utf-8")
         self.assertIn(".task.collapsed .task-progress-panel", styles)
@@ -140,6 +153,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('addAction(actions, task, "resume", "继续任务")', javascript)
         self.assertIn("function renderTaskProgress", javascript)
         self.assertIn("const taskProgressScroll = {}", javascript)
+        self.assertIn("function captureTaskComposerFocus", javascript)
+        self.assertIn("function restoreTaskComposerFocus", javascript)
+        self.assertIn("textarea.dataset.taskId = task.task_id", javascript)
         self.assertIn("followLatest: distanceFromBottom <= 24", javascript)
         self.assertIn("previousScroll?.followLatest === false", javascript)
         self.assertIn('redirect.textContent = "调整当前方向"', javascript)
@@ -197,6 +213,28 @@ class ControlCentreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "关闭并重新打开"):
                 handler.create_request(payload)
         self.assertFalse(list(server.REQUESTS.glob("*.json")))
+
+    def test_search_gateway_configuration_accepts_only_validated_server_result(self):
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        expected = {
+            "configured": True, "status": "configured", "provider_id": "one-search",
+            "base_url": "http://127.0.0.1:8080", "mode": "parallel", "max_results": 6,
+        }
+        with patch("ui.server.configure_search_gateway", return_value=expected) as configure:
+            handler.configure_search_gateway({
+                "base_url": "http://127.0.0.1:8080", "token": "osr_test",
+                "mode": "parallel", "max_results": 6, "allow_private_network": True,
+            })
+        configure.assert_called_once_with(
+            server.ROOT,
+            base_url="http://127.0.0.1:8080", token="osr_test", mode="parallel",
+            max_results=6, allow_private_network=True,
+        )
+        self.assertEqual(replies[-1][0], HTTPStatus.OK)
+        self.assertTrue(replies[-1][1]["restart_required"])
+        self.assertNotIn("osr_test", json.dumps(replies[-1][1]))
 
     def test_running_task_requires_a_fresh_matching_agent_lease(self):
         task = {

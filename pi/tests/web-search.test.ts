@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
 
 import { searchPublicWeb } from "../extensions/web-search.ts";
@@ -76,5 +77,53 @@ test("public search stops reading a streamed response beyond the byte budget", a
     if (originalProvider === undefined) delete process.env.DIRECTOR_SEARCH_PROVIDER;
     else process.env.DIRECTOR_SEARCH_PROVIDER = originalProvider;
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("configured One Search gateway takes priority and keeps upstream provenance", async () => {
+  const names = [
+    "ONE_SEARCH_BASE_URL", "ONE_SEARCH_API_TOKEN", "ONE_SEARCH_MODE",
+    "ONE_SEARCH_MAX_RESULTS", "ONE_SEARCH_ALLOW_PRIVATE_NETWORK", "DIRECTOR_SEARCH_PROVIDER",
+  ] as const;
+  const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  let received: Record<string, unknown> = {};
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      received = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      assert.equal(request.url, "/v1/search");
+      assert.equal(request.headers.authorization, "Bearer osr_runtime_test");
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ results: [
+        { title: "官方政策", url: "https://www.gov.cn/policy", content: "政策正文候选", provider: "brave" },
+      ] }));
+    });
+  });
+  await new Promise<void>((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("test server failed to bind");
+  try {
+    process.env.ONE_SEARCH_BASE_URL = `http://127.0.0.1:${address.port}`;
+    process.env.ONE_SEARCH_API_TOKEN = "osr_runtime_test";
+    process.env.ONE_SEARCH_MODE = "parallel";
+    process.env.ONE_SEARCH_MAX_RESULTS = "3";
+    process.env.ONE_SEARCH_ALLOW_PRIVATE_NETWORK = "1";
+    delete process.env.DIRECTOR_SEARCH_PROVIDER;
+    const response = await searchPublicWeb({ queries: ["具身智能政策"], mode: "chinese_policy", count: 8 });
+    assert.equal(response.provider, "one-search");
+    assert.equal(response.searches[0]?.provider, "one-search");
+    assert.equal(response.searches[0]?.results[0]?.upstream_provider, "brave");
+    assert.equal(response.applied_filters.count, 3);
+    assert.equal(received.mode, "parallel");
+    assert.equal(received.limit, 3);
+    assert.match(String(received.query), /site:gov\.cn/u);
+  } finally {
+    await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
+    names.forEach((name) => {
+      const value = original[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    });
   }
 });

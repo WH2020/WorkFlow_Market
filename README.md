@@ -75,6 +75,8 @@ python -m agent_platform doctor --require-ppt
 
 公开资料检索开箱即可使用：未配置密钥时走 Keenable 官方免密公共接口；配置 Brave Search API Key 后，普通和广泛发现任务优先使用专用通道。中文政策、站点限定和日期限定会按场景路由到更合适的检索策略，并统一限制候选数量、摘要长度、总响应体和重复 URL。免密接口使用共享公共额度，繁忙时可稍后重试或在工作台“设置 > 公开检索”填写专用密钥。Windows 使用当前用户的 DPAPI 加密，macOS 写入系统钥匙串；密钥不会写入任务、日志或 Git。`web.search` 的摘要和来源类别只用于发现，后续必须由 `web.open` 读取正文才可作为证据；正文读取继续拒绝重定向、本机/私网地址、危险协议、疑似带密钥 URL 和超限响应。[Keenable 免密接口说明](https://docs.keenable.ai/authentication)，[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
+设置页另有独立的“One Search 搜索聚合网关”卡片。它连接用户自行部署的 One Search，可把 Exa、You、Jina、Tavily、Firecrawl、Serper、Brave 等上游按并行、依次尝试或单提供商方式聚合；Agent4Market 不捆绑或代管该服务。启用后 `web.search` 优先走 `/v1/search`，保留具体上游名称并继续标记为“仅发现”；网关失败时不会把同一查询静默转发给其他服务。配置只接受权限受限的 `osr_` 检索令牌，拒绝 `oak_` 管理凭据；本机/局域网地址必须显式允许，运行时会重新解析并把实际连接固定到核验地址。[One Search 项目与接口](https://github.com/CncCbz/one-search)，[管理员凭据说明](https://github.com/CncCbz/one-search/blob/main/docs/admin-api-key.md)。
+
 桌面发行版只加载销售总监所需 Skills，包含政府合作能力，不加载产品研发 Skills；旧版邮箱与聊天 Skill 也不会加载。
 
 进入 Pi 后：

@@ -1,5 +1,9 @@
 import { normalizePublicUrl } from "./source-readers.ts";
+import { lookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { Readable } from "node:stream";
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SEARCH_TIMEOUT_MS = 60_000;
@@ -8,7 +12,9 @@ const KEENABLE_PUBLIC_ENDPOINT = "https://api.keenable.ai/v1/search/public";
 const BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
 
 export type PublicSearchMode = "auto" | "broad" | "official" | "chinese_policy" | "recent";
-type SearchProvider = "brave" | "keenable-public";
+type SearchProvider = "brave" | "keenable-public" | "one-search";
+type OneSearchMode = "parallel" | "fallback" | "single";
+type NetworkTarget = { address: string; family: 4 | 6 };
 
 export type PublicSearchParams = {
   queries: string[];
@@ -30,6 +36,7 @@ export type PublicSearchResult = {
   age?: string;
   published_at?: string;
   acquired_at?: string;
+  upstream_provider?: string;
 };
 
 export type PublicSearchResponse = {
@@ -104,17 +111,22 @@ function optionalSite(value: string | undefined): string | undefined {
 
 function providerOverride(): "auto" | SearchProvider {
   const configured = (process.env.DIRECTOR_SEARCH_PROVIDER ?? "auto").trim().toLocaleLowerCase("en-US");
-  if (configured === "auto" || configured === "brave" || configured === "keenable-public") return configured;
-  throw new Error("DIRECTOR_SEARCH_PROVIDER 仅支持 auto、brave 或 keenable-public");
+  if (configured === "auto" || configured === "brave" || configured === "keenable-public" || configured === "one-search") return configured;
+  throw new Error("DIRECTOR_SEARCH_PROVIDER 仅支持 auto、brave、keenable-public 或 one-search");
 }
 
-function chooseProvider(mode: PublicSearchMode, hasBraveKey: boolean, constrained: boolean): SearchProvider {
+function chooseProvider(mode: PublicSearchMode, hasBraveKey: boolean, constrained: boolean, hasGateway: boolean): SearchProvider {
   const override = providerOverride();
+  if (override === "one-search") {
+    if (!hasGateway) throw new Error("已指定使用 One Search，但本机尚未完成搜索聚合网关配置");
+    return "one-search";
+  }
   if (override === "brave") {
     if (!hasBraveKey) throw new Error("已指定使用 Brave，但本机尚未配置 BRAVE_SEARCH_API_KEY");
     return "brave";
   }
   if (override === "keenable-public") return "keenable-public";
+  if (hasGateway) return "one-search";
   if (mode === "chinese_policy" || constrained || !hasBraveKey) return "keenable-public";
   return "brave";
 }
@@ -186,13 +198,21 @@ function normalizedResult(input: {
   age?: unknown;
   published_at?: unknown;
   acquired_at?: unknown;
+  content?: unknown;
+  provider?: unknown;
+  source?: unknown;
 }, snippetChars: number): PublicSearchResult | undefined {
   if (typeof input.title !== "string" || typeof input.url !== "string") return undefined;
   try {
     const parsed = normalizePublicUrl(input.url);
     const description = typeof input.snippet === "string" && input.snippet.trim()
       ? input.snippet
-      : typeof input.description === "string" ? input.description : "";
+      : typeof input.description === "string" && input.description.trim()
+        ? input.description
+        : typeof input.content === "string" ? input.content : "";
+    const upstreamProvider = typeof input.provider === "string" && input.provider.trim()
+      ? input.provider.trim()
+      : typeof input.source === "string" ? input.source.trim() : "";
     return {
       title: input.title.trim().slice(0, 500),
       url: parsed.toString().slice(0, 2048),
@@ -201,10 +221,142 @@ function normalizedResult(input: {
       ...(typeof input.age === "string" && input.age ? { age: input.age.slice(0, 100) } : {}),
       ...(typeof input.published_at === "string" && input.published_at ? { published_at: input.published_at.slice(0, 100) } : {}),
       ...(typeof input.acquired_at === "string" && input.acquired_at ? { acquired_at: input.acquired_at.slice(0, 100) } : {}),
+      ...(upstreamProvider ? { upstream_provider: upstreamProvider.slice(0, 120) } : {}),
     };
   } catch {
     return undefined;
   }
+}
+
+function privateIpv4Kind(address: string): "allowed" | "blocked" | "public" {
+  const parts = address.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return "blocked";
+  const [a, b] = parts;
+  if (
+    a === 10 || a === 127 || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+  ) return "allowed";
+  if (
+    a === 0 || a >= 224 || (a === 100 && b >= 64 && b <= 127)
+    || (a === 192 && b === 0) || (a === 192 && b === 88 && parts[2] === 99)
+    || (a === 198 && (b === 18 || b === 19 || (b === 51 && parts[2] === 100)))
+    || (a === 203 && b === 0 && parts[2] === 113)
+  ) return "blocked";
+  return "public";
+}
+
+function gatewayAddressKind(address: string): "allowed-private" | "blocked" | "public" {
+  const version = isIP(address);
+  if (version === 4) {
+    const kind = privateIpv4Kind(address);
+    return kind === "allowed" ? "allowed-private" : kind;
+  }
+  if (version !== 6) return "blocked";
+  const normalized = address.toLowerCase();
+  if (normalized.startsWith("::ffff:")) {
+    const kind = privateIpv4Kind(normalized.slice(7));
+    return kind === "allowed" ? "allowed-private" : kind;
+  }
+  if (normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return "allowed-private";
+  if (normalized === "::" || normalized.startsWith("ff") || normalized.startsWith("2001:db8:") || normalized === "2001:db8::") return "blocked";
+  const first = Number.parseInt(normalized.split(":")[0] || "0", 16);
+  return Number.isFinite(first) && first >= 0x2000 && first <= 0x3fff ? "public" : "blocked";
+}
+
+async function resolveGatewayTarget(url: URL, allowPrivate: boolean): Promise<NetworkTarget> {
+  const hostname = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  let raw: Array<{ address: string; family: number }>;
+  if (isIP(hostname)) raw = [{ address: hostname, family: isIP(hostname) }];
+  else {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      raw = await Promise.race([
+        lookup(hostname, { all: true, verbatim: true }),
+        new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("One Search 网关域名解析超时")), 10_000); }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+  if (!raw.length) throw new Error("One Search 网关域名没有可用地址");
+  const targets = raw.map((item) => ({ address: item.address, family: item.family as 4 | 6, kind: gatewayAddressKind(item.address) }));
+  if (targets.some((target) => target.family !== 4 && target.family !== 6) || targets.some((target) => target.kind === "blocked")) {
+    throw new Error("One Search 网关解析到未指定、多播或保留地址，已拒绝连接");
+  }
+  if (!allowPrivate && targets.some((target) => target.kind === "allowed-private")) {
+    throw new Error("One Search 网关指向本机或局域网，但运行时未允许私网连接");
+  }
+  const selected = targets[0]!;
+  return { address: selected.address, family: selected.family };
+}
+
+function oneSearchConfiguration(): { base: URL; token: string; mode: OneSearchMode; maxResults: number; allowPrivate: boolean } | undefined {
+  const baseValue = process.env.ONE_SEARCH_BASE_URL?.trim() ?? "";
+  const token = process.env.ONE_SEARCH_API_TOKEN?.trim() ?? "";
+  if (!baseValue && !token) return undefined;
+  if (!baseValue || token.length <= 4 || !token.startsWith("osr_") || token.startsWith("oak_")) throw new Error("One Search 配置不完整或令牌权限不合规；请在设置中重新保存 osr_ 检索令牌");
+  let base: URL;
+  try { base = new URL(baseValue); } catch { throw new Error("One Search 网关地址无效"); }
+  if (!["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash) {
+    throw new Error("One Search 网关地址必须是无凭据、无查询参数的 http/https 地址");
+  }
+  base.pathname = base.pathname.replace(/\/$/u, "").replace(/\/v1$/u, "");
+  const mode = (process.env.ONE_SEARCH_MODE ?? "parallel") as OneSearchMode;
+  if (!["parallel", "fallback", "single"].includes(mode)) throw new Error("One Search 聚合方式无效");
+  const maxResults = Number(process.env.ONE_SEARCH_MAX_RESULTS ?? "8");
+  if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 10) throw new Error("One Search 结果数配置必须是 1–10 的整数");
+  return { base, token, mode, maxResults, allowPrivate: process.env.ONE_SEARCH_ALLOW_PRIVATE_NETWORK === "1" };
+}
+
+function pinnedGatewayRequest(url: URL, target: NetworkTarget, token: string, body: string, signal: AbortSignal): Promise<Response> {
+  return new Promise((resolvePromise, reject) => {
+    const transport = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const tlsHostname = url.hostname.replace(/^\[|\]$/gu, "");
+    const request = transport(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/json", "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`, "Content-Length": Buffer.byteLength(body),
+      },
+      lookup: ((_hostname: string, options: { all?: boolean } | number, callback: ((error: NodeJS.ErrnoException | null, address: string, family: number) => void) | ((error: NodeJS.ErrnoException | null, addresses: NetworkTarget[]) => void)) => {
+        if (typeof options === "object" && options.all) (callback as (error: NodeJS.ErrnoException | null, addresses: NetworkTarget[]) => void)(null, [target]);
+        else (callback as (error: NodeJS.ErrnoException | null, address: string, family: number) => void)(null, target.address, target.family);
+      }) as never,
+      servername: url.protocol === "https:" && !isIP(tlsHostname) ? tlsHostname : undefined,
+      signal,
+    }, (incoming) => {
+      const status = incoming.statusCode ?? 0;
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) value.forEach((item) => headers.append(name, item));
+        else if (value !== undefined) headers.set(name, value);
+      }
+      resolvePromise(new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, { status, headers }));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+async function oneSearch(
+  query: string,
+  count: number,
+  snippetChars: number,
+  configuration: NonNullable<ReturnType<typeof oneSearchConfiguration>>,
+  signal: AbortSignal,
+): Promise<PublicSearchResult[]> {
+  const endpoint = new URL(`${configuration.base.toString().replace(/\/$/u, "")}/v1/search`);
+  const target = await resolveGatewayTarget(endpoint, configuration.allowPrivate);
+  if (endpoint.protocol === "http:" && gatewayAddressKind(target.address) === "public") {
+    throw new Error("公网 One Search 网关必须使用 HTTPS");
+  }
+  const body = JSON.stringify({ query, mode: configuration.mode, limit: Math.min(count, configuration.maxResults), dedupe: true });
+  const response = await pinnedGatewayRequest(endpoint, target, configuration.token, body, signal);
+  if (!response.ok) throw new Error(`One Search 聚合检索失败（HTTP ${response.status}）；请检查网关状态、osr_ 令牌和提供商配置`);
+  const payload = await readBoundedJson(response) as { results?: Array<Record<string, unknown>>; data?: { results?: Array<Record<string, unknown>> } };
+  const results = payload.results ?? payload.data?.results ?? [];
+  return results.slice(0, Math.min(count, configuration.maxResults))
+    .flatMap((item) => normalizedResult(item, snippetChars) ?? []);
 }
 
 function rankResults(results: PublicSearchResult[], mode: PublicSearchMode): PublicSearchResult[] {
@@ -316,14 +468,21 @@ export async function searchPublicWeb(params: PublicSearchParams): Promise<Publi
   }
   const acquiredAfter = mode === "recent" && !publishedAfter ? "30d" : undefined;
   const key = process.env.BRAVE_SEARCH_API_KEY?.trim() ?? "";
-  const provider = chooseProvider(mode, Boolean(key), Boolean(site || publishedAfter || publishedBefore || acquiredAfter));
+  const gateway = oneSearchConfiguration();
+  const provider = chooseProvider(mode, Boolean(key), Boolean(site || publishedAfter || publishedBefore || acquiredAfter), Boolean(gateway));
+  const effectiveCount = provider === "one-search" ? Math.min(count, gateway!.maxResults) : count;
   const signal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
   const seenUrls = new Set<string>();
   const searches: PublicSearchResponse["searches"] = [];
   for (const query of queries) {
+    const filteredQuery = provider === "one-search"
+      ? [query, site ? `site:${site}` : "", publishedAfter ? `after:${publishedAfter}` : "", publishedBefore ? `before:${publishedBefore}` : ""].filter(Boolean).join(" ")
+      : query;
     const rawResults = provider === "brave"
-      ? await braveSearch(query, key, count, snippetChars, params.country, params.search_lang, signal)
-      : await keenableSearch(query, count, snippetChars, mode, site, publishedAfter, publishedBefore, acquiredAfter, signal);
+      ? await braveSearch(filteredQuery, key, effectiveCount, snippetChars, params.country, params.search_lang, signal)
+      : provider === "one-search"
+        ? await oneSearch(filteredQuery, effectiveCount, snippetChars, gateway!, signal)
+        : await keenableSearch(filteredQuery, effectiveCount, snippetChars, mode, site, publishedAfter, publishedBefore, acquiredAfter, signal);
     const results = rankResults(rawResults, mode).filter((result) => {
       if (seenUrls.has(result.url)) return false;
       seenUrls.add(result.url);
@@ -342,7 +501,7 @@ export async function searchPublicWeb(params: PublicSearchParams): Promise<Publi
       ...(publishedAfter ? { published_after: publishedAfter } : {}),
       ...(publishedBefore ? { published_before: publishedBefore } : {}),
       ...(acquiredAfter ? { acquired_after: acquiredAfter } : {}),
-      count,
+      count: effectiveCount,
       snippet_chars: snippetChars,
     },
     searches,

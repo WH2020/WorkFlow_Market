@@ -232,6 +232,28 @@ class EnvironmentTests(unittest.TestCase):
             "model-secret", run.call_args.kwargs["env"]["AGENT4MARKET_NEWAPI_API_KEY"]
         )
 
+    def test_launch_injects_search_gateway_only_into_child_and_marks_it_applied(self) -> None:
+        report = {"core": {"ready": True}, "ppt": {"ready": False, "config": {}}}
+        source_environment = {"PATH": "/usr/bin"}
+        with (
+            patch("agent_platform.environment.doctor_report", return_value=report),
+            patch("agent_platform.environment._command_path", return_value=Path("/trusted/pi")),
+            patch("agent_platform.environment.search_runtime_environment", return_value={}),
+            patch("agent_platform.environment.search_gateway_runtime_environment", return_value={
+                "ONE_SEARCH_BASE_URL": "https://search.example.com",
+                "ONE_SEARCH_API_TOKEN": "osr_child_secret",
+                "ONE_SEARCH_MODE": "parallel",
+                "ONE_SEARCH_MAX_RESULTS": "6",
+                "ONE_SEARCH_ALLOW_PRIVATE_NETWORK": "0",
+            }),
+            patch("agent_platform.environment.mark_search_gateway_runtime_applied") as mark_applied,
+            patch("agent_platform.environment.subprocess.run", return_value=Mock(returncode=0)) as run,
+        ):
+            launch_pi(Path.cwd(), ["--approve"], environ=source_environment)
+        self.assertNotIn("ONE_SEARCH_API_TOKEN", source_environment)
+        self.assertEqual("osr_child_secret", run.call_args.kwargs["env"]["ONE_SEARCH_API_TOKEN"])
+        mark_applied.assert_called_once_with(Path.cwd().resolve())
+
     def test_explicit_model_argument_overrides_saved_selection(self) -> None:
         report = {"core": {"ready": True}, "ppt": {"ready": False, "config": {}}}
         with (

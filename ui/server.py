@@ -47,6 +47,12 @@ from agent_platform.search_provider import (  # noqa: E402
     configure_search_provider,
     search_settings_summary,
 )
+from agent_platform.search_gateway import (  # noqa: E402
+    SearchGatewayError,
+    clear_search_gateway,
+    configure_search_gateway,
+    search_gateway_settings_summary,
+)
 
 
 UI_ROOT = Path(__file__).resolve().parent
@@ -1339,6 +1345,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                                             "schedules": schedule_records(),
                                             "model": model_settings_summary(ROOT),
                                             "search": search_settings_summary(ROOT),
+                                            "search_gateway": search_gateway_settings_summary(ROOT),
                                             "desktop_runtime": desktop_runtime_summary(),
                                             "request_token": SERVER_TOKEN})
             return
@@ -1350,6 +1357,9 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/search-settings":
             self.send_json(HTTPStatus.OK, search_settings_summary(ROOT))
+            return
+        if route == "/api/search-gateway":
+            self.send_json(HTTPStatus.OK, search_gateway_settings_summary(ROOT))
             return
         if route == "/api/tasks":
             self.send_json(HTTPStatus.OK, task_summaries())
@@ -1408,6 +1418,18 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 if not webbrowser.open(BRAVE_DASHBOARD_URL, new=2):
                     raise RuntimeError("无法打开系统浏览器；请手动访问公开检索服务控制台")
                 self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开公开检索服务控制台。"})
+            elif route == "/api/search-gateway":
+                self.configure_search_gateway(payload)
+            elif route == "/api/search-gateway/reset":
+                self.reset_search_gateway()
+            elif route == "/api/search-gateway/open-dashboard":
+                settings = search_gateway_settings_summary(ROOT)
+                base_url = str(settings.get("base_url", ""))
+                if not settings.get("configured") or not base_url:
+                    raise SearchGatewayError("请先配置 One Search 聚合网关")
+                if not webbrowser.open(base_url, new=2):
+                    raise RuntimeError("无法打开系统浏览器；请手动访问 One Search 网关地址")
+                self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开 One Search。"})
             elif route == "/api/desktop-settings":
                 self.send_json(HTTPStatus.OK, {
                     **save_desktop_settings(payload),
@@ -1425,7 +1447,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.create_presentation_revision(route.split("/")[3], payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
-        except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError) as error:
+        except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:
             self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})
@@ -1492,6 +1514,32 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "message": "公开检索密钥已删除。请关闭并重新打开销售总监智能工作台，使运行时停止使用旧密钥。",
         })
 
+    def configure_search_gateway(self, payload: dict[str, Any]) -> None:
+        max_results = payload.get("max_results", 8)
+        if isinstance(max_results, bool) or not isinstance(max_results, int):
+            raise SearchGatewayError("每次查询结果数必须是 1–10 的整数")
+        result = configure_search_gateway(
+            ROOT,
+            base_url=str(payload.get("base_url", "")),
+            token=str(payload.get("token", "")).strip() or None,
+            mode=str(payload.get("mode", "parallel")),
+            max_results=max_results,
+            allow_private_network=payload.get("allow_private_network") is True,
+        )
+        self.send_json(HTTPStatus.OK, {
+            **result,
+            "restart_required": True,
+            "message": "One Search 已验证并保存。请关闭并重新打开工作台，使后续公开检索优先使用聚合网关。",
+        })
+
+    def reset_search_gateway(self) -> None:
+        result = clear_search_gateway(ROOT)
+        self.send_json(HTTPStatus.OK, {
+            **result,
+            "restart_required": True,
+            "message": "搜索聚合网关已停用。请关闭并重新打开工作台，恢复使用原有公开检索。",
+        })
+
     def create_request(self, payload: dict[str, Any]) -> None:
         profile_id = safe_id(str(payload.get("profile_id", "")))
         service_id = safe_id(str(payload.get("service_id", "")))
@@ -1508,8 +1556,13 @@ class ControlHandler(SimpleHTTPRequestHandler):
             raise ValueError("该服务不属于当前角色")
         if service_id in PUBLIC_SEARCH_SERVICES:
             search = search_settings_summary(ROOT)
+            gateway = search_gateway_settings_summary(ROOT)
             if search.get("status") != "configured":
                 raise ValueError("该任务需要公开检索；请前往“设置 > 公开检索”查看服务状态")
+            if gateway.get("status") not in {"disabled", "configured"}:
+                raise ValueError("搜索聚合网关配置异常；请前往“设置 > 搜索聚合网关”修复或停用")
+            if gateway.get("restart_required"):
+                raise ValueError("搜索聚合网关配置已变更；请关闭并重新打开销售总监智能工作台后重试")
             if search.get("restart_required"):
                 raise ValueError("公开检索密钥已保存，但智能核心尚未加载；请关闭并重新打开销售总监智能工作台后重试")
         if service_id in {"presentation-studio", "weekly-deck"}:
