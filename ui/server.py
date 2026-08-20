@@ -54,6 +54,14 @@ from agent_platform.search_gateway import (  # noqa: E402
     configure_search_gateway,
     search_gateway_settings_summary,
 )
+from agent_platform.mail_provider import (  # noqa: E402
+    MailProviderError,
+    clear_mail_provider,
+    configure_mail_provider,
+    import_reimbursement_mail,
+    mail_settings_summary,
+    search_reimbursement_mail,
+)
 
 
 UI_ROOT = Path(__file__).resolve().parent
@@ -78,7 +86,10 @@ ACTIVE_PROFILE_ID: str | None = None
 
 DEFAULT_PROJECT_ID = "project-default"
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
-ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".pptx"}
+ALLOWED_UPLOAD_SUFFIXES = {
+    ".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md", ".pptx",
+    ".png", ".jpg", ".jpeg", ".heic", ".ofd", ".xls", ".zip",
+}
 AGENT_LEASE_FRESH_SECONDS = 15
 APPROVAL_REQUEST_STALE_SECONDS = 15
 TASK_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -1262,9 +1273,18 @@ def output_summary() -> list[dict[str, Any]]:
             modified = item.stat().st_mtime
         except OSError:
             continue
+        relative = item.relative_to(ROOT).as_posix()
+        relative_parts = item.relative_to(OUTPUTS).parts
+        project_id = (
+            relative_parts[1]
+            if len(relative_parts) >= 3 and relative_parts[0] == "reimbursements" and
+            re.fullmatch(r"[A-Za-z0-9_-]+", relative_parts[1])
+            else None
+        )
         result.append((modified, {
             "name": item.name,
-            "path": item.relative_to(ROOT).as_posix(),
+            "path": relative,
+            "project_id": project_id,
             "modified_at": datetime.fromtimestamp(modified).astimezone().isoformat(timespec="minutes"),
         }))
     return [entry for _, entry in sorted(result, key=lambda pair: pair[0], reverse=True)[:20]]
@@ -1273,6 +1293,7 @@ def output_summary() -> list[dict[str, Any]]:
 def project_summaries(tasks: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     tasks = tasks if tasks is not None else task_summaries()
     files = project_files()
+    local_outputs = output_summary()
     result: list[dict[str, Any]] = []
     for project in project_records():
         project_tasks = [task for task in tasks if task.get("project_id", DEFAULT_PROJECT_ID) == project["project_id"]]
@@ -1282,6 +1303,9 @@ def project_summaries(tasks: list[dict[str, Any]] | None = None) -> list[dict[st
             for path in (task.get("artifacts") if isinstance(task.get("artifacts"), list) else [])
             if isinstance(path, str) and path.startswith("outputs/")
         }
+        artifacts.update(
+            item["path"] for item in local_outputs if item.get("project_id") == project["project_id"]
+        )
         result.append({
             **project,
             "task_count": len(project_tasks),
@@ -1583,6 +1607,10 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         route = urlparse(self.path).path
+        if route == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.end_headers()
+            return
         if route == "/api/health":
             self.send_json(HTTPStatus.OK, {"status": "ok", "profile_id": ACTIVE_PROFILE_ID})
             return
@@ -1596,6 +1624,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                                             "model": model_settings_summary(ROOT),
                                             "search": search_settings_summary(ROOT),
                                             "search_gateway": search_gateway_settings_summary(ROOT),
+                                            "mail": mail_settings_summary(ROOT),
                                             "desktop_runtime": desktop_runtime_summary(),
                                             "request_token": SERVER_TOKEN})
             return
@@ -1610,6 +1639,9 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/search-gateway":
             self.send_json(HTTPStatus.OK, search_gateway_settings_summary(ROOT))
+            return
+        if route == "/api/mail-settings":
+            self.send_json(HTTPStatus.OK, mail_settings_summary(ROOT))
             return
         if route == "/api/tasks":
             self.send_json(HTTPStatus.OK, task_summaries())
@@ -1696,6 +1728,28 @@ class ControlHandler(SimpleHTTPRequestHandler):
             elif route == "/api/knowledge/source/open":
                 url = open_knowledge_source(payload)
                 self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开来源。", "url": url})
+            elif route == "/api/mail-settings":
+                result = configure_mail_provider(
+                    ROOT, payload, str(payload.get("credential", "")).strip()
+                )
+                self.send_json(HTTPStatus.OK, {
+                    **result,
+                    "message": "邮箱已验证并安全保存在本机；后续只读检索收件箱。",
+                })
+            elif route == "/api/mail-settings/reset":
+                self.send_json(HTTPStatus.OK, {
+                    **clear_mail_provider(ROOT),
+                    "message": "邮箱连接已移除，本机保存的授权码也已清除。",
+                })
+            elif route == "/api/reimbursements/mail/search":
+                self.send_json(HTTPStatus.OK, search_reimbursement_mail(ROOT, payload))
+            elif route == "/api/reimbursements/mail/import":
+                project_id = safe_id(str(payload.get("project_id", "")))
+                active_project(project_id)
+                result = import_reimbursement_mail(
+                    ROOT, INPUTS, OUTPUTS, project_id, payload.get("selected")
+                )
+                self.send_json(HTTPStatus.CREATED, result)
             elif route == "/api/desktop-settings":
                 self.send_json(HTTPStatus.OK, {
                     **save_desktop_settings(payload),
@@ -1715,7 +1769,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.revise_write_intent(route.split("/")[3], payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
-        except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError) as error:
+        except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError, MailProviderError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:
             self.send_json(HTTPStatus.CONFLICT, {"error": str(error)})

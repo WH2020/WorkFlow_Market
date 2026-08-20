@@ -8,6 +8,7 @@
   let searchSettingsInitialized = false;
   let searchGatewaySettingsInitialized = false;
   let runtimeSettingsInitialized = false;
+  let mailSettingsInitialized = false;
   let taskRuntimeCatalogKey = "";
   let currentView = "home";
   let selectedProject = "project-default";
@@ -19,6 +20,7 @@
   let knowledgeLoadError = "";
   let knowledgeTruncated = false;
   let knowledgeRenderedKey = "";
+  let reimbursementMailMessages = [];
   const guidedDrafts = {};
   const guidedNotes = {};
   const taskMessageDrafts = {};
@@ -153,7 +155,7 @@
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
     knowledge: "知识库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
-    schedules: "每日定时任务", search: "自定义搜索", settings: "设置",
+    schedules: "每日定时任务", search: "自定义搜索", tools: "工具栏", settings: "设置",
   };
   if (viewTitles[window.location.hash.slice(1)]) currentView = window.location.hash.slice(1);
 
@@ -170,6 +172,7 @@
     ["PROJECT SPACE", "项目空间"],
     ["DAILY AUTOMATION", "每日自动任务"],
     ["CUSTOM SEARCH", "自定义搜索"],
+    ["QUICK TOOLS", "快捷工具"],
     ["SETTINGS", "系统设置"],
     ["AI 工作台", "智能工作台"],
     ["PPT 工作室", "演示文稿工作室"],
@@ -651,6 +654,42 @@
     if (runtimeSettingsInitialized && !force) return;
     runtimeSettingsInitialized = true;
     $("show-ai-core-window").checked = Boolean(runtime.show_ai_core_window);
+  }
+
+  function applyMailProviderPreset(force = false) {
+    const settings = model?.mail || {};
+    const preset = settings.presets?.[$("mail-provider").value] || {};
+    const custom = $("mail-provider").value === "custom";
+    $("mail-host").readOnly = !custom;
+    if (!custom && (force || !$("mail-host").value)) $("mail-host").value = preset.host || "";
+    $("mail-credential").placeholder = settings.configured
+      ? `已安全保存；留空可继续使用（${preset.credential_label || "客户端授权码"}）`
+      : `填写${preset.credential_label || "客户端授权码或应用专用密码"}，不要填写网页登录密码`;
+  }
+
+  function renderMailSettings(force = false) {
+    const settings = model?.mail || { configured: false, status: "unconfigured", presets: {} };
+    const panel = $("mail-settings-panel");
+    panel.classList.toggle("configured", settings.configured && settings.status === "configured");
+    panel.classList.toggle("error", settings.status === "error");
+    if (settings.status === "error") $("mail-settings-current").textContent = `配置异常：${settings.error}`;
+    else if (settings.configured) $("mail-settings-current").textContent = `已连接 ${settings.provider_label || "邮箱"} · ${settings.email_address}`;
+    else $("mail-settings-current").textContent = "尚未连接邮箱";
+    $("expense-mail-unconfigured").hidden = Boolean(settings.configured);
+    $("expense-mail-workspace").hidden = !settings.configured;
+    if (mailSettingsInitialized && !force) return;
+    mailSettingsInitialized = true;
+    $("mail-provider").value = settings.provider || "qq";
+    $("mail-email-address").value = settings.email_address || "";
+    $("mail-username").value = settings.username || "";
+    $("mail-username").dataset.auto = !settings.username || settings.username === settings.email_address ? "true" : "false";
+    $("mail-host").value = settings.host || "";
+    $("mail-private-network").checked = Boolean(settings.allow_private_network);
+    $("mail-credential").value = "";
+    $("mail-settings-status").textContent = settings.configured
+      ? "授权码已由本机系统保护；留空保存可重新验证现有连接。"
+      : "连接时会进行一次只读登录验证。";
+    applyMailProviderPreset(true);
   }
 
   function guidedControl(field, draft) {
@@ -1640,6 +1679,7 @@
     setSelectOptions($("home-project"), options, selectedProject);
     setSelectOptions($("task-project"), options, selectedProject);
     setSelectOptions($("schedule-project"), options, selectedProject);
+    setSelectOptions($("expense-project"), options, $("expense-project").value || selectedProject);
   }
 
   function fileSize(bytes) {
@@ -1721,7 +1761,7 @@
       .filter((task) => task.project_id === selectedProject)
       .flatMap((task) => Array.isArray(task.artifacts) ? task.artifacts : [])
       .filter((path) => typeof path === "string" && path.startsWith("outputs/")));
-    const projectOutputs = (model.outputs || []).filter((item) => artifactPaths.has(item.path));
+    const projectOutputs = (model.outputs || []).filter((item) => artifactPaths.has(item.path) || item.project_id === selectedProject);
     const outputsBox = $("project-outputs");
     outputsBox.classList.toggle("empty", projectOutputs.length === 0);
     if (projectOutputs.length) outputsBox.replaceChildren(...projectOutputs.map((item) => summaryRow("output-row", item.name, item.modified_at)));
@@ -1799,7 +1839,7 @@
   }
 
   function render() {
-    renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
+    renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); switchView(currentView);
   }
 
@@ -1950,14 +1990,14 @@
     } catch (error) { note(error.message, true); }
   };
 
-  async function uploadProjectFile(file) {
+  async function uploadProjectFile(file, uploadName = file?.name, projectId = selectedProject) {
     if (!file) return;
     if (file.size <= 0 || file.size > 32 * 1024 * 1024) throw new Error("单个资料必须为 1 字节至 32 兆字节。");
     const response = await fetch("/api/project-files", {
       method: "POST",
       headers: {
         "X-Director-Token": requestToken || "", "Content-Type": "application/octet-stream",
-        "X-Project-Id": selectedProject, "X-File-Name": encodeURIComponent(file.name),
+        "X-Project-Id": projectId, "X-File-Name": encodeURIComponent(uploadName),
       },
       body: file,
     });
@@ -1983,6 +2023,121 @@
     try { const reply = await uploadProjectFile(file); note(reply.message); await load(); switchView("projects"); }
     catch (error) { note(error.message, true); }
     finally { $("project-file-input").value = ""; }
+  };
+
+  function selectedReimbursementMessages() {
+    return [...$("expense-mail-results").querySelectorAll("input[data-mail-index]:checked")]
+      .map((checkbox) => reimbursementMailMessages[Number(checkbox.dataset.mailIndex)])
+      .filter(Boolean)
+      .map((message) => ({ uid: message.uid, message_key: message.message_key }));
+  }
+
+  function updateReimbursementSelection() {
+    const selected = selectedReimbursementMessages();
+    $("import-expense-mail").disabled = selected.length === 0 || selected.length > 20;
+    $("import-expense-mail").textContent = selected.length ? `导入所选材料（${selected.length} 封）` : "导入所选材料";
+    const checkboxes = [...$("expense-mail-results").querySelectorAll("input[data-mail-index]")];
+    $("expense-mail-select-all").checked = checkboxes.length > 0 && checkboxes.every((checkbox) => checkbox.checked);
+    $("expense-mail-select-all").indeterminate = selected.length > 0 && selected.length < checkboxes.length;
+  }
+
+  function renderReimbursementMailResults(messages) {
+    reimbursementMailMessages = Array.isArray(messages) ? messages : [];
+    const box = $("expense-mail-results");
+    box.classList.toggle("empty", reimbursementMailMessages.length === 0);
+    if (!reimbursementMailMessages.length) {
+      box.replaceChildren();
+      box.textContent = "没有找到含可导入附件的邮件。可以调整日期或关键词后重试。";
+      updateReimbursementSelection();
+      return;
+    }
+    box.replaceChildren(...reimbursementMailMessages.map((message, index) => {
+      const card = document.createElement("article"); card.className = "mail-result-card";
+      const heading = document.createElement("label"); heading.className = "mail-result-heading";
+      const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.dataset.mailIndex = String(index);
+      checkbox.addEventListener("change", updateReimbursementSelection);
+      const copy = document.createElement("span");
+      const subject = document.createElement("strong"); subject.textContent = message.subject || "无主题邮件";
+      const meta = document.createElement("small");
+      const parsedDate = message.received_at ? new Date(message.received_at) : null;
+      const received = parsedDate && !Number.isNaN(parsedDate.getTime())
+        ? parsedDate.toLocaleString("zh-CN", { hour12: false }) : "时间未知";
+      meta.textContent = `${message.sender || "未知发件人"} · ${received}`;
+      copy.append(subject, meta); heading.append(checkbox, copy);
+      const attachments = document.createElement("div"); attachments.className = "mail-attachment-chips";
+      (message.attachments || []).forEach((attachment) => {
+        const chip = document.createElement("span"); chip.textContent = `${attachment.name} · ${fileSize(attachment.size || 0)}`; attachments.append(chip);
+      });
+      card.append(heading, attachments); return card;
+    }));
+    updateReimbursementSelection();
+  }
+
+  $("open-mail-settings").onclick = () => { switchView("settings"); $("mail-settings-panel").open = true; $("mail-email-address").focus(); };
+  $("mail-provider").onchange = () => {
+    if ($("mail-provider").value === "custom") $("mail-host").value = "";
+    applyMailProviderPreset(true);
+  };
+  $("mail-email-address").addEventListener("input", () => {
+    if (!$("mail-username").value.trim() || $("mail-username").dataset.auto === "true") {
+      $("mail-username").value = $("mail-email-address").value.trim();
+      $("mail-username").dataset.auto = "true";
+    }
+  });
+  $("mail-username").addEventListener("input", () => { $("mail-username").dataset.auto = "false"; });
+  $("save-mail-settings").onclick = async () => {
+    const button = $("save-mail-settings"); button.disabled = true;
+    $("mail-settings-status").textContent = "正在进行只读登录验证…";
+    try {
+      const response = await api("/api/mail-settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: $("mail-provider").value, email_address: $("mail-email-address").value.trim(),
+          username: $("mail-username").value.trim() || $("mail-email-address").value.trim(),
+          host: $("mail-host").value.trim(), credential: $("mail-credential").value,
+          allow_private_network: $("mail-private-network").checked,
+        }),
+      });
+      model.mail = response; renderMailSettings(true); $("mail-settings-status").textContent = response.message; note(response.message);
+    } catch (error) { $("mail-settings-status").textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+  $("reset-mail-settings").onclick = async () => {
+    if (!await confirmAction({ title: "移除邮箱连接？", message: "本机保存的邮箱授权码会被清除，已导入项目的报销材料不会删除。", confirmText: "移除连接", tone: "danger" })) return;
+    try {
+      const response = await api("/api/mail-settings/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      model.mail = response; reimbursementMailMessages = []; renderReimbursementMailResults([]); renderMailSettings(true); note(response.message);
+    } catch (error) { note(error.message, true); }
+  };
+  $("search-expense-mail").onclick = async () => {
+    const button = $("search-expense-mail"); button.disabled = true; $("expense-mail-status").textContent = "正在只读搜索收件箱…";
+    try {
+      const response = await api("/api/reimbursements/mail/search", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date_from: $("expense-mail-from").value, date_to: $("expense-mail-to").value, query: $("expense-mail-query").value.trim() }),
+      });
+      renderReimbursementMailResults(response.messages);
+      $("expense-mail-status").textContent = `找到 ${response.messages.length} 封含报销附件的邮件${response.skipped_large ? `，另跳过 ${response.skipped_large} 封超大邮件` : ""}。`;
+    } catch (error) { $("expense-mail-status").textContent = error.message; note(error.message, true); }
+    finally { button.disabled = false; }
+  };
+  $("expense-mail-select-all").onchange = () => {
+    const checked = $("expense-mail-select-all").checked;
+    [...$("expense-mail-results").querySelectorAll("input[data-mail-index]")].forEach((checkbox, index) => { checkbox.checked = checked && index < 20; });
+    updateReimbursementSelection();
+  };
+  $("import-expense-mail").onclick = async () => {
+    const selected = selectedReimbursementMessages();
+    if (!selected.length || selected.length > 20) { note("请选择 1–20 封报销邮件。", true); return; }
+    const button = $("import-expense-mail"); button.disabled = true; button.textContent = "正在导入附件…";
+    try {
+      const response = await api("/api/reimbursements/mail/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: $("expense-project").value, selected }),
+      });
+      note(response.message); reimbursementMailMessages = []; renderReimbursementMailResults([]); await load(); switchView("projects");
+    } catch (error) { note(error.message, true); }
+    finally { button.disabled = false; updateReimbursementSelection(); }
   };
 
   const schedulePresets = {
@@ -2310,6 +2465,10 @@
     } catch (error) { note(error.message, true); }
   };
 
+  const reimbursementToday = new Date();
+  const reimbursementStart = new Date(); reimbursementStart.setDate(reimbursementToday.getDate() - 30);
+  $("expense-mail-from").value = formatDate(reimbursementStart);
+  $("expense-mail-to").value = formatDate(reimbursementToday);
   localizeStaticInterface();
   load().catch((error) => note(`无法读取工作台：${error.message}`, true));
   setInterval(() => load().catch(() => {}), 3000);
