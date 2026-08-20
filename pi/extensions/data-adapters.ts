@@ -23,6 +23,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { normalizePublicUrl, openWebSource, readLocalPdf } from "./source-readers.ts";
+import { searchPublicWeb } from "./web-search.ts";
 
 export type AdapterHooks = {
   projectRoot: () => string;
@@ -57,7 +58,6 @@ type CsvTable = {
 
 const MAX_CSV_BYTES = 16 * 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = 2 * 1024 * 1024;
-const MAX_WEB_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_DECK_BYTES = 100 * 1024 * 1024;
 const MAX_WEEKLY_PERIOD_DAYS = 31;
 const MAX_WEEKLY_TASK_FILES = 500;
@@ -1995,58 +1995,28 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): voi
   pi.registerTool({
     name: "director_web_search",
     label: "检索公开网页",
-    description: "通过用户配置的 Brave Search API 检索公开资料；需要 BRAVE_SEARCH_API_KEY，不会回退到非官方网页抓取。",
+    description: "按广泛发现、官方资料、中文政策或近期信息场景检索公开来源。无专用密钥时使用官方免密公共接口；摘要只用于发现，必须继续读取正文核验。",
     parameters: Type.Object({
       queries: Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { minItems: 1, maxItems: 10, uniqueItems: true }),
       count: Type.Optional(Type.Number({ minimum: 1, maximum: 10 })),
       country: Type.Optional(Type.String({ pattern: "^[A-Za-z]{2}$", description: "两位国家代码，例如 CN" })),
       search_lang: Type.Optional(Type.String({ pattern: "^[A-Za-z-]{2,10}$", description: "检索语言，例如 zh-hans" })),
+      mode: Type.Optional(Type.Union([
+        Type.Literal("auto"), Type.Literal("broad"), Type.Literal("official"),
+        Type.Literal("chinese_policy"), Type.Literal("recent"),
+      ], { description: "检索场景：自动、广泛发现、官方/技术资料、中文政策或近期信息" })),
+      site: Type.Optional(Type.String({ minLength: 3, maxLength: 253, description: "可选的公网域名限定，例如 gov.cn" })),
+      published_after: Type.Optional(Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "可选发布日期起点 YYYY-MM-DD" })),
+      published_before: Type.Optional(Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "可选发布日期终点 YYYY-MM-DD" })),
+      snippet_chars: Type.Optional(Type.Number({ minimum: 180, maximum: 1200, description: "每条候选摘要最大字符数" })),
     }),
     async execute(_toolCallId, params) {
       const context = hooks.beforeLogicalTool("web.search", params);
       const allowed = loadEvidence(context).urls;
-      const key = process.env.BRAVE_SEARCH_API_KEY?.trim();
-      if (!key) {
-        throw new Error("公开检索尚未配置。请仅在本机设置 BRAVE_SEARCH_API_KEY 后重试；密钥不得写入仓库。");
+      const result = await searchPublicWeb(params);
+      for (const search of result.searches) {
+        for (const item of search.results) allowed.add(item.url);
       }
-      assertDistinctQueries(params.queries);
-      const searches = [];
-      const totalSignal = AbortSignal.timeout(60_000);
-      for (const configuredQuery of params.queries) {
-        const query = configuredQuery.trim();
-        if (!query || query.length > 400 || query.split(/\s+/u).length > 50) {
-          throw new Error("检索词必须为 1-400 字符且不超过 50 个词");
-        }
-        const endpoint = new URL("https://api.search.brave.com/res/v1/web/search");
-        endpoint.searchParams.set("q", query);
-        endpoint.searchParams.set("count", String(Math.trunc(params.count ?? 10)));
-        if (params.country) endpoint.searchParams.set("country", params.country.toUpperCase());
-        if (params.search_lang) endpoint.searchParams.set("search_lang", params.search_lang.toLowerCase());
-        const response = await fetch(endpoint, {
-          headers: { Accept: "application/json", "X-Subscription-Token": key },
-          signal: totalSignal,
-          redirect: "error",
-        });
-        if (!response.ok) throw new Error(`公开检索失败（HTTP ${response.status}）。请检查 API 配置、配额或网络后重试。`);
-        const length = Number(response.headers.get("Content-Length") ?? "0");
-        if (Number.isFinite(length) && length > MAX_WEB_RESPONSE_BYTES) throw new Error("公开检索响应超过 2 MiB 安全上限");
-        const responseText = await response.text();
-        if (Buffer.byteLength(responseText, "utf8") > MAX_WEB_RESPONSE_BYTES) throw new Error("公开检索响应超过 2 MiB 安全上限");
-        const payload = JSON.parse(responseText) as {
-          web?: { results?: Array<{ title?: unknown; url?: unknown; description?: unknown; age?: unknown }> };
-        };
-        const results = (payload.web?.results ?? []).slice(0, 10).flatMap((item) => {
-          if (typeof item.title !== "string" || typeof item.url !== "string") return [];
-          try {
-            const url = normalizePublicUrl(item.url);
-            const normalizedUrl = url.toString().slice(0, 2048);
-            allowed.add(normalizedUrl);
-            return [{ title: item.title.slice(0, 500), url: normalizedUrl, description: typeof item.description === "string" ? item.description.slice(0, 2000) : "", age: typeof item.age === "string" ? item.age.slice(0, 100) : "" }];
-          } catch { return []; }
-        });
-        searches.push({ query, results });
-      }
-      const result = { provider: "brave", searched_at: new Date().toISOString(), searches };
       saveEvidence(context);
       assertResultSize(result);
       hooks.afterLogicalTool("web.search", params, result);

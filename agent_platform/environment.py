@@ -247,7 +247,8 @@ def doctor_report(
         "core": {"ready": core_ready, "checks": checks},
         "ppt": ppt,
         "optional": {
-            "brave_search_configured": bool(search_settings_summary(root, environ=environment).get("configured")),
+            "public_search_ready": bool(search_settings_summary(root, environ=environment).get("configured")),
+            "brave_search_configured": bool(search_settings_summary(root, environ=environment).get("has_api_key")),
             "local_data_initialized": local_data,
         },
     }

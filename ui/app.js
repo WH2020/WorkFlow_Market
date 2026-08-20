@@ -308,10 +308,13 @@
     panel.classList.toggle("error", settings.status === "error");
     if (settings.status === "error") $("search-current").textContent = `配置异常：${settings.error}`;
     else if (settings.restart_required) $("search-current").textContent = "配置已变更 · 关闭并重新打开应用后生效";
-    else if (ready) $("search-current").textContent = "公开检索服务已就绪 · 政策与行业检索可用";
+    else if (ready && settings.keyless) $("search-current").textContent = "免密公共检索已就绪 · 中文政策与资料发现可用";
+    else if (ready) $("search-current").textContent = "专用公开检索已就绪 · 场景化检索可用";
     else $("search-current").textContent = "尚未配置 · 政策检索和公开调研暂不可用";
     $("public-search-status").textContent = ready
-      ? "公开检索服务已就绪。"
+      ? settings.keyless
+        ? "免密公共检索已就绪；繁忙时可在设置中填写专用密钥。"
+        : "专用公开检索已就绪。"
       : settings.restart_required
         ? "检索密钥已保存，请重启应用后使用。"
         : "公开检索尚未配置，点击后将前往设置。";
@@ -321,7 +324,11 @@
     $("search-api-key").value = "";
     $("search-api-key").placeholder = settings.has_api_key
       ? "已安全保存；留空可重新验证"
-      : "粘贴公开检索接口密钥";
+      : "可选：粘贴专用公开检索接口密钥";
+    $("search-settings-status").textContent = settings.warning
+      || (settings.keyless
+        ? "当前使用免密共享公共额度；填写专用密钥可提高稳定性，正文仍会单独核验。"
+        : "专用密钥只保存在本机；搜索结果仍需读取正文后才能作为证据。");
   }
 
   function publicSearchReady(serviceId, guide = false) {
@@ -1114,7 +1121,7 @@
     if (!publicSearchReady(selectedService, true)) {
       throw new Error(model?.search?.restart_required
         ? "公开检索配置已保存，请关闭并重新打开销售总监智能工作台后再创建该任务。"
-        : "该任务需要公开检索，请先在“设置 > 公开检索”配置公开检索接口密钥。");
+        : "公开检索服务暂不可用，请前往“设置 > 公开检索”查看状态。");
     }
     return api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1430,7 +1437,7 @@
       renderSearchSettings(true);
       $("search-settings-panel").open = true;
       $("search-settings-status").textContent = response.message;
-      note("检索密钥已安全保存；关闭并重新打开销售总监智能工作台后即可重试政策检索。");
+      note("专用检索密钥已安全保存；关闭并重新打开销售总监智能工作台后生效。");
     } catch (error) {
       $("search-settings-status").textContent = error.message;
     } finally { button.disabled = false; }
@@ -1447,7 +1454,7 @@
   };
 
   $("reset-search-settings").onclick = async () => {
-    if (!confirm("删除已保存的公开检索密钥？重启应用后政策检索和公开调研将不可用。")) return;
+    if (!confirm("删除已保存的专用检索密钥？重启应用后会自动切换到免密公共检索。")) return;
     const button = $("reset-search-settings");
     button.disabled = true;
     try {

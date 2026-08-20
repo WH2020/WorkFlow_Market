@@ -71,7 +71,7 @@ python -m agent_platform doctor --require-ppt
 
 每次发起任务前，可以在工作台顶栏选择“本次模型”和“思考强度”。选择会随请求冻结，Pi 在接手任务、发出第一条任务提示前实际切换模型；最终生效的模型和思考等级会写入任务记录并显示在任务卡。模型不支持所选等级时，以 Pi 实际裁剪后的等级为准。历史任务“再次创建”、中断任务“重新开始”和每日定时任务都会保留各自的显式选择；选择“默认”则在每次新任务开始时恢复应用启动时的默认模型与思考等级。
 
-如需公开资料检索，在工作台“设置 > 公开检索”中申请、验证并保存 Brave Search API Key，然后重启应用。Windows 使用当前用户的 DPAPI 加密，macOS 写入系统钥匙串；密钥不会写入任务、日志或 Git。也可继续通过本机环境变量 `BRAVE_SEARCH_API_KEY` 提供密钥。`web.search` 只发现来源，后续 `web.open` 才读取正文；正文读取固定到已核验的公网地址，拒绝重定向、本机/私网地址、危险协议、疑似带密钥 URL 和超限响应，并限制 DNS、连接空闲和总处理时间。[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
+公开资料检索开箱即可使用：未配置密钥时走 Keenable 官方免密公共接口；配置 Brave Search API Key 后，普通和广泛发现任务优先使用专用通道。中文政策、站点限定和日期限定会按场景路由到更合适的检索策略，并统一限制候选数量、摘要长度、总响应体和重复 URL。免密接口使用共享公共额度，繁忙时可稍后重试或在工作台“设置 > 公开检索”填写专用密钥。Windows 使用当前用户的 DPAPI 加密，macOS 写入系统钥匙串；密钥不会写入任务、日志或 Git。`web.search` 的摘要和来源类别只用于发现，后续必须由 `web.open` 读取正文才可作为证据；正文读取继续拒绝重定向、本机/私网地址、危险协议、疑似带密钥 URL 和超限响应。[Keenable 免密接口说明](https://docs.keenable.ai/authentication)，[Brave Search API 配置说明](https://api-dashboard.search.brave.com/documentation/guides/authentication)。
 
 桌面发行版只加载销售总监所需 Skills，包含政府合作能力，不加载产品研发 Skills；旧版邮箱与聊天 Skill 也不会加载。
 
@@ -143,7 +143,7 @@ docs/                             架构、开发和操作说明
 
 行业研究会在受管 DAG 中自动调用“公开研究员”Subagent，政府合作方案会在初稿后自动调用“只读复核员”Subagent。两者均以前台独立 Pi 子进程运行：公开研究员只能使用受控网页检索和正文读取；复核员没有任何工具；二者都不能读取任意本地文件、修改知识库/销售台账、生成正式文件、审批或外发。Subagent 输出只作为主 Agent 的证据或复核意见，所有正式写入和 PPT 仍由主任务在硬 Approval 后执行。Pi Subagent 的通用后台运行、内置定时、Missions 和跨 Agent 通信默认关闭；工作台的每日任务只负责按时创建同一受管请求。
 
-它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器或企业母版自动解析。公开研究需要用户配置 Brave Search API；任何正文、PDF 与 Subagent 输出都视为不可信资料，不能越过现有来源校验和人工审批。
+它仍不是无人值守或生产级编排平台：没有云端多租户、跨表数据库事务、自动外发、通用 Word/Excel 文件适配器或企业母版自动解析。免密公开检索依赖第三方共享额度，不承诺持续可用；任何搜索摘要、正文、PDF 与 Subagent 输出都视为不可信资料，不能越过现有来源校验和人工审批。
 
 本地 PDF 只从 `inputs/` 或 `data/inbox/` 读取明确文件，两处目录默认被 Git 忽略。随包安装的 PDF.js 和本地受限文本层兜底都在独立子进程中运行，限制为 45 秒和 256 MiB；不可靠兜底结果只能保持 `pending`，在线 PDF 不执行兜底。周报和 PPT 工作室都先形成可审阅的 plan/精确载荷并等待 Approval，批准后才用 PptxGenJS 构建，在 task/intent 私有目录调用 LibreOffice、PDF.js 和本地 QA 完成逐页渲染、来源备注、文本容量、边界与重叠检查，最后独占提交到 `outputs/`。缺少依赖时工作流会停在确定性工具节点，不会把结构化文本伪装成 PPT。
 

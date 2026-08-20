@@ -91,14 +91,28 @@ class SearchProviderTests(unittest.TestCase):
         summary = search_settings_summary(self.root, environ={API_KEY_ENV: "environment-secret"})
         self.assertTrue(summary["configured"])
         self.assertEqual(summary["source"], "environment")
+        self.assertFalse(summary["keyless"])
+        self.assertEqual(summary["provider_id"], "brave-search")
         self.assertNotIn("environment-secret", json.dumps(summary))
         self.assertEqual(search_runtime_environment(self.root, environ={API_KEY_ENV: "environment-secret"}), {})
+
+    def test_no_key_uses_the_keyless_public_pool_without_setup(self):
+        summary = search_settings_summary(self.root, environ={})
+        self.assertTrue(summary["configured"])
+        self.assertEqual(summary["status"], "configured")
+        self.assertTrue(summary["keyless"])
+        self.assertTrue(summary["shared_public_pool"])
+        self.assertEqual(summary["provider_id"], "keenable-public")
+        self.assertEqual(summary["source"], "public_pool")
+        self.assertEqual(search_runtime_environment(self.root, environ={}), {})
 
     def test_clear_removes_secret_and_requires_runtime_restart(self):
         save_search_secret(self.root, "temporary-key", system_name="linux")
         summary = clear_search_provider(self.root)
         self.assertFalse(secret_path(self.root).exists())
-        self.assertFalse(summary["configured"])
+        self.assertTrue(summary["configured"])
+        self.assertTrue(summary["keyless"])
+        self.assertEqual(summary["provider_id"], "keenable-public")
         self.assertTrue(summary["restart_required"])
 
 

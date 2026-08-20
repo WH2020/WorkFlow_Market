@@ -13,7 +13,7 @@ description: 规划市场总监或产品总监的行业、政府、管理和自�
 
 ## 证据与规划顺序
 
-1. 公开资料必须先经 `director_web_search` 发现，再由 `director_web_open` 读取正文；随后调用 `director_knowledge_search` 补充当前 Profile 可读的内部来源。不要把内部资料拼入外部检索词。
+1. 公开资料必须先经 `director_web_search` 发现：行业扫描使用 `broad`/`recent`，技术标准和论文使用 `official`，中国政策与政府项目使用 `chinese_policy`；通常每个查询只取 5–8 条、摘要不超过 600 字。再由 `director_web_open` 读取正文，随后调用 `director_knowledge_search` 补充当前 Profile 可读的内部来源。不要把内部资料拼入外部检索词；搜索摘要和来源类别提示都不能直接进入事实页。
 2. 将外部事实、分析判断、假设和未知分开。事实必须引用当前任务证据 registry 的 `source_id`；分析与假设要明确标记，不能伪装成检索结果。
 3. `propose_outline` 只组织 4–10 张便利贴，每页一个结论式标题。调用 `director_presentation_plan_write` 保存 `phase=outline`，再完成节点并停在大纲 Approval。
 4. 用户确认后生成逐页策划。每页包含受众所得、事实及证据、分析、假设、未知、版面意图、讲者备注、风险提示和与正式渲染一一对应的 `render`。

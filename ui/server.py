@@ -1506,7 +1506,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if service_id in PUBLIC_SEARCH_SERVICES:
             search = search_settings_summary(ROOT)
             if search.get("status") != "configured":
-                raise ValueError("该任务需要公开检索；请先在“设置 > 公开检索”配置公开检索接口密钥")
+                raise ValueError("该任务需要公开检索；请前往“设置 > 公开检索”查看服务状态")
             if search.get("restart_required"):
                 raise ValueError("公开检索密钥已保存，但智能核心尚未加载；请关闭并重新打开销售总监智能工作台后重试")
         if service_id in {"presentation-studio", "weekly-deck"}:

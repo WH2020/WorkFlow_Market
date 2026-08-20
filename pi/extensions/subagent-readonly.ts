@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { normalizePublicUrl, openWebSource } from "./source-readers.ts";
+import { assertSafePublicQuery, searchPublicWeb } from "./web-search.ts";
 import {
   loadGovernedSubagentContract,
   recordGovernedSearchUrls,
@@ -17,23 +18,7 @@ function resultContent(value: unknown) {
   return [{ type: "text" as const, text }];
 }
 
-export function assertSafePublicQueryForTests(value: string): string {
-  const query = value.trim();
-  if (!query || query.length > 400 || query.split(/\s+/u).length > 50) {
-    throw new Error("公开检索词必须为 1-400 字符且不超过 50 个词");
-  }
-  const forbidden = [
-    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
-    /(?<!\d)1[3-9]\d{9}(?!\d)/u,
-    /(?<!\d)\d{17}[\dXx](?!\d)/u,
-    /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}\b/u,
-    /(?:api[_ -]?key|access[_ -]?token|password|passwd|secret)\s*[:=]\s*\S+/iu,
-  ];
-  if (forbidden.some((pattern) => pattern.test(query))) {
-    throw new Error("公开检索词疑似包含账号、密钥或个人敏感信息，已拒绝发送");
-  }
-  return query;
-}
+export const assertSafePublicQueryForTests = assertSafePublicQuery;
 
 function requireContract(projectRoot: string, contractId: string, logicalTool: "web.search" | "web.open") {
   const contract = loadGovernedSubagentContract(projectRoot, contractId);
@@ -49,61 +34,28 @@ export default function governedReadonlySubagent(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "director_child_web_search",
     label: "Subagent 公开检索",
-    description: "仅供受管只读研究 Subagent 使用。按 contract_id 检索公开来源并登记可读取 URL。",
+    description: "仅供受管只读研究 Subagent 使用。按场景检索公开来源并登记可读取 URL；候选摘要不能替代正文证据。",
     parameters: Type.Object({
       contract_id: Type.String({ pattern: SAFE_CONTRACT_ID }),
       queries: Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { minItems: 1, maxItems: 6, uniqueItems: true }),
       count: Type.Optional(Type.Number({ minimum: 1, maximum: 8 })),
       country: Type.Optional(Type.String({ pattern: "^[A-Za-z]{2}$" })),
       search_lang: Type.Optional(Type.String({ pattern: "^[A-Za-z-]{2,10}$" })),
+      mode: Type.Optional(Type.Union([
+        Type.Literal("auto"), Type.Literal("broad"), Type.Literal("official"),
+        Type.Literal("chinese_policy"), Type.Literal("recent"),
+      ])),
+      site: Type.Optional(Type.String({ minLength: 3, maxLength: 253 })),
+      published_after: Type.Optional(Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })),
+      published_before: Type.Optional(Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })),
+      snippet_chars: Type.Optional(Type.Number({ minimum: 180, maximum: 1200 })),
     }),
     async execute(_toolCallId, params) {
       requireContract(projectRoot, params.contract_id, "web.search");
-      const key = process.env.BRAVE_SEARCH_API_KEY?.trim();
-      if (!key) throw new Error("公开检索尚未配置 BRAVE_SEARCH_API_KEY");
-      const queries = params.queries.map(assertSafePublicQueryForTests);
-      if (new Set(queries).size !== queries.length) throw new Error("同一批公开检索不能包含重复词");
-      const searches = [];
-      const registeredUrls: string[] = [];
-      const totalSignal = AbortSignal.timeout(60_000);
-      for (const query of queries) {
-        const endpoint = new URL("https://api.search.brave.com/res/v1/web/search");
-        endpoint.searchParams.set("q", query);
-        endpoint.searchParams.set("count", String(Math.trunc(params.count ?? 8)));
-        if (params.country) endpoint.searchParams.set("country", params.country.toUpperCase());
-        if (params.search_lang) endpoint.searchParams.set("search_lang", params.search_lang.toLowerCase());
-        const response = await fetch(endpoint, {
-          headers: { Accept: "application/json", "X-Subscription-Token": key },
-          signal: totalSignal,
-          redirect: "error",
-        });
-        if (!response.ok) throw new Error(`公开检索失败（HTTP ${response.status}）`);
-        const declared = Number(response.headers.get("Content-Length") ?? "0");
-        if (Number.isFinite(declared) && declared > MAX_WEB_RESPONSE_BYTES) throw new Error("公开检索响应超过 2 MiB");
-        const body = await response.text();
-        if (Buffer.byteLength(body, "utf8") > MAX_WEB_RESPONSE_BYTES) throw new Error("公开检索响应超过 2 MiB");
-        const payload = JSON.parse(body) as {
-          web?: { results?: Array<{ title?: unknown; url?: unknown; description?: unknown; age?: unknown }> };
-        };
-        const results = (payload.web?.results ?? []).slice(0, 8).flatMap((item) => {
-          if (typeof item.title !== "string" || typeof item.url !== "string") return [];
-          try {
-            const url = normalizePublicUrl(item.url).toString().slice(0, 2048);
-            registeredUrls.push(url);
-            return [{
-              title: item.title.slice(0, 500),
-              url,
-              description: typeof item.description === "string" ? item.description.slice(0, 2000) : "",
-              age: typeof item.age === "string" ? item.age.slice(0, 100) : "",
-            }];
-          } catch {
-            return [];
-          }
-        });
-        searches.push({ query, results });
-      }
+      const { contract_id: _contractId, ...searchParams } = params;
+      const result = await searchPublicWeb(searchParams);
+      const registeredUrls = result.searches.flatMap((search) => search.results.map((item) => item.url));
       recordGovernedSearchUrls(projectRoot, params.contract_id, registeredUrls);
-      const result = { provider: "brave", searched_at: new Date().toISOString(), searches };
       return { content: resultContent(result), details: result };
     },
   });
@@ -158,4 +110,3 @@ export default function governedReadonlySubagent(pi: ExtensionAPI): void {
     },
   });
 }
-

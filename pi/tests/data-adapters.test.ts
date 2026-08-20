@@ -205,39 +205,70 @@ test("schema drift and duplicate stable IDs are rejected before any write", asyn
   }
 });
 
-test("web adapter requires explicit configuration and returns only safe result fields", async () => {
+test("web adapter uses keyless scene routing, protects queries and keeps discovery fields bounded", async () => {
   const state = fixture();
   const originalKey = process.env.BRAVE_SEARCH_API_KEY;
+  const originalProvider = process.env.DIRECTOR_SEARCH_PROVIDER;
   const originalFetch = globalThis.fetch;
   try {
     const search = state.tools.get("director_web_search")!;
     delete process.env.BRAVE_SEARCH_API_KEY;
-    await assert.rejects(() => search.execute("missing", { queries: ["具身智能"] }), /尚未配置/);
-    process.env.BRAVE_SEARCH_API_KEY = "test-key";
+    delete process.env.DIRECTOR_SEARCH_PROVIDER;
     globalThis.fetch = (async (input, init) => {
-      assert.match(String(input), /api\.search\.brave\.com/);
-      assert.equal((init?.headers as Record<string, string>)["X-Subscription-Token"], "test-key");
+      assert.match(String(input), /api\.keenable\.ai\/v1\/search\/public/);
+      assert.equal(init?.method, "POST");
+      assert.equal((init?.headers as Record<string, string>)["X-Keenable-Title"], "Agent4Market");
       assert.equal(init?.redirect, "error");
+      const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      assert.equal(request.mode, "pro");
+      assert.equal(request.site, "gov.cn");
+      assert.equal(request.snippet_max_length, 180);
       return new Response(
         JSON.stringify({
-          web: { results: [
-            { title: "公开来源", url: "https://example.test/report", description: "摘要", age: "1 day ago", extra: "drop" },
+          results: [
+            { title: "普通来源", url: "https://example.test/report", snippet: "A".repeat(300), extra: "drop" },
+            { title: "政府来源", url: "https://www.gov.cn/policy", snippet: "政策摘要", published_at: "2026-08-01T00:00:00Z" },
             { title: "带签名来源", url: "https://example.test/private?X-Amz-Signature=secret" },
             { title: "危险协议", url: "javascript:alert(1)" },
-          ] },
+          ],
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }) as typeof fetch;
-    const result = (await search.execute("configured", { queries: ["具身智能"], count: 5, country: "CN" })) as {
+    const keyless = (await search.execute("keyless", {
+      queries: ["具身智能政策"], count: 5, mode: "chinese_policy", site: "gov.cn", snippet_chars: 180,
+    })) as {
       details: { provider: string; searches: Array<{ results: Array<Record<string, string>> }> };
     };
-    assert.equal(result.details.provider, "brave");
-    assert.equal(result.details.searches[0].results.length, 1);
-    assert.deepEqual(Object.keys(result.details.searches[0].results[0]).sort(), ["age", "description", "title", "url"]);
+    assert.equal(keyless.details.provider, "keenable-public");
+    assert.equal(keyless.details.searches[0].results.length, 2);
+    assert.equal(keyless.details.searches[0].results[0].source_category_hint, "government");
+    assert.equal(keyless.details.searches[0].results[1].description.length, 180);
+    await assert.rejects(
+      () => search.execute("sensitive", { queries: ["客户邮箱 test@example.com 的项目"] }),
+      /敏感信息/,
+    );
+
+    process.env.BRAVE_SEARCH_API_KEY = "test-key";
+    globalThis.fetch = (async (input, init) => {
+      assert.match(String(input), /api\.search\.brave\.com/);
+      assert.equal((init?.headers as Record<string, string>)["X-Subscription-Token"], "test-key");
+      return new Response(JSON.stringify({ web: { results: [
+        { title: "公开来源", url: "https://example.test/brave", description: "摘要", age: "1 day ago" },
+      ] } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+    const dedicated = (await search.execute("dedicated", { queries: ["具身智能"], mode: "broad" })) as {
+      details: { provider: string; searches: Array<{ results: Array<Record<string, string>> }> };
+    };
+    assert.equal(dedicated.details.provider, "brave");
+    assert.deepEqual(Object.keys(dedicated.details.searches[0].results[0]).sort(), [
+      "age", "description", "source_category_hint", "title", "url",
+    ]);
   } finally {
     if (originalKey === undefined) delete process.env.BRAVE_SEARCH_API_KEY;
     else process.env.BRAVE_SEARCH_API_KEY = originalKey;
+    if (originalProvider === undefined) delete process.env.DIRECTOR_SEARCH_PROVIDER;
+    else process.env.DIRECTOR_SEARCH_PROVIDER = originalProvider;
     globalThis.fetch = originalFetch;
     state.cleanup();
   }
@@ -265,7 +296,7 @@ test("web open only accepts discovered or user-provided public URLs and strips e
         { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } },
       );
     });
-    await state.tools.get("director_web_search")!.execute("discover", { queries: ["政策"] });
+    await state.tools.get("director_web_search")!.execute("discover", { queries: ["政策"], mode: "broad" });
     const opened = await state.tools.get("director_web_open")!.execute("open", {
       items: [{ url: "https://93.184.216.34/report" }], max_chars: 5000,
     }) as { details: { sources: Array<Record<string, unknown>> } };

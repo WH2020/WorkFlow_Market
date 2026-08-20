@@ -18,6 +18,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 PROVIDER_ID = "brave-search"
+KEYLESS_PROVIDER_ID = "keenable-public"
 API_KEY_ENV = "BRAVE_SEARCH_API_KEY"
 SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 MAX_RESPONSE_BYTES = 1024 * 1024
@@ -273,20 +274,27 @@ def search_settings_summary(
     root = Path(project_root).resolve()
     environment = os.environ if environ is None else environ
     environment_key = environment.get(API_KEY_ENV, "").strip()
+    stored_key: str | None = None
+    record: dict[str, Any] = {}
+    warning: str | None = None
     try:
-        stored_key = load_search_secret(root)
-        record = _read_record(secret_path(root)) if stored_key else {}
+        if not environment_key:
+            stored_key = load_search_secret(root)
+            record = _read_record(secret_path(root)) if stored_key else {}
     except SearchProviderError as error:
-        return {"configured": False, "status": "error", "provider_id": PROVIDER_ID, "error": str(error)}
-    configured = bool(environment_key or stored_key)
+        warning = f"专用检索密钥不可用，已切换到免密公共检索：{error}"
+    has_api_key = bool(environment_key or stored_key)
     return {
-        "configured": configured,
-        "status": "configured" if configured else "unconfigured",
-        "provider_id": PROVIDER_ID,
-        "source": "environment" if environment_key else "secure_store" if stored_key else None,
-        "has_api_key": configured,
+        "configured": True,
+        "status": "configured",
+        "provider_id": PROVIDER_ID if has_api_key else KEYLESS_PROVIDER_ID,
+        "source": "environment" if environment_key else "secure_store" if stored_key else "public_pool",
+        "has_api_key": has_api_key,
+        "keyless": not has_api_key,
+        "shared_public_pool": not has_api_key,
         "restart_required": restart_flag_path(root).is_file(),
         "updated_at": record.get("updated_at"),
+        **({"warning": warning} if warning else {}),
     }
 
 
