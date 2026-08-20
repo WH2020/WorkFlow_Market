@@ -1387,7 +1387,18 @@
     return data;
   }
 
-  [$("home-upload"), $("project-upload")].forEach((button) => { button.onclick = () => $("project-file-input").click(); });
+  [$("home-upload"), $("project-upload"), $("project-quick-upload")].forEach((button) => { button.onclick = () => $("project-file-input").click(); });
+  $("open-data-directory").onclick = async () => {
+    const button = $("open-data-directory");
+    button.disabled = true;
+    try {
+      const response = await api("/api/data-directory/open", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      note(response.message);
+    } catch (error) { note(error.message, true); }
+    finally { button.disabled = false; }
+  };
   $("project-file-input").onchange = async () => {
     const file = $("project-file-input").files?.[0];
     try { const reply = await uploadProjectFile(file); note(reply.message); await load(); switchView("projects"); }

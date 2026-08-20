@@ -142,6 +142,9 @@ class ControlCentreTests(unittest.TestCase):
         for view in ("home", "projects", "schedules", "search"):
             self.assertIn(f'data-page="{view}"', html)
         self.assertIn('id="project-file-input"', html)
+        self.assertIn('id="project-quick-upload"', html)
+        self.assertIn('id="open-data-directory"', html)
+        self.assertIn('api("/api/data-directory/open"', javascript)
         self.assertIn('id="quick-command"', html)
         self.assertIn('id="schedule-request"', html)
         self.assertIn('id="search-query"', html)
@@ -169,6 +172,19 @@ class ControlCentreTests(unittest.TestCase):
             "task_id": "task-old", "profile_id": "sales-director", "status": "requested",
         })
         self.assertEqual(server.task_summaries()[0]["project_id"], server.DEFAULT_PROJECT_ID)
+
+    def test_open_data_directory_uses_only_the_fixed_application_data_path(self):
+        root = Path(self.temporary.name)
+        data = root / "data"
+        with (
+            patch.object(server, "ROOT", root),
+            patch.object(server, "DATA", data),
+            patch.object(server.sys, "platform", "win32"),
+            patch.object(server.os, "startfile", create=True) as startfile,
+        ):
+            opened = server.open_data_directory()
+        self.assertEqual(opened, data.resolve())
+        startfile.assert_called_once_with(str(data.resolve()))
 
     def test_task_request_accepts_only_a_configured_model_and_thinking_level(self):
         handler = server.ControlHandler.__new__(server.ControlHandler)

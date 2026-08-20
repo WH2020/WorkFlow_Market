@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import subprocess
 import sys
 import tempfile
 import threading
@@ -64,6 +65,7 @@ PROFILES = ROOT / "profiles"
 PLUGINS = ROOT / "vertical_plugins"
 OUTPUTS = ROOT / "outputs"
 INPUTS = ROOT / "inputs"
+DATA = ROOT / "data"
 PROJECTS = RUNTIME / "projects.json"
 SCHEDULES = RUNTIME / "schedules.json"
 AGENT_LEASES = RUNTIME / "agent-leases"
@@ -325,6 +327,35 @@ def desktop_runtime_summary() -> dict[str, Any]:
         "window_mode": "visible" if settings["show_ai_core_window"] else "embedded",
         "log_tail": ai_core_log_tail(),
     }
+
+
+def open_data_directory() -> Path:
+    if DATA.is_symlink():
+        raise ValueError("本地数据目录不能是符号链接")
+    DATA.mkdir(parents=True, exist_ok=True)
+    root = ROOT.resolve()
+    directory = DATA.resolve()
+    if not directory.is_relative_to(root) or directory == root:
+        raise ValueError("本地数据目录越出应用安装范围")
+    try:
+        if sys.platform == "win32":
+            startfile = getattr(os, "startfile", None)
+            if startfile is None:
+                raise OSError("Windows 文件资源管理器不可用")
+            startfile(str(directory))
+        elif sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", str(directory)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, start_new_session=True,
+            )
+        else:
+            subprocess.Popen(
+                ["xdg-open", str(directory)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, start_new_session=True,
+            )
+    except OSError as error:
+        raise RuntimeError(f"无法打开本地数据目录：{error}") from error
+    return directory
 
 
 def task_display_state(task: dict[str, Any], leases: dict[str, dict[str, Any]] | None = None) -> tuple[str, str]:
@@ -1430,6 +1461,11 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 if not webbrowser.open(base_url, new=2):
                     raise RuntimeError("无法打开系统浏览器；请手动访问 One Search 网关地址")
                 self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开 One Search。"})
+            elif route == "/api/data-directory/open":
+                directory = open_data_directory()
+                self.send_json(HTTPStatus.OK, {
+                    "message": "已打开本地数据目录。", "path": str(directory),
+                })
             elif route == "/api/desktop-settings":
                 self.send_json(HTTPStatus.OK, {
                     **save_desktop_settings(payload),
