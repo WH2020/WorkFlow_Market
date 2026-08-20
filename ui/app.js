@@ -803,7 +803,10 @@
     const edit = document.createElement("button");
     edit.type = "button";
     edit.textContent = "编辑";
-    edit.disabled = Boolean(task.approval_request);
+    const editableShape = mutation?.changes && typeof mutation.changes === "object"
+      && Object.values(mutation.changes).every((value) => typeof value === "string");
+    edit.disabled = Boolean(task.approval_request) || !editableShape;
+    if (!editableShape) edit.title = "这是旧版异常卡片，只能删除或结束任务后重新生成";
     edit.addEventListener("click", () => openWriteCardEditor(task, payload, mutation));
     const remove = document.createElement("button");
     remove.type = "button";

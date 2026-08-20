@@ -669,10 +669,14 @@ def revised_write_payload(
         if not isinstance(mutation, dict):
             raise ValueError("待写入卡片结构无效")
         candidate_id = mutation.get("record_id")
-        if not isinstance(candidate_id, str) or candidate_id in seen:
+        if (
+            not isinstance(candidate_id, str) or not candidate_id.strip() or len(candidate_id) > 128
+            or any(character in candidate_id for character in "\x00\r\n") or candidate_id in seen
+        ):
             raise ValueError("待写入卡片编号无效或重复")
         seen.add(candidate_id)
-        _validate_write_mutation_changes(logical_tool, revised, mutation)
+        if operation == "edit" and candidate_id == record_id:
+            _validate_write_mutation_changes(logical_tool, revised, mutation)
     canonical = canonical_plan_json(revised)
     if len(canonical.encode("utf-8")) > 256 * 1024:
         raise ValueError("修改后的待写入内容超过 256 KiB 上限")

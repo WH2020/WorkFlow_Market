@@ -250,6 +250,21 @@ class ControlCentreTests(unittest.TestCase):
         self.assertEqual(stored["approval_request"]["decision"], "reject")
         self.assertNotIn("revised_payload", stored["approval_request"])
 
+    def test_legacy_nonstandard_cards_can_be_removed_but_not_edited(self):
+        payload = {
+            "mutations": [
+                {"operation": "insert", "record_id": "legacy-a", "changes": {"title": "旧卡片甲", "key_facts": ["旧字段"]}},
+                {"operation": "insert", "record_id": "legacy-b", "changes": {"title": "旧卡片乙", "key_facts": ["旧字段"]}},
+            ],
+        }
+        revised = server.revised_write_payload("knowledge.write", payload, "remove", "legacy-a", None)
+        self.assertEqual([item["record_id"] for item in revised["mutations"]], ["legacy-b"])
+        with self.assertRaisesRegex(ValueError, "key_facts"):
+            server.revised_write_payload(
+                "knowledge.write", payload, "edit", "legacy-a",
+                {"title": "试图编辑", "key_facts": ["仍是旧字段"]},
+            )
+
     def test_project_space_is_created_and_task_summaries_default_to_general_project(self):
         project = server.create_project_record({"name": "江苏客户项目", "description": "试点机会"})
         self.assertEqual(project["status"], "active")

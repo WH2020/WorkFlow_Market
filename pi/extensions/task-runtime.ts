@@ -450,7 +450,7 @@ export function proposeWriteIntent(
 type EditableMutation = {
   operation: "insert" | "update";
   record_id: string;
-  changes: Record<string, string>;
+  changes: Record<string, unknown>;
   expected_version?: string;
 };
 
@@ -479,16 +479,19 @@ function editableMutations(payload: unknown, label: string): EditableMutation[] 
     }
     if (seen.has(mutation.record_id)) throw new TaskTransitionError(`${label} contains duplicate record IDs`);
     seen.add(mutation.record_id);
-    for (const [field, fieldValue] of Object.entries(mutation.changes as Record<string, unknown>)) {
-      if (!/^[A-Za-z0-9_]{1,128}$/u.test(field) || typeof fieldValue !== "string" || fieldValue.length > 10_000) {
-        throw new TaskTransitionError(`${label} contains an invalid editable field`);
-      }
-      if (/^[\t\r]/u.test(fieldValue) || /^\s*[=+\-@]/u.test(fieldValue)) {
-        throw new TaskTransitionError(`${label} contains a spreadsheet formula prefix`);
-      }
-    }
     return mutation as unknown as EditableMutation;
   });
+}
+
+function assertEditableChanges(changes: Record<string, unknown>, label: string): void {
+  for (const [field, fieldValue] of Object.entries(changes)) {
+    if (!/^[A-Za-z0-9_]{1,128}$/u.test(field) || typeof fieldValue !== "string" || fieldValue.length > 10_000) {
+      throw new TaskTransitionError(`${label} contains an invalid editable field`);
+    }
+    if (/^[\t\r]/u.test(fieldValue) || /^\s*[=+\-@]/u.test(fieldValue)) {
+      throw new TaskTransitionError(`${label} contains a spreadsheet formula prefix`);
+    }
+  }
 }
 
 export function revisePreparedWriteIntent(
@@ -525,12 +528,18 @@ export function revisePreparedWriteIntent(
   const currentById = new Map(currentMutations.map((mutation) => [mutation.record_id, mutation]));
   for (const mutation of revisedMutations) {
     const previous = currentById.get(mutation.record_id);
+    const previousContract = previous ? { ...previous } as Record<string, unknown> : undefined;
+    const revisedContract = { ...mutation } as Record<string, unknown>;
+    if (previousContract) delete previousContract.changes;
+    delete revisedContract.changes;
     if (
       !previous ||
-      previous.operation !== mutation.operation ||
-      previous.expected_version !== mutation.expected_version
+      canonicalJson(previousContract) !== canonicalJson(revisedContract)
     ) {
       throw new TaskTransitionError("A card revision cannot add records or change their identity/version contract");
+    }
+    if (canonicalJson(previous.changes) !== canonicalJson(mutation.changes)) {
+      assertEditableChanges(mutation.changes, "Revised payload");
     }
   }
   const canonical = canonicalJson(revisedPayload);

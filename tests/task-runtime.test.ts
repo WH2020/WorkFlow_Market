@@ -280,6 +280,27 @@ test("card revisions cannot add records or change a mutation identity", () => {
   );
 });
 
+test("legacy malformed cards may be removed without making their remaining fields user-editable", () => {
+  const legacyPayload = {
+    mutations: [
+      { operation: "insert", record_id: "legacy-a", changes: { title: "旧卡片甲", key_facts: ["旧字段"] } },
+      { operation: "insert", record_id: "legacy-b", changes: { title: "旧卡片乙", key_facts: ["旧字段"] } },
+    ],
+  };
+  let task = start();
+  task = completeModelNode(task, linearWorkflow, "draft", task.version);
+  task = proposeWriteIntent(task, linearWorkflow, "knowledge.write", legacyPayload, task.version);
+  task = completeModelNode(task, linearWorkflow, "validate", task.version);
+  const revised = revisePreparedWriteIntent(task, { mutations: [legacyPayload.mutations[1]] }, task.version);
+  assert.equal(JSON.parse(revised.pending_write!.canonical_payload).mutations.length, 1);
+  assert.throws(
+    () => revisePreparedWriteIntent(task, {
+      mutations: [{ ...legacyPayload.mutations[0], changes: { title: "试图编辑", key_facts: ["仍是旧字段"] } }],
+    }, task.version),
+    /invalid editable field/,
+  );
+});
+
 test("approval is bound to the exact frozen batch and commit can roll back safely", () => {
   const waiting = readyForApproval();
   const approved = approveNode(waiting, linearWorkflow, "approve", waiting.version);
