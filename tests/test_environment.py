@@ -26,6 +26,8 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("Microsoft\\WinGet\\Packages", windows)
         self.assertIn("desktop-launcher.log", desktop_build)
         self.assertIn('env("PYTHONUTF8", "1")', desktop_source)
+        self.assertIn('env("PYTHONUNBUFFERED", "1")', desktop_source)
+        self.assertIn("Duration::from_secs(60)", desktop_source)
         self.assertIn('const PROFILE_ID: &str = "sales-director"', desktop_source)
         self.assertNotIn("OpenBrowser", desktop_source)
 

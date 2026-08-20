@@ -240,6 +240,7 @@ fn start_workbench(root: &Path) -> Result<Child, String> {
         .current_dir(root)
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUNBUFFERED", "1")
         .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
         .stdout(Stdio::from(output))
         .stderr(Stdio::from(error));
@@ -251,7 +252,9 @@ fn start_workbench(root: &Path) -> Result<Child, String> {
 }
 
 fn wait_for_workbench(child: &mut Child) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // A clean macOS install can spend tens of seconds warming Python and the
+    // local package cache.  Treat that as startup latency, not a crash.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         if workbench_healthy() {
             return true;
