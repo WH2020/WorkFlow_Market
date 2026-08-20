@@ -17,6 +17,7 @@
   const guidedNotes = {};
   const taskMessageDrafts = {};
   const taskProgressScroll = {};
+  const taskWriteIntentState = {};
   const taskCardExpansion = new Map();
   const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
 
@@ -636,6 +637,118 @@
     try { const value = JSON.parse(text); return value && typeof value === "object" ? value : null; } catch { return null; }
   }
 
+  const writeFieldLabels = {
+    title: "资料标题", publisher: "发布机构", published_date: "发布日期", accessed_date: "读取日期",
+    region: "地区", topic: "主题", source_type: "资料类型", quality: "来源质量",
+    exposure_status: "访问方式", status: "核验状态", key_facts: "主要事实",
+    interpretation: "分析说明", limitations: "限制与提醒", url: "来源链接",
+    customer_name: "客户名称", customer_id: "客户编号", sector: "行业",
+    owner: "负责人", stage: "销售阶段", health: "机会健康度", key_contact: "关键联系人",
+    decision_maker: "决策人", budget_path: "预算路径", next_action: "下一步行动",
+    next_action_due: "行动截止日期", last_evidence_date: "最近证据日期", risks: "风险",
+    occurred_at: "发生时间", channel: "沟通渠道", activity_type: "活动类型", summary: "沟通摘要",
+    commitment: "承诺事项", requested_at: "申请时间", resource_type: "资源类型",
+    request_summary: "资源需求", business_reason: "业务原因", deadline: "截止日期",
+    decision: "处理决定", decision_reason: "决定说明", asset_type: "资料类型", audience_role: "使用对象",
+    sales_stage: "适用销售阶段", use_case: "使用场景", scope: "适用范围", version: "版本",
+    authorization_status: "授权状态", deidentification_status: "脱敏状态", usage_feedback: "使用反馈",
+  };
+
+  const writeValueLabels = {
+    verified: "已核验", pending: "待核验", superseded: "已被新版本替代",
+    active: "启用", draft: "草稿", insert: "新增", update: "修改",
+  };
+
+  function readableWriteValue(field, value) {
+    const text = String(value ?? "").trim();
+    if (!text) return "未填写";
+    return field === "status" || field.endsWith("_status") ? (writeValueLabels[text] || text) : text;
+  }
+
+  function appendWriteField(box, field, value) {
+    const text = String(value ?? "").trim();
+    if (!text) return;
+    const row = document.createElement("div");
+    row.className = `write-review-field ${field === "limitations" ? "warning" : ""}`;
+    const label = document.createElement("strong");
+    label.textContent = writeFieldLabels[field] || field.replaceAll("_", " ");
+    const content = document.createElement(field === "url" ? "a" : "span");
+    content.textContent = readableWriteValue(field, text);
+    if (field === "url") {
+      try {
+        const url = new URL(text);
+        if (url.protocol === "http:" || url.protocol === "https:") {
+          content.href = url.toString();
+          content.target = "_blank";
+          content.rel = "noopener noreferrer";
+        }
+      } catch { /* Keep an invalid historic value as plain text. */ }
+    }
+    row.append(label, content);
+    box.append(row);
+  }
+
+  function writeIntentCounts(mutations) {
+    const inserts = mutations.filter((item) => item?.operation === "insert").length;
+    const updates = mutations.filter((item) => item?.operation === "update").length;
+    return [inserts ? `新增 ${inserts} 条` : "", updates ? `修改 ${updates} 条` : ""].filter(Boolean).join("、");
+  }
+
+  function renderWriteIntentReview(wrapper, task, parsedPayload, presentationRendered) {
+    const review = document.createElement("section");
+    review.className = "write-review";
+    const heading = document.createElement("h3");
+    heading.textContent = "确认后会发生什么";
+    const intro = document.createElement("p");
+    const mutations = Array.isArray(parsedPayload?.mutations) ? parsedPayload.mutations : [];
+    if (task.pending_write.logical_tool === "knowledge.write") {
+      intro.textContent = `将向知识库${writeIntentCounts(mutations) || "写入以下内容"}。正式写入前，你可以逐条核对来源、事实和限制。`;
+    } else if (task.pending_write.logical_tool === "sales.write") {
+      const tableLabels = { customers: "客户台账", activities: "客户活动记录", resource_requests: "资源申请", sales_assets: "销售资料库" };
+      intro.textContent = `将更新${tableLabels[parsedPayload?.table] || "销售台账"}：${writeIntentCounts(mutations) || "写入以下内容"}。`;
+    } else if (task.pending_write.logical_tool === "artifact.deck.write") {
+      intro.textContent = `将生成演示文稿“${parsedPayload?.output_name || "未命名演示文稿"}”。上方大纲和逐页内容就是本次审批范围。`;
+    } else {
+      intro.textContent = presentationRendered ? "上方演示方案就是本次待确认内容。" : "确认后将按下列内容执行受控写入。";
+    }
+    review.append(heading, intro);
+
+    if (mutations.length) {
+      const cards = document.createElement("div");
+      cards.className = "write-review-cards";
+      const stateKey = `${task.task_id}:${task.pending_write.payload_sha256}`;
+      const saved = taskWriteIntentState[stateKey] || (taskWriteIntentState[stateKey] = {});
+      cards.addEventListener("scroll", () => { saved.reviewTop = cards.scrollTop; }, { passive: true });
+      const knowledgeFields = [
+        "publisher", "published_date", "accessed_date", "region", "topic", "source_type", "quality",
+        "status", "key_facts", "interpretation", "limitations", "url",
+      ];
+      const ignoredFields = new Set(["source_id", "activity_id", "request_id", "asset_id", "updated_at", "created_at", "notes"]);
+      mutations.forEach((mutation, index) => {
+        const changes = mutation?.changes && typeof mutation.changes === "object" ? mutation.changes : {};
+        const card = document.createElement("article");
+        card.className = "write-review-card";
+        const header = document.createElement("header");
+        const title = document.createElement("strong");
+        title.textContent = String(changes.title || changes.customer_name || changes.summary || changes.request_summary || changes.next_action || mutation?.record_id || `第 ${index + 1} 条`);
+        const operation = document.createElement("span");
+        operation.textContent = writeValueLabels[mutation?.operation] || "变更";
+        header.append(title, operation);
+        card.append(header);
+        const fields = task.pending_write.logical_tool === "knowledge.write"
+          ? knowledgeFields
+          : Object.keys(changes).filter((field) => !ignoredFields.has(field));
+        fields.forEach((field) => appendWriteField(card, field, changes[field]));
+        cards.append(card);
+      });
+      review.append(cards);
+      queueMicrotask(() => {
+        cards.scrollTop = Math.min(Number(saved.reviewTop) || 0, Math.max(0, cards.scrollHeight - cards.clientHeight));
+      });
+    }
+    wrapper.append(review);
+  }
+
   function presentationPlan(task) {
     const payload = parseCanonicalPayload(task);
     if (payload && Array.isArray(payload.slides)) return payload;
@@ -761,14 +874,8 @@
 
   function renderRawWriteIntent(article, task, presentationRendered) {
     if (!task.pending_write) return;
-    const wrapper = document.createElement(presentationRendered ? "details" : "div");
+    const wrapper = document.createElement("div");
     wrapper.classList.add("task-details-section");
-    if (presentationRendered) {
-      wrapper.classList.add("raw-details");
-      const summary = document.createElement("summary");
-      summary.textContent = "查看冻结载荷与校验码";
-      wrapper.append(summary);
-    }
     const title = document.createElement("p");
     title.className = "write-intent-title";
     const toolLabels = {
@@ -777,14 +884,39 @@
     };
     const writeStatusLabels = { prepared: "待确认", committing: "正在提交", committed: "已完成" };
     title.textContent = `待写入内容（${toolLabels[task.pending_write.logical_tool] || "受控写入"} · ${writeStatusLabels[task.pending_write.status] || "等待处理"}）`;
+    wrapper.append(title);
+    const parsedPayload = parseCanonicalPayload(task);
+    renderWriteIntentReview(wrapper, task, parsedPayload, presentationRendered);
+
+    const technical = document.createElement("details");
+    technical.className = "raw-details";
+    const stateKey = `${task.task_id}:${task.pending_write.payload_sha256}`;
+    const saved = taskWriteIntentState[stateKey] || (taskWriteIntentState[stateKey] = {});
+    technical.open = saved.technicalOpen === true;
+    technical.addEventListener("toggle", () => { saved.technicalOpen = technical.open; });
+    const summary = document.createElement("summary");
+    summary.textContent = "查看技术明细与校验码";
     const hash = document.createElement("small");
     hash.className = "write-intent-hash";
     hash.textContent = `校验码：${task.pending_write.payload_sha256}`;
     const payload = document.createElement("pre");
     payload.className = "write-intent";
-    try { payload.textContent = JSON.stringify(JSON.parse(task.pending_write.canonical_payload), null, 2); } catch { payload.textContent = task.pending_write.canonical_payload || ""; }
-    wrapper.append(title, hash, payload);
+    payload.textContent = parsedPayload ? JSON.stringify(parsedPayload, null, 2) : (task.pending_write.canonical_payload || "");
+    payload.addEventListener("scroll", () => { saved.rawTop = payload.scrollTop; saved.rawLeft = payload.scrollLeft; }, { passive: true });
+    technical.append(summary, hash, payload);
+    wrapper.append(technical);
     article.insertBefore(wrapper, article.querySelector(".task-actions"));
+    queueMicrotask(() => {
+      payload.scrollTop = Math.min(Number(saved.rawTop) || 0, Math.max(0, payload.scrollHeight - payload.clientHeight));
+      payload.scrollLeft = Math.min(Number(saved.rawLeft) || 0, Math.max(0, payload.scrollWidth - payload.clientWidth));
+    });
+  }
+
+  function approvalActionLabel(task) {
+    if (task.pending_write?.logical_tool === "knowledge.write") return "批准写入知识库";
+    if (task.pending_write?.logical_tool === "sales.write") return "批准更新销售台账";
+    if (task.pending_write?.logical_tool === "artifact.deck.write") return "批准并生成演示文稿";
+    return task.pending_write ? "批准执行" : "确认并继续";
   }
 
   function progressTime(value) {
@@ -948,7 +1080,7 @@
       renderTaskProgress(article, task, historical);
       const presentationRendered = renderPresentationReview(article, task);
       renderRawWriteIntent(article, task, presentationRendered);
-      if (task.status === "waiting_approval") addAction(actions, task, "approve", task.pending_write ? "批准并生成" : "确认并继续");
+      if (task.status === "waiting_approval") addAction(actions, task, "approve", approvalActionLabel(task));
       if (task.status === "waiting_approval") addAction(actions, task, "reject", "驳回");
       if (task.status === "waiting_approval") addAction(actions, task, "cancel", "结束任务");
       if (effectiveStatus === "interrupted") addAction(actions, task, "resume", "继续任务");
