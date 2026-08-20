@@ -11,6 +11,8 @@
   let mailSettingsInitialized = false;
   let taskRuntimeCatalogKey = "";
   let currentView = "home";
+  const viewHistory = [];
+  const viewScrollPositions = {};
   let selectedProject = "project-default";
   let noticeTimer = null;
   let activeConfirmDismiss = null;
@@ -352,8 +354,21 @@
   function isPresentationStudio(service = currentService()) { return service?.id === "presentation-studio" || service?.workflow === "shared.presentation.studio"; }
   function isWeeklyService(service = currentService()) { return service?.id === "weekly-deck" || service?.workflow?.startsWith("shared.reporting.weekly-deck"); }
 
-  function switchView(view) {
+  function updateBackButton() {
+    $("go-back").hidden = viewHistory.length === 0;
+    $("go-back").title = viewHistory.length ? `返回${viewTitles[viewHistory.at(-1)] || "上一页"}` : "没有可返回的页面";
+  }
+
+  function switchView(view, { record = true, restoreScroll = true } = {}) {
     if (!viewTitles[view]) return;
+    const previousView = currentView;
+    if (view !== previousView) {
+      viewScrollPositions[previousView] = window.scrollY;
+      if (record) {
+        if (viewHistory.at(-1) !== previousView) viewHistory.push(previousView);
+        if (viewHistory.length > 20) viewHistory.shift();
+      }
+    }
     currentView = view;
     if (window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
     document.querySelectorAll("[data-page]").forEach((page) => page.classList.toggle("active", page.dataset.page === view));
@@ -366,6 +381,14 @@
       renderTaskForm();
     }
     if (view === "work") renderServices();
+    updateBackButton();
+    if (view !== previousView) requestAnimationFrame(() => window.scrollTo({ top: restoreScroll ? (viewScrollPositions[view] || 0) : 0, behavior: "auto" }));
+  }
+
+  function navigateBack() {
+    const previous = viewHistory.pop();
+    if (!previous) { updateBackButton(); return; }
+    switchView(previous, { record: false, restoreScroll: true });
   }
 
   function openService(serviceId) {
@@ -1960,6 +1983,10 @@
   $("request-notes").addEventListener("input", () => { guidedNotes[selectedService] = $("request-notes").value; });
 
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+  $("go-back").onclick = navigateBack;
+  window.addEventListener("keydown", (event) => {
+    if (event.altKey && event.key === "ArrowLeft" && viewHistory.length) { event.preventDefault(); navigateBack(); }
+  });
   document.querySelectorAll("[data-service]").forEach((button) => button.addEventListener("click", () => openService(button.dataset.service)));
   $("menu-toggle").onclick = () => $("sidebar").classList.toggle("open");
   $("task-project").onchange = () => { selectedProject = $("task-project").value; $("schedule-project").value = selectedProject; };

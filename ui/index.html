@@ -30,7 +30,8 @@
     <div class="workspace">
       <header class="topbar">
         <button id="menu-toggle" class="icon-button mobile-only" aria-label="打开导航">☰</button>
-        <div><p class="section-kicker">SALES DIRECTOR · LOCAL</p><strong id="page-title">工作台</strong></div>
+        <button id="go-back" class="back-button" type="button" aria-label="返回上一页" title="返回上一页" hidden><span>←</span>返回</button>
+        <div class="topbar-title"><p class="section-kicker">SALES DIRECTOR · LOCAL</p><strong id="page-title">工作台</strong></div>
         <div class="top-actions"><div class="task-runtime-picker" title="只影响下一次新建的任务；已运行任务不会被中途切换"><label>本次模型<select id="task-model"><option value="">默认模型</option></select></label><label>思考强度<select id="task-thinking"><option value="">默认</option><option value="off">关闭</option><option value="minimal">最少</option><option value="low">较低</option><option value="medium">标准</option><option value="high">深入</option><option value="xhigh">极深</option><option value="max">最大</option></select></label></div><span id="runtime-status" class="runtime-status"><i></i><b>正在连接 AI 核心…</b></span><button class="avatar" data-view="settings" aria-label="设置">销</button></div>
       </header>
       <div id="notice" class="notice" aria-live="polite"></div>
