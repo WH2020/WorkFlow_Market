@@ -234,7 +234,7 @@ fn workbench_healthy() -> bool {
         && text.contains("\"profile_id\": \"sales-director\"")
 }
 
-fn start_workbench(root: &Path) -> Result<Child, String> {
+fn start_workbench(root: &Path, scheduler_enabled: bool) -> Result<Child, String> {
     if workbench_healthy() {
         return Err("端口 8765 已有工作台运行；请先退出旧版本。".into());
     }
@@ -246,6 +246,9 @@ fn start_workbench(root: &Path) -> Result<Child, String> {
         "--profile".into(),
         PROFILE_ID.into(),
     ]);
+    if !scheduler_enabled {
+        arguments.push("--disable-scheduler".into());
+    }
     let output = launcher_log(root)?;
     let error = output.try_clone().map_err(|value| value.to_string())?;
     let mut command = Command::new(program);
@@ -430,7 +433,7 @@ fn self_test() -> i32 {
             return 2;
         }
     };
-    let mut server = match start_workbench(&root) {
+    let mut server = match start_workbench(&root, false) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("Agent4Market self-test could not start the workbench: {error}");
@@ -487,7 +490,7 @@ fn main() {
             let root = project_root().map_err(std::io::Error::other)?;
             log_launcher_event(&root, "setup started");
             env::set_current_dir(&root)?;
-            let mut server = start_workbench(&root).map_err(std::io::Error::other)?;
+            let mut server = start_workbench(&root, true).map_err(std::io::Error::other)?;
             if !wait_for_workbench(&mut server) {
                 stop_child(&mut server);
                 return Err(std::io::Error::other("销售总监工作台未能启动").into());

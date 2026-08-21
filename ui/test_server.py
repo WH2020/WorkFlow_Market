@@ -52,6 +52,18 @@ class ControlCentreTests(unittest.TestCase):
         )
         self.temporary.cleanup()
 
+    def test_desktop_self_test_mode_never_starts_the_daily_scheduler(self):
+        arguments = ["server.py", "--port", "0", "--profile", "sales-director", "--disable-scheduler"]
+        with (
+            patch("sys.argv", arguments),
+            patch.object(server, "ThreadingHTTPServer") as http_server,
+            patch.object(server.threading, "Thread") as scheduler_thread,
+        ):
+            http_server.return_value.serve_forever.return_value = None
+            server.main()
+        scheduler_thread.assert_not_called()
+        http_server.return_value.server_close.assert_called_once_with()
+
     def test_atomic_json_round_trip(self):
         target = server.TASKS / "task-a.json"
         server.atomic_json(target, {"task_id": "task-a", "version": 1})
@@ -83,6 +95,7 @@ class ControlCentreTests(unittest.TestCase):
         ui_root = Path(server.__file__).parent
         html = (ui_root / "index.html").read_text(encoding="utf-8")
         javascript = (ui_root / "app.js").read_text(encoding="utf-8")
+        server_source = (ui_root / "server.py").read_text(encoding="utf-8")
         self.assertIn('id="guided-fields"', html)
         self.assertIn('id="quick-prompts"', html)
         self.assertIn('id="model-settings-panel"', html)
@@ -164,6 +177,7 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="global-customer-context"', html)
         self.assertIn('id="customer-refresh"', html)
         self.assertIn('id="refresh-attention"', html)
+        self.assertIn('parser.add_argument("--disable-scheduler"', server_source)
         self.assertIn('function loadCustomers', javascript)
         self.assertIn('function loadAttention', javascript)
         self.assertIn('function selectCustomer', javascript)

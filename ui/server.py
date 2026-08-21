@@ -3093,6 +3093,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="启动仅本机可访问的销售总监工作台")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--profile", default=os.environ.get("WORKFLOW_AGENT_EDITION_PROFILE", "sales-director"))
+    parser.add_argument("--disable-scheduler", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     global ACTIVE_PROFILE_ID
     ACTIVE_PROFILE_ID = safe_id(args.profile)
@@ -3100,8 +3101,10 @@ def main() -> None:
         parser.error(f"未知发行版角色：{ACTIVE_PROFILE_ID}")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ControlHandler)
     schedule_stop = threading.Event()
-    schedule_thread = threading.Thread(target=schedule_loop, args=(schedule_stop,), name="director-daily-scheduler", daemon=True)
-    schedule_thread.start()
+    schedule_thread = None
+    if not args.disable_scheduler:
+        schedule_thread = threading.Thread(target=schedule_loop, args=(schedule_stop,), name="director-daily-scheduler", daemon=True)
+        schedule_thread.start()
     print(f"销售总监工作台已启动：http://127.0.0.1:{args.port}")
     try:
         server.serve_forever()
@@ -3109,6 +3112,8 @@ def main() -> None:
         print("\n销售总监工作台已停止")
     finally:
         schedule_stop.set()
+        if schedule_thread is not None:
+            schedule_thread.join(timeout=2)
         server.server_close()
 
 
