@@ -575,7 +575,14 @@ def import_reimbursement_mail(
             raise MailProviderError("不能重复选择同一封报销邮件")
         seen_uids.add(uid)
         normalized.append((uid, message_key))
-    config, password = _configured(project_root)
+    resolved_project_root = Path(project_root).resolve()
+    controlled_inputs = inputs_root.resolve()
+    controlled_outputs = outputs_root.resolve()
+    if not controlled_inputs.is_relative_to(resolved_project_root) or controlled_inputs == resolved_project_root:
+        raise MailProviderError("报销材料 inputs 目录不属于当前项目")
+    if not controlled_outputs.is_relative_to(resolved_project_root) or controlled_outputs == resolved_project_root:
+        raise MailProviderError("报销材料 outputs 目录不属于当前项目")
+    config, password = _configured(resolved_project_root)
     batch_digest = hashlib.sha256("|".join(sorted(key for _, key in normalized)).encode("ascii")).hexdigest()
     batch_id = f"reimbursement-{batch_digest[:16]}"
     reimbursements_input = inputs_root / "reimbursements"
@@ -610,7 +617,6 @@ def import_reimbursement_mail(
             })
 
     batch_root.mkdir(parents=True, exist_ok=True)
-    controlled_inputs = inputs_root.resolve()
     actual_batch_root = batch_root.resolve()
     if not actual_batch_root.is_relative_to(controlled_inputs) or actual_batch_root == controlled_inputs:
         raise MailProviderError("报销材料目录越出受控 inputs 范围")
@@ -635,12 +641,15 @@ def import_reimbursement_mail(
                 else:
                     _atomic_create(target, content)
                     created.append(target)
+                actual_target = target.resolve(strict=True)
+                if not actual_target.is_relative_to(actual_batch_root) or actual_target == actual_batch_root:
+                    raise MailProviderError("报销材料文件越出受控批次目录")
                 materials.append({
                     "material_id": "material-" + hashlib.sha256(
                         f"{message['message_key']}:{index}".encode("ascii")
                     ).hexdigest()[:16],
                     "name": original, "stored_name": target.name,
-                    "path": target.relative_to(Path(project_root).resolve()).as_posix(),
+                    "path": actual_target.relative_to(resolved_project_root).as_posix(),
                     "size": len(content), "sha256": digest,
                     "message_key": message["message_key"], "location": "reimbursement",
                 })
@@ -655,9 +664,8 @@ def import_reimbursement_mail(
         if outputs_root.is_symlink() or reimbursements_root.is_symlink() or manifest_root.is_symlink():
             raise MailProviderError("报销输出目录不能是符号链接")
         manifest_root.mkdir(parents=True, exist_ok=True)
-        actual_outputs = outputs_root.resolve()
         actual_manifest_root = manifest_root.resolve()
-        if not actual_manifest_root.is_relative_to(actual_outputs) or actual_manifest_root == actual_outputs:
+        if not actual_manifest_root.is_relative_to(controlled_outputs) or actual_manifest_root == controlled_outputs:
             raise MailProviderError("报销输出目录越出受控 outputs 范围")
         lines = ["# 邮箱报销材料清单", "", f"导入时间：{_now()}", f"邮箱：{config['email_address']}", ""]
         for message in messages:
@@ -671,7 +679,11 @@ def import_reimbursement_mail(
             lines.append("")
         manifest = manifest_root / "material-list.md"
         _atomic_replace(manifest, ("\n".join(lines) + "\n").encode("utf-8"))
-        record_path = Path(project_root).resolve() / ".pi" / "director-runtime" / "reimbursement-batches" / f"{batch_id}.json"
+        actual_manifest = manifest.resolve(strict=True)
+        if not actual_manifest.is_relative_to(actual_manifest_root) or actual_manifest == actual_manifest_root:
+            raise MailProviderError("报销材料清单越出受控批次目录")
+        manifest_relative = actual_manifest.relative_to(resolved_project_root).as_posix()
+        record_path = resolved_project_root / ".pi" / "director-runtime" / "reimbursement-batches" / f"{batch_id}.json"
         created_at = _now()
         if record_path.is_file() and not record_path.is_symlink() and record_path.stat().st_size <= 256_000:
             try:
@@ -684,7 +696,7 @@ def import_reimbursement_mail(
             "schema_version": "1.0", "batch_id": batch_id,
             "created_at": created_at, "updated_at": _now(),
             "mailbox": config["email_address"], "message_count": len(messages),
-            "manifest_path": manifest.relative_to(Path(project_root).resolve()).as_posix(),
+            "manifest_path": manifest_relative,
             "messages": [
                 {
                     "message_key": message["message_key"], "subject": message["subject"],
@@ -702,6 +714,6 @@ def import_reimbursement_mail(
         "batch_id": batch_id,
         "message_count": len(messages), "attachment_count": len(materials),
         "materials": [{key: value for key, value in item.items() if key != "message_key"} for item in materials],
-        "manifest_path": manifest.relative_to(Path(project_root).resolve()).as_posix(),
+        "manifest_path": manifest_relative,
         "message": f"已从 {len(messages)} 封邮件导入 {len(materials)} 个报销附件，保存在独立报销材料库。",
     }

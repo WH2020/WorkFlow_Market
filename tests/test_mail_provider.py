@@ -174,6 +174,38 @@ class MailProviderTests(unittest.TestCase):
         record = self.root / ".pi" / "director-runtime" / "reimbursement-batches" / f"{first['batch_id']}.json"
         self.assertTrue(record.is_file())
 
+    def test_import_uses_canonical_paths_when_the_project_has_a_symlink_alias(self):
+        real_root = self.root / "real-project"
+        real_root.mkdir()
+        alias_root = self.root / "project-alias"
+        try:
+            alias_root.symlink_to(real_root, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"directory symlinks are unavailable: {error}")
+        with patch("agent_platform.mail_provider.platform.system", return_value="Linux"):
+            configure_mail_provider(
+                real_root,
+                self.payload,
+                "client-app-password",
+                resolver=public_resolver,
+                connector=lambda _config, _password: FakeMailbox({"101": self.raw}),
+            )
+            found = search_reimbursement_mail(
+                alias_root,
+                {"date_from": "2026-08-01", "date_to": "2026-08-20", "query": ""},
+                connector=lambda _config, _password: FakeMailbox({"101": self.raw}),
+            )["messages"][0]
+            imported = import_reimbursement_mail(
+                alias_root,
+                alias_root / "inputs",
+                alias_root / "outputs",
+                [{"uid": found["uid"], "message_key": found["message_key"]}],
+                connector=lambda _config, _password: FakeMailbox({"101": self.raw}),
+            )
+        self.assertTrue(imported["materials"][0]["path"].startswith("inputs/reimbursements/"))
+        self.assertTrue(imported["manifest_path"].startswith("outputs/reimbursements/"))
+        self.assertTrue((real_root / imported["materials"][0]["path"]).is_file())
+
     def test_changed_message_is_rejected_before_any_material_is_written(self):
         self.configure()
         with patch("agent_platform.mail_provider.platform.system", return_value="Linux"):
