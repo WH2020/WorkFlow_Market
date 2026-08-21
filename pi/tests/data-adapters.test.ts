@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { deflateSync } from "node:zlib";
 import {
@@ -20,6 +21,8 @@ import {
 } from "../extensions/data-adapters.ts";
 import { setSourceRequestForTests } from "../extensions/source-readers.ts";
 import { payloadSha256 } from "../extensions/task-runtime.ts";
+import { SalesBusinessStore } from "../extensions/business-store.ts";
+import { resolveBusinessBackend } from "../extensions/business-backend.ts";
 
 type RegisteredTool = {
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
@@ -64,7 +67,15 @@ function fixture(fixedIntent = false, taskId?: string, profileId = "market-direc
       before.push(tool);
       if (tool.endsWith(".write")) {
         if (!fixedIntent || intent === 0) intent += 1;
-        return { intent_id: `intent-${intent}`, payload_sha256: payloadSha256(params), task_id: taskId, profile_id: profileId };
+        const backend = resolveBusinessBackend(root);
+        return {
+          intent_id: `intent-${intent}`,
+          payload_sha256: payloadSha256(params),
+          task_id: taskId,
+          session_id: taskId ? `session-${taskId}` : undefined,
+          profile_id: profileId,
+          storage_binding: { backend: backend.backend, binding_id: backend.binding_id },
+        };
       }
       if (taskId) return { task_id: taskId, profile_id: profileId };
     },
@@ -133,11 +144,42 @@ test("sales adapter reads several tables in one node and performs versioned writ
       table: "customers",
       mutations: [{ operation: "update", record_id: "c-1", changes: { next_action: "安排演示" }, expected_version: version }],
     });
+    await write.execute("insert", {
+      table: "customers",
+      mutations: [{ operation: "insert", record_id: "c-2", changes: { customer_name: "客户乙" } }],
+    });
+    const firstPage = await read.execute("page-1", { tables: ["customers"], query: "客户", limit: 1 }) as {
+      details: { tables: Array<{ rows: Array<Record<string, string>>; next_cursor?: string }> };
+    };
+    assert.ok(firstPage.details.tables[0].next_cursor);
+    const secondPage = await read.execute("page-2", {
+      tables: ["customers"], query: "客户", limit: 1, cursors: { customers: firstPage.details.tables[0].next_cursor },
+    }) as { details: { tables: Array<{ rows: Array<Record<string, string>> }> } };
+    assert.notEqual(firstPage.details.tables[0].rows[0].customer_id, secondPage.details.tables[0].rows[0].customer_id);
+    await assert.rejects(
+      () => read.execute("wrong-query-cursor", {
+        tables: ["customers"], query: "另一查询", limit: 1, cursors: { customers: firstPage.details.tables[0].next_cursor },
+      }),
+      /cursor 无效|不属于当前查询/,
+    );
+    const accountFirst = await state.tools.get("director_account_search")!.execute("account-page-1", {
+      query: "客户", limit: 1,
+    }) as { details: { rows: Array<Record<string, unknown>>; next_cursor?: string } };
+    assert.ok(accountFirst.details.next_cursor);
+    const accountSecond = await state.tools.get("director_account_search")!.execute("account-page-2", {
+      query: "客户", limit: 1, cursor: accountFirst.details.next_cursor,
+    }) as { details: { rows: Array<Record<string, unknown>> } };
+    assert.notEqual(accountFirst.details.rows[0].account_id, accountSecond.details.rows[0].account_id);
+    const account360 = await state.tools.get("director_account_read_360")!.execute("csv-360", {
+      account_id: "c-1", sections: ["actions", "signals"],
+    }) as { details: { account_360: { actions: unknown[]; signals: unknown[] } } };
+    assert.equal(account360.details.account_360.actions.length, 1);
+    assert.deepEqual(account360.details.account_360.signals, []);
     const source = readFileSync(join(state.root, "data", "sales", "customers.csv"), "utf8");
     assert.match(source, /安排演示/);
     assert.doesNotMatch(source, /\.tmp/);
-    assert.equal(state.before.at(-1), "sales.write");
-    assert.equal(state.after.at(-1)?.tool, "sales.write");
+    assert.ok(state.before.includes("sales.write"));
+    assert.ok(state.after.some((entry) => entry.tool === "sales.write"));
   } finally {
     state.cleanup();
   }
@@ -421,9 +463,17 @@ test("task evidence survives adapter restart and freezes the exact knowledge mut
     const tools = new Map<string, RegisteredTool>();
     registerDataAdapters({ registerTool(tool: RegisteredTool & { name: string }) { tools.set(tool.name, tool); } } as never, {
       projectRoot: () => state.root,
-      beforeLogicalTool: (tool, params) => tool.endsWith(".write")
-        ? { intent_id: "intent-restart", payload_sha256: payloadSha256(params), task_id: "task-evidence-restart", profile_id: "market-director" }
-        : { task_id: "task-evidence-restart", profile_id: "market-director" },
+      beforeLogicalTool: (tool, params) => {
+        if (!tool.endsWith(".write")) return { task_id: "task-evidence-restart", profile_id: "market-director" };
+        const backend = resolveBusinessBackend(state.root);
+        return {
+          intent_id: "intent-restart",
+          payload_sha256: payloadSha256(params),
+          task_id: "task-evidence-restart",
+          profile_id: "market-director",
+          storage_binding: { backend: backend.backend, binding_id: backend.binding_id },
+        };
+      },
       afterLogicalTool: () => {},
       onLogicalToolError: () => {},
     });
@@ -1115,6 +1165,46 @@ test("weekly snapshot is period-bounded and preserves source versions and hashes
   }
 });
 
+test("SQLite weekly snapshot filters the full store before applying its 1000-row output cap", () => {
+  const state = fixture();
+  try {
+    const database = join(state.root, "data", "sales-v1.db");
+    new SalesBusinessStore(database, { create_if_missing: true }).close();
+    const connection = new DatabaseSync(database);
+    try {
+      connection.exec("BEGIN IMMEDIATE");
+      const insertAccount = connection.prepare("INSERT INTO accounts(account_id,name,normalized_name,version,created_at,updated_at) VALUES (?,?,?,1,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')");
+      for (let index = 0; index < 1000; index += 1) {
+        const id = `account-${String(index).padStart(4, "0")}`;
+        insertAccount.run(id, `历史客户 ${index}`, `历史客户 ${index}`);
+      }
+      insertAccount.run("zz-weekly-target", "本周目标客户", "本周目标客户");
+      connection.prepare("INSERT INTO activities(activity_id,account_id,occurred_at,summary,evidence_status,version,created_at,updated_at) VALUES ('weekly-activity','zz-weekly-target','2026-08-15T10:00:00.000Z','本周拜访','pending',1,'2026-08-15T10:00:00.000Z','2026-08-15T10:00:00.000Z')").run();
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      throw error;
+    } finally {
+      connection.close();
+    }
+    writeFileSync(
+      join(state.root, "data", "storage-backend.json"),
+      JSON.stringify({ backend: "sqlite", schema_version: 1, database_relative_path: "data/sales-v1.db" }),
+      "utf8",
+    );
+
+    const snapshot = collectWeeklySnapshot(state.root, { start: "2026-08-10", end: "2026-08-16" }, "market-director") as {
+      sales: { customers: Array<{ customer_id: string }>; activities: Array<{ activity_id: string }> };
+      truncation: { sales: Record<string, { matched: number; returned: number; truncated: boolean }> };
+    };
+    assert.deepEqual(snapshot.sales.customers.map((row) => row.customer_id), ["zz-weekly-target"]);
+    assert.deepEqual(snapshot.sales.activities.map((row) => row.activity_id), ["weekly-activity"]);
+    assert.deepEqual(snapshot.truncation.sales.customers, { matched: 1, returned: 1, truncated: false });
+  } finally {
+    state.cleanup();
+  }
+});
+
 test("weekly snapshot rejects cross-profile requests and reports task inventory truncation", async () => {
   const state = fixture(false, "task-weekly-profile", "market-director");
   try {
@@ -1238,4 +1328,135 @@ test("CSV writes reject spreadsheet formula injection prefixes", async () => {
   } finally {
     state.cleanup();
   }
+});
+
+test("SQLite backend is activated only by a safe schema-v1 pointer", () => {
+  const state = fixture();
+  try {
+    const database = join(state.root, "data", "sales-v1.db");
+    const store = new SalesBusinessStore(database, { create_if_missing: true });
+    store.close();
+    assert.equal(resolveBusinessBackend(state.root).backend, "csv", "a database file alone must never activate SQLite");
+    const pointer = join(state.root, "data", "storage-backend.json");
+    writeFileSync(pointer, JSON.stringify({ backend: "sqlite", schema_version: 0, database_relative_path: "data/sales-v1.db" }), "utf8");
+    assert.throws(() => resolveBusinessBackend(state.root), /只支持 schema v1/);
+    writeFileSync(pointer, JSON.stringify({ backend: "sqlite", schema_version: 1, database_relative_path: "..\\outside.db" }), "utf8");
+    assert.throws(() => resolveBusinessBackend(state.root), /相对路径|上级目录|越出/);
+    writeFileSync(pointer, JSON.stringify({ backend: "sqlite", schema_version: 1, database_relative_path: "data/sales-v1.db" }), "utf8");
+    const activated = resolveBusinessBackend(state.root);
+    assert.equal(activated.backend, "sqlite");
+    const binding = activated.binding_id;
+    const writable = new SalesBusinessStore(database);
+    try {
+      writable.commit({ intent_id: "binding-write", task_id: "task", session_id: "session", logical_tool: "sales.write", approved_payload_sha256: "a".repeat(64), mutations: [{ operation: "insert", table: "accounts", record_id: "a", values: { name: "客户", normalized_name: "客户" } }] });
+    } finally { writable.close(); }
+    assert.equal(resolveBusinessBackend(state.root).binding_id, binding, "ordinary DB writes must not change the approval storage binding");
+  } finally { state.cleanup(); }
+});
+
+test("business adapters reject a storage pointer switch after approval before any write", async () => {
+  const state = fixture(false, "storage-race-task");
+  try {
+    const database = join(state.root, "data", "sales-v1.db");
+    new SalesBusinessStore(database, { create_if_missing: true }).close();
+    const pointer = join(state.root, "data", "storage-backend.json");
+    const originalCsv = readFileSync(join(state.root, "data", "sales", "customers.csv"), "utf8");
+    const tools = new Map<string, RegisteredTool>();
+    const failures: string[] = [];
+    registerDataAdapters({ registerTool(tool: RegisteredTool & { name: string }) { tools.set(tool.name, tool); } } as never, {
+      projectRoot: () => state.root,
+      beforeLogicalTool: (tool, params) => {
+        if (tool !== "sales.write") return;
+        const approved = resolveBusinessBackend(state.root);
+        writeFileSync(pointer, JSON.stringify({ backend: "sqlite", schema_version: 1, database_relative_path: "data/sales-v1.db" }), "utf8");
+        return {
+          intent_id: "intent-storage-race",
+          payload_sha256: payloadSha256(params),
+          task_id: "storage-race-task",
+          session_id: "storage-race-session",
+          storage_binding: { backend: approved.backend, binding_id: approved.binding_id },
+        };
+      },
+      afterLogicalTool: () => {},
+      onLogicalToolError: (_tool, _params, outcome) => failures.push(outcome),
+    });
+    await assert.rejects(
+      () => tools.get("director_sales_write")!.execute("storage-race", {
+        table: "customers",
+        mutations: [{ operation: "insert", record_id: "c-race", changes: { customer_name: "不得写入" } }],
+      }),
+      /业务存储在审批后发生变化/,
+    );
+    assert.deepEqual(failures, ["not_committed"]);
+    assert.equal(readFileSync(join(state.root, "data", "sales", "customers.csv"), "utf8"), originalCsv);
+    const store = new SalesBusinessStore(database, { read_only: true });
+    try { assert.equal(store.tableCount("accounts"), 0); } finally { store.close(); }
+  } finally { state.cleanup(); }
+});
+
+test("SQLite adapters provide legacy projections, cross-table rollback, 360, evidence validation and idempotency", async () => {
+  const state = fixture(false, "sqlite-task");
+  try {
+    const csvContract = await state.tools.get("director_sales_read")!.execute("csv-contract", { tables: ["customers"], query: "客户甲" }) as { details: { tables: Array<{ rows: Array<Record<string, string>> }> } };
+    const database = join(state.root, "data", "sales-v1.db");
+    new SalesBusinessStore(database, { create_if_missing: true }).close();
+    writeFileSync(join(state.root, "data", "storage-backend.json"), JSON.stringify({ backend: "sqlite", schema_version: 1, database_relative_path: "data/sales-v1.db" }), "utf8");
+    const write = state.tools.get("director_sales_write")!;
+    await write.execute("insert", { mutations: [
+      { operation: "insert", table: "accounts", record_id: "c-1", values: { name: "客户甲", normalized_name: "客户甲", region: "上海", sector: "制造", owner: "销售甲", lifecycle_stage: "验证", health: "green" } },
+      { operation: "insert", table: "accounts", record_id: "account-2", values: { name: "客户乙", normalized_name: "客户乙", region: "北京", health: "green" } },
+      { operation: "insert", table: "activities", record_id: "activity-1", values: { account_id: "c-1", occurred_at: "2026-08-21T00:00:00.000Z", summary: "需求核对", evidence_status: "pending" } },
+    ] });
+    const legacy = await state.tools.get("director_sales_read")!.execute("read", { tables: ["customers"], query: "客户甲" }) as { details: { tables: Array<{ rows: Array<Record<string, string>> }> } };
+    assert.equal(legacy.details.tables[0].rows[0].customer_id, "c-1");
+    assert.equal(legacy.details.tables[0].rows[0]._record_version, "sqlite:1");
+    for (const key of ["customer_id", "customer_name", "region", "sector", "owner", "stage", "health"]) assert.equal(legacy.details.tables[0].rows[0][key], csvContract.details.tables[0].rows[0][key]);
+    const salesPageOne = await state.tools.get("director_sales_read")!.execute("sales-page-1", {
+      tables: ["customers"], query: "客户", limit: 1,
+    }) as { details: { tables: Array<{ rows: Array<Record<string, string>>; next_cursor?: string }> } };
+    assert.ok(salesPageOne.details.tables[0].next_cursor);
+    const salesPageTwo = await state.tools.get("director_sales_read")!.execute("sales-page-2", {
+      tables: ["customers"], query: "客户", limit: 1, cursors: { customers: salesPageOne.details.tables[0].next_cursor },
+    }) as { details: { tables: Array<{ rows: Array<Record<string, string>> }> } };
+    assert.notEqual(salesPageOne.details.tables[0].rows[0].customer_id, salesPageTwo.details.tables[0].rows[0].customer_id);
+
+    await assert.rejects(() => write.execute("rollback", { mutations: [
+      { operation: "update", table: "accounts", record_id: "c-1", expected_version: 1, values: { health: "red" } },
+      { operation: "insert", table: "activities", record_id: "orphan", values: { account_id: "missing", occurred_at: "2026-08-21T00:00:00.000Z", summary: "must rollback" } },
+    ] }), /业务约束未通过/);
+    const unchanged = await state.tools.get("director_account_search")!.execute("search", { query: "客户甲" }) as { details: { rows: Array<Record<string, unknown>> } };
+    assert.equal(unchanged.details.rows[0].health, "green");
+    const firstPage = await state.tools.get("director_account_search")!.execute("page-1", { query: "客户", limit: 1 }) as { details: { rows: unknown[]; next_cursor: string } };
+    assert.equal(firstPage.details.rows.length, 1);
+    const secondPage = await state.tools.get("director_account_search")!.execute("page-2", { query: "客户", limit: 1, cursor: firstPage.details.next_cursor }) as { details: { rows: unknown[] } };
+    assert.equal(secondPage.details.rows.length, 1);
+    await assert.rejects(() => state.tools.get("director_account_search")!.execute("bad-cursor", { query: "另一查询", limit: 1, cursor: firstPage.details.next_cursor }), /cursor 无效/);
+
+    const view = await state.tools.get("director_account_read_360")!.execute("360", { account_id: "c-1" }) as { details: { account_360: { activities: unknown[] } } };
+    assert.equal(view.details.account_360.activities.length, 1);
+    const signals = await state.tools.get("director_signals_read")!.execute("signals", {}) as { details: { rows: unknown[] } };
+    assert.deepEqual(signals.details.rows, []);
+
+    await state.tools.get("director_knowledge_write")!.execute("knowledge", {
+      mutations: [{ operation: "insert", record_id: "source-1", changes: { title: "公开来源", status: "verified", url: "https://example.test/source" } }],
+      evidence_refs: [{ operation: "insert", table: "evidence_refs", record_id: "evidence-1", values: { entity_type: "accounts", entity_id: "c-1", source_id: "source-1", locator_json: "{}", claim_kind: "fact", verification_status: "verified" } }],
+    });
+    await assert.rejects(() => state.tools.get("director_knowledge_write")!.execute("bad-evidence", {
+      mutations: [{ operation: "update", record_id: "source-1", changes: { notes: "must rollback" }, expected_version: "sqlite:1" }],
+      evidence_refs: [{ operation: "insert", table: "evidence_refs", record_id: "evidence-bad", values: { entity_type: "processes", entity_id: "missing", source_id: "source-1", locator_json: "{}", claim_kind: "fact", verification_status: "verified" } }],
+    }), /entity_type 不受支持/);
+    rmSync(join(state.root, "data", "sales", "customers.csv"));
+    rmSync(join(state.root, "data", "knowledge", "source-register.csv"));
+    const weekly = collectWeeklySnapshot(state.root, { start: "2026-08-01", end: "2026-08-31" }, "market-director") as { sales: { customers: unknown[] } };
+    assert.equal(weekly.sales.customers.length, 2, "after cutover weekly.snapshot must not fall back to legacy CSV");
+    const store = new SalesBusinessStore(database);
+    try {
+      assert.equal(store.tableCount("sources"), 1);
+      assert.equal(store.tableCount("evidence_refs"), 1);
+      assert.equal(store.readBusinessRecord("sources", "source-1")?.version, 1);
+      const input = { intent_id: "idem", task_id: "task", session_id: "session", logical_tool: "sales.write", approved_payload_sha256: "b".repeat(64), mutations: [{ operation: "insert" as const, table: "accounts" as const, record_id: "idem-account", values: { name: "幂等客户", normalized_name: "幂等客户" } }] };
+      const first = store.commit(input); assert.deepEqual(store.commit(input), first);
+      assert.throws(() => store.commit({ ...input, approved_payload_sha256: "c".repeat(64) }), /同一 intent 不能绑定不同 payload/);
+    } finally { store.close(); }
+  } finally { state.cleanup(); }
 });

@@ -69,7 +69,7 @@ jobs:
           run_install: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "22.19.0"
+          node-version: "24.19.0"
           cache: pnpm
       - name: Install reviewed dependencies
         run: pnpm install --frozen-lockfile

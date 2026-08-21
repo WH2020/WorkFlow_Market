@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agent_platform.environment import discover_ppt_runtime, launch_pi
+from agent_platform.environment import MIN_NODE, discover_ppt_runtime, launch_pi
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_product_runtime_is_pinned_to_validated_node_24_line(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        workflow = (root / ".github" / "workflows" / "cross-platform.yml").read_text(encoding="utf-8")
+        self.assertEqual(MIN_NODE, (24, 19, 0))
+        self.assertEqual(package["engines"]["node"], ">=24.19.0 <25")
+        self.assertNotIn('node-version: "22.19.0"', workflow)
+        self.assertGreaterEqual(workflow.count('node-version: "24.19.0"'), 2)
+        windows = (root / "scripts" / "setup-windows.ps1").read_text(encoding="utf-8")
+        macos = (root / "scripts" / "setup-macos.sh").read_text(encoding="utf-8")
+        self.assertIn('[Version]"24.19.0"', windows)
+        self.assertIn('[Version]"25.0.0"', windows)
+        self.assertIn('major !== 24 || minor < 19', macos)
+
     def test_setup_scripts_do_not_use_codex_pnpm_or_dependency_lifecycle_scripts(self) -> None:
         root = Path(__file__).resolve().parents[1]
         windows = (root / "scripts" / "setup-windows.ps1").read_text(encoding="utf-8")

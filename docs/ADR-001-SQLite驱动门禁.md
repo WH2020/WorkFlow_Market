@@ -9,15 +9,16 @@
 
 阶段 A 选择“固定 Node 24 LTS 补丁版本 + 内置 `node:sqlite`”作为正式存储驱动方案，不引入第三方 SQLite 原生二进制。STORE-A0-01～03 已通过，可以进入 A1 存储内核与迁移开发；这不代表正式业务数据已经切换到 SQLite。
 
-正式切换仍需满足两个条件：
+正式切换仍需满足以下条件：
 
-1. 正式安装器固定到已验证的 Node 24.19.0，并显示运行时/数据库版本。
-2. 正式 schema、CSV dry-run、对账、备份恢复和用户 Approval 全部通过。
+1. 正式安装器固定到已验证的 Node 24.19.0，并显示运行时/数据库版本（A2 已完成运行时约束）。
+2. 正式 schema、CSV dry-run、对账、备份恢复和用户 Approval 全部通过（A1 已完成工具，真实数据执行仍属于 A5）。
+3. A2 在线适配和 A3/A4 用户闭环完成跨平台回归后，才允许 A5 发起正式切换。
 
 在这两个条件满足前：
 
-- 当前 `package.json` 与安装器仍保持现有 Node 22.19+ 兼容声明。
-- SQLite 探针不会被现有销售服务加载。
+- `package.json`、安装器、环境体检和 CI 已拒绝 Node 22，并要求 Node 24.19.0 至 Node 25 之前。
+- A2 销售服务只会在有效 `data/storage-backend.json` 存在时加载 SQLite；仅存在数据库文件仍保持 CSV。
 - 不创建、不迁移、不修改任何正式销售数据。
 
 ## 2. 选择依据
@@ -75,7 +76,7 @@
 | `macos-15` | arm64 | 通过 |
 | `macos-15-intel` | x64 | 通过 |
 
-三平台结果来自同一次 [GitHub Actions 运行](https://github.com/WH2020/WorkFlow_Market/actions/runs/32445975653)，提交为 `aad2441`；每个平台均上传单独 JSON 报告。该运行的 Windows/macOS 完整安装器、TypeScript、Python、平台和工作台回归也全部通过。现有 Node 22.19 的产品回归 job 暂不改变，正式安装器固定 Node 24.19.0 由后续工作包完成。
+三平台结果来自同一次 [GitHub Actions 运行](https://github.com/WH2020/WorkFlow_Market/actions/runs/32445975653)，提交为 `aad2441`；每个平台均上传单独 JSON 报告。该运行的 Windows/macOS 完整安装器、TypeScript、Python、平台和工作台回归也全部通过。A2 已把产品回归 job、安装器和环境体检统一到 Node 24.19.0 至 Node 25 之前；后续升级仍需重新执行本门禁。
 
 ## 4. Windows 本地结果
 
@@ -101,12 +102,12 @@
 | 锁预算 | 配置 250 ms，观察约 418 ms（含子进程启动），总等待受限 |
 | 备份与跨语言读取 | Node 备份完整，Python 只读计数与 schema 一致 |
 
-本机现有 Node 24.14.0 的拒绝结果也已验证：门禁在任何数据库场景执行前停止，提示最低版本 24.15.0。
+本机现有 Node 24.14.0 的拒绝结果也已验证：产品环境体检和安装器会在任何数据库场景执行前停止，提示最低版本 24.19.0。
 
-## 5. A0 之外尚未证实的事项
+## 5. A0 之后的进展与尚未证实事项
 
-- 正式 Tauri 安装包如何携带或发现固定 Node 24 运行时。
-- 正式业务 schema、CSV 迁移和客户 360 查询性能；这些属于 A1–A3，不在 A0 原型中。
+- Tauri 安装目录与安装器已按 Node 24.19–24.x 发现外部项目运行时，并由 `doctor` 和启动入口再次校验；当前发行包仍不把 Node 复制进单个 EXE。
+- 正式 schema、CSV 迁移工具和客户只读查询已分别由 A1/A2 实现；真实业务数据规模下的迁移质量与客户 360 查询性能仍需 A5 隔离副本 UAT。
 
 因此当前结论是“A0 驱动方案通过，可以继续 A1”，不是“SQLite 已可替换正式数据”。
 
@@ -114,16 +115,16 @@
 
 三份 CI 报告均为 `status=ok`，且现有 TypeScript、Python、平台校验、工作台和双平台桌面回归均已通过，本 ADR 判定为“通过”。下一步按顺序执行：
 
-1. 固定安装器 Node 版本和升级提示。
-2. 实现正式 schema v1 与迁移 manifest。
-3. 在隔离副本上运行真实 CSV dry-run。
-4. 用户审阅迁移报告并批准后，才允许切换主存储。
+1. 固定安装器 Node 版本和升级提示（已完成）。
+2. 实现正式 schema v1、迁移 manifest 和在线兼容适配（已完成）。
+3. 在隔离副本上运行真实 CSV dry-run（A5）。
+4. 用户审阅迁移报告并批准后，才允许切换主存储（A5）。
 
 任一 macOS 门禁失败时，保持 CSV 主存储并评估 `better-sqlite3`；不得跳过失败平台或静默回退到另一驱动。
 
 ## 7. 复现命令
 
-在 Node 24.15.0 以上、24.x 版本中运行：
+在 Node 24.19.0 或更新的 Node 24 版本中运行：
 
 ```powershell
 node --no-warnings pi/tests/sqlite-driver-gate.mjs `

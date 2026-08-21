@@ -98,6 +98,12 @@ export type PendingWriteIntent = {
   revision_base_payload?: string;
   revision_of_payload_sha256?: string;
   revised_at?: string;
+  storage_binding?: WriteStorageBinding;
+};
+
+export type WriteStorageBinding = {
+  backend: "csv" | "sqlite";
+  binding_id: string;
 };
 
 export type StructuredWriteTool = "knowledge.write" | "sales.write" | "artifact.deck.write";
@@ -145,6 +151,19 @@ export function canonicalJson(value: unknown): string {
 
 export function payloadSha256(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
+function validateStorageBinding(binding: WriteStorageBinding): WriteStorageBinding {
+  if (
+    (binding.backend !== "csv" && binding.backend !== "sqlite") ||
+    typeof binding.binding_id !== "string" ||
+    binding.binding_id.length < 1 ||
+    binding.binding_id.length > 256 ||
+    /[\0\r\n]/u.test(binding.binding_id)
+  ) {
+    throw new TaskTransitionError("Write intent storage binding is invalid");
+  }
+  return { backend: binding.backend, binding_id: binding.binding_id };
 }
 
 function descendantIds(workflow: RuntimeWorkflow, nodeId: string): Set<string> {
@@ -399,6 +418,7 @@ export function proposeWriteIntent(
   logicalTool: StructuredWriteTool,
   payload: unknown,
   expectedVersion: number,
+  storageBinding?: WriteStorageBinding,
 ): WorkflowTask {
   assertExpectedVersion(source, expectedVersion);
   const state = clone(source);
@@ -442,6 +462,7 @@ export function proposeWriteIntent(
     proposed_at: now(),
     proposed_by_node: candidates[0]!.id,
     status: "prepared",
+    ...(storageBinding ? { storage_binding: validateStorageBinding(storageBinding) } : {}),
   };
   appendAudit(state, "write_intent_prepared", "model", candidates[0]!.id, state.pending_write.payload_sha256);
   return state;
@@ -561,6 +582,7 @@ export function revisePreparedWriteIntent(
     revision_base_payload: currentIntent.revision_base_payload ?? currentIntent.canonical_payload,
     revision_of_payload_sha256: currentIntent.payload_sha256,
     revised_at: revisedAt,
+    ...(currentIntent.storage_binding ? { storage_binding: validateStorageBinding(currentIntent.storage_binding) } : {}),
   };
   state.version += 1;
   state.updated_at = revisedAt;
@@ -578,6 +600,7 @@ export function assertApprovedWriteIntent(
   state: WorkflowTask,
   logicalTool: string,
   payload: unknown,
+  storageBinding?: WriteStorageBinding,
 ): PendingWriteIntent {
   const intent = state.pending_write;
   if (!intent || intent.logical_tool !== logicalTool || (intent.status !== "approved" && intent.status !== "committing")) {
@@ -587,7 +610,38 @@ export function assertApprovedWriteIntent(
   if (actual !== intent.payload_sha256) {
     throw new TaskTransitionError("Write payload differs from the exact payload approved by the user");
   }
+  if (storageBinding) {
+    const current = validateStorageBinding(storageBinding);
+    if (!intent.storage_binding) {
+      throw new TaskTransitionError("旧审批未绑定当前业务存储；升级后必须重新确认，禁止静默提交");
+    }
+    if (
+      intent.storage_binding.backend !== current.backend ||
+      intent.storage_binding.binding_id !== current.binding_id
+    ) {
+      throw new TaskTransitionError("业务存储在批准后发生变化；必须基于当前存储重新生成并确认写入内容");
+    }
+  }
   return intent;
+}
+
+export function failApprovedWriteAsIncompatible(
+  source: WorkflowTask,
+  expectedVersion: number,
+  note: string,
+): WorkflowTask {
+  assertExpectedVersion(source, expectedVersion);
+  if (!source.pending_write || source.pending_write.status !== "approved") {
+    throw new TaskTransitionError("Only an approved uncommitted write can be marked incompatible");
+  }
+  const state = clone(source);
+  state.status = "failed";
+  state.current_stage = null;
+  state.current_node = null;
+  state.waiting_nodes = [];
+  state.waiting_node = null;
+  appendAudit(state, "write_storage_incompatible", "system", undefined, note.slice(0, 1000));
+  return state;
 }
 
 export function beginWriteCommit(
@@ -596,6 +650,7 @@ export function beginWriteCommit(
   logicalTool: StructuredWriteTool,
   payload: unknown,
   expectedVersion: number,
+  storageBinding?: WriteStorageBinding,
 ): WorkflowTask {
   assertExpectedVersion(source, expectedVersion);
   const state = clone(source);
@@ -603,7 +658,7 @@ export function beginWriteCommit(
     (node) => node.type === "tool" && node.tool === logicalTool,
   );
   if (matches.length !== 1) throw new TaskTransitionError(`Logical tool ${logicalTool} is not current`);
-  const intent = assertApprovedWriteIntent(state, logicalTool, payload);
+  const intent = assertApprovedWriteIntent(state, logicalTool, payload, storageBinding);
   if (intent.status === "committing") return state;
   state.pending_write!.status = "committing";
   appendAudit(state, "write_commit_started", "adapter", matches[0]!.id, intent.payload_sha256);
@@ -617,10 +672,11 @@ export function recoverWriteFailure(
   outcome: "not_committed" | "ambiguous",
   expectedVersion: number,
   note?: string,
+  storageBinding?: WriteStorageBinding,
 ): WorkflowTask {
   assertExpectedVersion(source, expectedVersion);
   const state = clone(source);
-  const intent = assertApprovedWriteIntent(state, logicalTool, payload);
+  const intent = assertApprovedWriteIntent(state, logicalTool, payload, storageBinding);
   if (intent.status !== "committing") throw new TaskTransitionError("Write is not in committing state");
   if (outcome === "not_committed") {
     state.pending_write!.status = "approved";
@@ -643,6 +699,7 @@ export function completeLogicalTool(
   expectedVersion: number,
   note?: string,
   payload?: unknown,
+  storageBinding?: WriteStorageBinding,
 ): WorkflowTask {
   assertExpectedVersion(source, expectedVersion);
   const state = clone(source);
@@ -655,7 +712,7 @@ export function completeLogicalTool(
     );
   }
   if (STRUCTURED_WRITE_TOOLS.has(logicalTool as StructuredWriteTool)) {
-    assertApprovedWriteIntent(state, logicalTool, payload);
+    assertApprovedWriteIntent(state, logicalTool, payload, storageBinding);
     state.pending_write!.status = "committed";
     state.pending_write!.committed_at = now();
   }
@@ -704,7 +761,7 @@ export function approveNode(
   }
   state.completed_nodes.push(node.id);
   const boundNote = state.pending_write?.status === "approved"
-    ? `intent=${state.pending_write.intent_id} sha256=${state.pending_write.payload_sha256}${note ? `; ${note}` : ""}`
+    ? `intent=${state.pending_write.intent_id} sha256=${state.pending_write.payload_sha256}${state.pending_write.storage_binding ? ` storage=${state.pending_write.storage_binding.backend}:${state.pending_write.storage_binding.binding_id}` : ""}${note ? `; ${note}` : ""}`
     : note;
   appendAudit(state, "approval_granted", "user", node.id, boundNote);
   refreshDerivedState(state, workflow);

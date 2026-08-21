@@ -5,11 +5,13 @@
 - 关联设计：[SQLite 数据模型与迁移](ARCH-P0-SQLite数据模型与迁移.md)
 - 关联计划：[实施与验收计划](PLAN-P0-实施与验收.md)
 
+> 本文保留 A1 交付时的数据底座边界。A2 在线适配与客户只读查询现已实现，现状和操作约束见 [A2 使用说明](A2-兼容适配与客户查询使用说明.md)；正式迁移/切换仍属于 A5。
+
 ## 1. 当前能力与边界
 
 A1 已提供正式 schema v1、TypeScript 事务 Store、离线 CSV 迁移、行级隔离、对账、备份恢复、显式 CSV 导出/回环导入，以及绑定精确报告、数据库和批准文件的存储指针切换。
 
-当前在线 `sales.*` 与 `knowledge.*` 适配器仍使用旧 CSV；它们要到 A2 才会接入 SQLite。A1 不会因为数据库文件存在就自动切换，也不会双写。仓库中的测试只使用临时夹具，本轮没有扫描、迁移或修改真实业务 CSV。
+A1 交付时，在线 `sales.*` 与 `knowledge.*` 适配器仍使用旧 CSV；A2 已补上严格指针路由和 SQLite 在线适配。无论哪个阶段，都不会因为数据库文件存在就自动切换，也不会双写。仓库测试只使用临时夹具，没有扫描、迁移或修改真实业务 CSV。
 
 ## 2. 文件与契约
 
@@ -71,7 +73,7 @@ python -m agent_platform import-sales-store-export --source-dir data/exports/man
 
 ## 4. 存储切换与恢复
 
-当前阶段不要在正式工作目录执行切换；A2 适配和 A5 迁移向导尚未完成。底层命令已经实现，供自动化测试和后续受控 UI 调用。
+当前阶段仍不要在正式工作目录执行切换；A2 适配已完成，但 A5 迁移向导、真实数据预检、观察期和恢复演练尚未完成。底层命令供自动化测试和后续受控 UI 调用。
 
 切换要求同时满足：
 
@@ -94,12 +96,12 @@ python -m agent_platform rollback-sales-store --batch-id migration-<20位哈希>
 
 一旦检测到切换后有业务字段或关联变化，回滚会返回 `ROLLBACK_REQUIRES_RECONCILIATION`，必须先导出差异并人工决定，不能自动回到旧 CSV。
 
-## 5. A2 前仍未开放的能力
+## 5. A1 交付时尚未开放、当前状态
 
-- 工作台不会展示 SQLite 客户列表或客户 360。
-- `sales.read/write`、`knowledge.search/write` 尚未读取 schema v1。
-- 安装运行时尚未切到固定 Node 24.19.0。
+- A2 已提供 SQLite 客户搜索、客户 360 聚合和信号只读 API；面向用户的客户列表/360 页面仍属于 A3。
+- A2 已让 `sales.read/write`、`knowledge.search/write` 按严格存储指针读取 schema v1。
+- 安装运行时、环境体检和 CI 已切到 Node 24.19.0 至 Node 25 之前。
 - 没有对真实业务数据执行预检或 staging 导入。
 - 没有启用正式 `data/storage-backend.json`。
 
-因此 A1 是可验证的数据底座，不是正式数据切换发布。
+因此 A1/A2 已形成可验证的数据底座和在线适配，仍不是正式数据切换发布。

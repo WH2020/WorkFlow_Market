@@ -9,7 +9,7 @@
     "url": "https://github.com/WH2020/WorkFlow_Market.git"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=24.19.0 <25"
   },
   "keywords": [
     "pi-package",

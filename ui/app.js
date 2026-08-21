@@ -1628,7 +1628,7 @@
       copy.textContent = "复制链接";
       copy.addEventListener("click", async () => {
         try { await navigator.clipboard.writeText(entry.url); note("来源链接已复制。"); }
-        catch { note("无法自动复制，请展开补充记录或打开知识库文件查看链接。", true); }
+        catch { note("无法自动复制，请展开补充记录查看链接。", true); }
       });
       actions.append(open, copy);
     } else {
@@ -1669,7 +1669,9 @@
       if (knowledgeTruncated) {
         const warning = document.createElement("p");
         warning.className = "knowledge-truncated";
-        warning.textContent = "当前只显示最近 500 条；可使用搜索缩小范围，或打开知识库文件查看全部记录。";
+        warning.textContent = model?.data?.backend === "sqlite"
+          ? "当前只显示最近 500 条；请使用上方搜索缩小范围。SQLite 主库不会直接交给外部软件编辑。"
+          : "当前只显示最近 500 条；可使用搜索缩小范围，或打开知识库文件查看全部记录。";
         box.append(warning);
       }
     }
@@ -1677,6 +1679,7 @@
   }
 
   function renderData() {
+    $("open-knowledge-file").textContent = model.data?.backend === "sqlite" ? "打开知识库所在目录" : "打开知识库文件";
     const renderGroup = (box, items) => {
       box.replaceChildren(...items.map((item) => summaryRow("summary-row", item.path.split("/").pop(), item.exists ? `${item.records ?? "?"} 条 · ${item.updated_at || "未知时间"}` : "尚未创建")));
     };

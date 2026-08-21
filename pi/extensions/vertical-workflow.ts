@@ -11,11 +11,12 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { assertDeckMatchesEvidenceContext, registerDataAdapters } from "./data-adapters.ts";
+import { openBusinessStore, resolveBusinessBackend } from "./business-backend.ts";
 import {
   TaskStore,
   approveNode,
@@ -30,6 +31,7 @@ import {
   consumeResumeRequest,
   createTask,
   currentNodes,
+  failApprovedWriteAsIncompatible,
   isTerminal,
   proposeWriteIntent,
   rebindTaskSession,
@@ -38,6 +40,7 @@ import {
   rejectApproval,
   type RuntimeWorkflow,
   type TaskThinkingLevel,
+  type WriteStorageBinding,
   type WorkflowTask,
 } from "./task-runtime.ts";
 import {
@@ -119,6 +122,9 @@ const LOGICAL_TOOL_PERMISSIONS = new Map<string, readonly string[]>([
   ["knowledge.write", ["knowledge.write"]],
   ["sales.read", ["sales.read"]],
   ["sales.write", ["sales.write"]],
+  ["account.search", ["sales.read"]],
+  ["account.read_360", ["sales.read"]],
+  ["signals.read", ["sales.read"]],
   ["web.search", ["web.read"]],
   ["web.open", ["web.read"]],
   ["pdf.read", ["knowledge.read"]],
@@ -672,6 +678,9 @@ const ADAPTER_TO_LOGICAL_TOOL = new Map([
   ["director_knowledge_write", "knowledge.write"],
   ["director_sales_read", "sales.read"],
   ["director_sales_write", "sales.write"],
+  ["director_account_search", "account.search"],
+  ["director_account_read_360", "account.read_360"],
+  ["director_signals_read", "signals.read"],
   ["director_web_search", "web.search"],
   ["director_web_open", "web.open"],
   ["director_pdf_read", "pdf.read"],
@@ -679,6 +688,21 @@ const ADAPTER_TO_LOGICAL_TOOL = new Map([
   ["director_weekly_snapshot", "weekly.snapshot"],
   ["director_artifact_deck_write", "artifact.deck.write"],
 ]);
+
+function businessWriteStorageBinding(logicalTool: string, projectRoot: string): WriteStorageBinding | undefined {
+  if (logicalTool !== "knowledge.write" && logicalTool !== "sales.write") return undefined;
+  const backend = resolveBusinessBackend(projectRoot);
+  if (backend.backend === "sqlite") {
+    const store = openBusinessStore(projectRoot, true);
+    if (!store) throw new Error("SQLite 存储指针未能打开受控业务数据库");
+    store.close();
+  }
+  return { backend: backend.backend, binding_id: backend.binding_id };
+}
+
+function stableTaskSessionId(state: WorkflowTask): string {
+  return createHash("sha256").update(state.session_key, "utf8").digest("hex");
+}
 
 const MANAGED_ALLOWED_TOOLS = new Set([
   "read",
@@ -1662,7 +1686,22 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       const { state, workflow } = requireLogicalTool(logicalTool);
       const authorizedUrls = authorizedUrlsFromRequest(state.request);
       if (logicalTool === "knowledge.write" || logicalTool === "sales.write" || logicalTool === "artifact.deck.write") {
-        assertApprovedWriteIntent(state, logicalTool, params);
+        const storageBinding = businessWriteStorageBinding(logicalTool, projectRoot);
+        const approvedBinding = state.pending_write?.storage_binding;
+        if (
+          storageBinding &&
+          state.pending_write?.status === "approved" &&
+          (!approvedBinding || approvedBinding.backend !== storageBinding.backend || approvedBinding.binding_id !== storageBinding.binding_id)
+        ) {
+          const next = failApprovedWriteAsIncompatible(
+            state,
+            state.version,
+            "批准后业务存储已切换或旧审批没有存储绑定；请重新开始任务并基于当前数据生成变更。",
+          );
+          persistTransition(state, next);
+          throw new Error("该写入审批与当前业务存储不兼容，已安全停止；请重新开始任务。");
+        }
+        assertApprovedWriteIntent(state, logicalTool, params, storageBinding);
         if (state.pending_write?.status === "approved") {
           const next = beginWriteCommit(
             state,
@@ -1670,6 +1709,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             logicalTool,
             params,
             state.version,
+            storageBinding,
           );
           persistTransition(state, next);
         }
@@ -1679,9 +1719,11 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           intent_id: intent.intent_id,
           payload_sha256: intent.payload_sha256,
           task_id: state.task_id,
+          session_id: stableTaskSessionId(state),
           profile_id: state.profile_id,
           authorized_urls: authorizedUrls,
           revision_base_payload: intent.revision_base_payload,
+          ...(storageBinding ? { storage_binding: storageBinding } : {}),
         };
       }
       return { task_id: state.task_id, profile_id: state.profile_id, authorized_urls: authorizedUrls };
@@ -1702,6 +1744,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         state.version,
         artifactNote,
         params,
+        logicalTool === "knowledge.write" || logicalTool === "sales.write"
+          ? state.pending_write?.storage_binding
+          : undefined,
       );
       persistTransition(state, next);
     },
@@ -1715,6 +1760,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         outcome,
         previous.version,
         (error as Error).message,
+        previous.pending_write?.storage_binding,
       );
       persistTransition(previous, next);
     },
@@ -1949,6 +1995,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         params.logical_tool,
         params.payload,
         previous.version,
+        businessWriteStorageBinding(params.logical_tool, projectRoot),
       );
       persistTransition(previous, next);
       return {

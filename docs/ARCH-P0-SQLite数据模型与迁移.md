@@ -1,6 +1,6 @@
 # Agent4Market 阶段 A：SQLite 数据模型与迁移设计
 
-- 状态：schema v1 与 A1 迁移底座已实现，并通过 Windows、macOS Intel 与 macOS Apple Silicon 回归；A2 在线适配和真实数据迁移未开始
+- 状态：schema v1、A1 迁移底座和 A2 在线兼容适配/客户只读查询已实现；正式数据迁移和 A3 客户页面未开始
 - 适用范围：销售总监本地版
 - 关联需求：[客户经营核心 PRD](PRD-P0-客户经营核心.md)
 - 关联计划：[实施与验收计划](PLAN-P0-实施与验收.md)
@@ -60,9 +60,9 @@ flowchart LR
 
 ### 3.1 已验证事实
 
-- 当前开发机 Node.js 为 `v24.14.0`，`node:sqlite` 可用，但仍会输出 ExperimentalWarning。
+- 当前开发机系统 Node.js 为 `v24.14.0`；正式门禁使用隔离的官方 `v24.19.0`，`node:sqlite` 仍会输出 ExperimentalWarning。
 - 当前 Python 为 3.11.9，标准库 `sqlite3` 使用 SQLite 3.45.1。
-- 当前 `package.json` 最低 Node 版本为 22.19.0；不能假设整个 Node 22 范围与当前 `node:sqlite` 行为完全一致。
+- `package.json`、安装器、环境体检和跨平台 CI 已统一要求 Node 24.19.0 至 Node 25 之前；Node 22 和本机 24.14 不再属于正式运行时。
 
 ### 3.2 选项比较
 
@@ -333,18 +333,18 @@ sequenceDiagram
 - `knowledge.search`：查询 `sources` 及可选全文索引。
 - `knowledge.write`：事务写入来源和证据引用。
 
-建议新增但不直接暴露 SQL 的查询：
+已新增但不直接暴露 SQL 的查询：
 
 - `account.read_360(account_id, sections, since?)`
 - `account.search(query, filters, cursor, limit)`
 - `signals.read(account_id?, status?, severity?, cursor)`
-- `plays.recommend(goal, account_id?, expected_output?)`
+- `plays.recommend(goal, account_id?, expected_output?)` 仍属于 A4。
 
 前端 HTTP API 只面向本机工作台：
 
 - `GET /api/accounts`
 - `GET /api/accounts/{id}/360`
-- `GET /api/accounts/{id}/timeline`
+- `GET /api/accounts/{id}/timeline`（A3 页面阶段补充）
 - `GET /api/signals`
 - 变更仍通过任务请求和 Approval API，不新增无审批的直接业务写接口。
 
@@ -500,4 +500,4 @@ FTS5 只作为加速索引，不是事实源。首版可为客户名称、互动
 - 首版 owner/salesperson 仍可能是文本身份，尚无组织目录与权限系统。
 - 受控多态 `evidence_refs` 需要应用层一致性扫描，数据库外键不能覆盖所有目标实体。
 - 迁移只保留用户明确记录，不尝试从自由文本自动构造完整决策链、金额或阶段。
-- A0 已确认数据库驱动方案；正式业务 schema、迁移、存储切换和客户 360 仍未实现，不能写成已上线能力。
+- A2 已提供 Store 在线适配、客户聚合查询和本机只读 API，但没有执行正式业务数据迁移或存储切换；A3 客户 360 可视化页面、A4 信号建议/Play 和 A5 发布切换仍不能写成已上线能力。

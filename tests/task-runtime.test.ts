@@ -19,6 +19,7 @@ import {
   consumeResumeRequest,
   createTask,
   currentNodes,
+  failApprovedWriteAsIncompatible,
   rejectApproval,
   proposeWriteIntent,
   recoverWriteFailure,
@@ -369,6 +370,41 @@ test("approval is bound to the exact frozen batch and commit can roll back safel
     committing, "knowledge.write", writePayload, "not_committed", committing.version, "lock held",
   );
   assert.equal(recovered.pending_write?.status, "approved");
+});
+
+test("business writes are bound to the selected storage backend across approval and commit", () => {
+  const csvBinding = { backend: "csv", binding_id: "csv:legacy-v1" } as const;
+  const sqliteBinding = { backend: "sqlite", binding_id: "sqlite:pointer-sha256" } as const;
+  let task = start();
+  task = completeModelNode(task, linearWorkflow, "draft", task.version);
+  task = proposeWriteIntent(
+    task,
+    linearWorkflow,
+    "knowledge.write",
+    writePayload,
+    task.version,
+    csvBinding,
+  );
+  task = completeModelNode(task, linearWorkflow, "validate", task.version);
+  task = approveNode(task, linearWorkflow, "approve", task.version);
+  assertApprovedWriteIntent(task, "knowledge.write", writePayload, csvBinding);
+  assert.throws(
+    () => assertApprovedWriteIntent(task, "knowledge.write", writePayload, sqliteBinding),
+    /存储在批准后发生变化/,
+  );
+  const legacyWaiting = readyForApproval();
+  const legacyApproved = approveNode(legacyWaiting, linearWorkflow, "approve", legacyWaiting.version);
+  assert.throws(
+    () => assertApprovedWriteIntent(legacyApproved, "knowledge.write", writePayload, csvBinding),
+    /旧审批未绑定当前业务存储/,
+  );
+  const incompatible = failApprovedWriteAsIncompatible(
+    legacyApproved,
+    legacyApproved.version,
+    "storage backend changed",
+  );
+  assert.equal(incompatible.status, "failed");
+  assert.equal(incompatible.audit.at(-1)?.action, "write_storage_incompatible");
 });
 
 test("weekly deck is frozen before approval and records committed artifacts", () => {

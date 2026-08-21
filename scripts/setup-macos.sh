@@ -22,7 +22,11 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 2
 fi
 command -v python3 >/dev/null 2>&1 || { printf 'Python 3.11+ is required.\n' >&2; exit 2; }
-command -v node >/dev/null 2>&1 || { printf 'Node.js 22.19+ is required.\n' >&2; exit 2; }
+command -v node >/dev/null 2>&1 || { printf 'The validated Node.js 24.19.x runtime is required.\n' >&2; exit 2; }
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 24 || minor < 19) process.exit(2)' || {
+  printf 'Unsupported Node.js %s. Install Node.js 24.19.0 or newer within the Node 24 line.\n' "$(node --version)" >&2
+  exit 2
+}
 
 PNPM_COMMAND="$(command -v pnpm || true)"
 case "$PNPM_COMMAND" in

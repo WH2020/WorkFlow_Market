@@ -27,7 +27,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +62,17 @@ from agent_platform.mail_provider import (  # noqa: E402
     import_reimbursement_mail,
     mail_settings_summary,
     search_reimbursement_mail,
+)
+from agent_platform.business_backend import (  # noqa: E402
+    BusinessBackendError,
+    data_summary as business_data_summary,
+    knowledge_entries as business_knowledge_entries,
+    knowledge_urls as business_knowledge_urls,
+    read_account_360,
+    read_signals,
+    resolve_business_backend,
+    search_accounts,
+    search_business_records,
 )
 
 
@@ -404,6 +415,11 @@ def open_data_directory() -> Path:
 
 
 def open_knowledge_file() -> Path:
+    backend = resolve_business_backend(ROOT)
+    if backend.backend == "sqlite":
+        # Do not open the SQLite file in an arbitrary desktop application or
+        # silently expose the stale pre-cutover CSV as the active knowledge base.
+        return open_data_directory()
     target = ROOT / "data" / "knowledge" / "source-register.csv"
     if target.is_symlink() or not target.is_file():
         raise ValueError("知识库文件尚未创建")
@@ -1829,7 +1845,14 @@ def file_summary(relative: str) -> dict[str, Any]:
 
 
 def data_summary() -> dict[str, Any]:
+    try:
+        selected = business_data_summary(ROOT)
+    except BusinessBackendError as error:
+        return {"backend": "error", "error": str(error), "knowledge": [], "sales": []}
+    if selected["backend"] == "sqlite":
+        return selected
     return {
+        "backend": "csv", "binding_id": selected["binding_id"],
         "knowledge": [file_summary("data/knowledge/source-register.csv")],
         "sales": [file_summary(f"data/sales/{name}") for name in (
             "customers.csv", "activities.csv", "resource-requests.csv", "sales-assets.csv")],
@@ -1990,32 +2013,10 @@ def _csv_rows(relative: str, limit: int = 5000) -> list[dict[str, str]]:
 
 
 def knowledge_entries(limit: int = 500) -> dict[str, Any]:
-    path = ROOT / "data" / "knowledge" / "source-register.csv"
     try:
-        metadata = path.stat()
-    except OSError:
-        return {"version": "missing", "entries": [], "truncated": False}
-    if path.is_symlink() or not path.is_file() or metadata.st_size > 16 * 1024 * 1024:
-        return {"version": "missing", "entries": [], "truncated": False}
-    allowed_fields = (
-        "source_id", "title", "url", "publisher", "published_date", "accessed_date", "region",
-        "topic", "source_type", "quality", "exposure_status", "key_facts", "important_quotes",
-        "interpretation", "limitations", "status", "notes",
-    )
-    rows = _csv_rows("data/knowledge/source-register.csv", limit + 1)
-    entries = [
-        {field: str(row.get(field) or "")[:12000] for field in allowed_fields}
-        for row in rows[:limit]
-    ]
-    entries.sort(
-        key=lambda row: (row.get("accessed_date", ""), row.get("published_date", ""), row.get("source_id", "")),
-        reverse=True,
-    )
-    return {
-        "version": f"{metadata.st_mtime_ns}:{metadata.st_size}",
-        "entries": entries,
-        "truncated": len(rows) > limit,
-    }
+        return business_knowledge_entries(ROOT, limit)
+    except BusinessBackendError as error:
+        return {"version": "error", "entries": [], "truncated": False, "error": str(error)}
 
 
 def open_knowledge_source(payload: dict[str, Any]) -> str:
@@ -2025,11 +2026,10 @@ def open_knowledge_source(payload: dict[str, Any]) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("来源链接只允许普通 HTTP/HTTPS 地址")
-    allowed = {
-        str(row.get("url") or "").strip()
-        for row in _csv_rows("data/knowledge/source-register.csv", 5000)
-        if str(row.get("url") or "").strip()
-    }
+    try:
+        allowed = business_knowledge_urls(ROOT)
+    except BusinessBackendError as error:
+        raise ValueError(str(error)) from error
     if url not in allowed:
         raise ValueError("该链接不属于当前知识库记录")
     if not webbrowser.open(url, new=2):
@@ -2065,22 +2065,17 @@ def local_search(payload: dict[str, Any]) -> dict[str, Any]:
             if _match_text(query, [task.get("service_id"), task.get("request"), task.get("status")]):
                 add("任务", service_display_name(task.get("service_id")), TASK_STATUS_DISPLAY_NAMES.get(str(task.get("status") or ""), "状态未知"), str(task.get("request") or ""), str(task.get("task_id") or ""), str(task.get("project_id") or DEFAULT_PROJECT_ID))
     if "knowledge" in scopes:
-        for row in _csv_rows("data/knowledge/source-register.csv"):
+        knowledge = knowledge_entries(5000)
+        for row in knowledge.get("entries", []):
             fields = [row.get(key) for key in ("title", "publisher", "region", "topic", "notes", "status")]
             if _match_text(query, fields):
                 add("知识", row.get("title") or "未命名来源", _snippet([row.get("publisher"), row.get("published_date"), row.get("status")]), _snippet([row.get("topic"), row.get("region"), row.get("notes")]), row.get("url") or row.get("source_id") or "")
     if "sales" in scopes:
-        sources = [
-            ("data/sales/customers.csv", "客户", "customer_name", ("region", "sector", "owner", "stage", "health"), ("risks", "next_action"), "customer_id"),
-            ("data/sales/activities.csv", "跟进", "summary", ("occurred_at", "channel", "activity_type"), ("commitment", "next_action"), "activity_id"),
-            ("data/sales/resource-requests.csv", "资源", "request_summary", ("resource_type", "owner", "status", "deadline"), ("business_reason", "decision"), "request_id"),
-            ("data/sales/sales-assets.csv", "资料", "title", ("asset_type", "owner", "status"), ("use_case", "usage_feedback"), "asset_id"),
-        ]
-        for relative, kind, title_key, meta_keys, snippet_keys, id_key in sources:
-            for row in _csv_rows(relative):
-                fields = list(row.values())
-                if _match_text(query, fields):
-                    add(kind, row.get(title_key) or f"未命名{kind}", _snippet([row.get(key) for key in meta_keys]), _snippet([row.get(key) for key in snippet_keys]), row.get(id_key) or relative)
+        try:
+            for row in search_business_records(ROOT, query, 60 - len(results)) if len(results) < 60 else []:
+                add(str(row.get("kind") or "销售"), str(row.get("title") or "未命名记录"), str(row.get("subtitle") or ""), str(row.get("snippet") or ""), str(row.get("reference") or ""))
+        except BusinessBackendError as error:
+            add("销售数据", "业务存储暂不可用", "请检查存储配置", str(error), "storage-backend")
     if "files" in scopes:
         for item in project_files():
             if _match_text(query, [item["name"], item["path"]]):
@@ -2117,6 +2112,18 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def send_business_error(self, error: BusinessBackendError | ValueError) -> None:
+        code = error.code if isinstance(error, BusinessBackendError) else "INVALID_INPUT"
+        if code == "NOT_FOUND":
+            status = HTTPStatus.NOT_FOUND
+        elif code.startswith("INVALID"):
+            status = HTTPStatus.BAD_REQUEST
+        elif code in {"STORE_BUSY"}:
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+        else:
+            status = HTTPStatus.CONFLICT
+        self.send_json(status, {"error": str(error), "code": code})
 
     def body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -2187,7 +2194,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if not self.local_host():
             self.send_error(HTTPStatus.FORBIDDEN)
             return
-        route = urlparse(self.path).path
+        parsed_request = urlparse(self.path)
+        route = parsed_request.path
         if route == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT)
             self.end_headers()
@@ -2235,6 +2243,59 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/knowledge":
             self.send_json(HTTPStatus.OK, knowledge_entries())
+            return
+        if route == "/api/accounts":
+            try:
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=20)
+                filters = {
+                    key: query[key][0]
+                    for key in ("owner", "region", "sector", "lifecycle_stage", "health", "project_id")
+                    if key in query and query[key]
+                }
+                result = search_accounts(
+                    ROOT,
+                    query=query.get("query", [""])[0],
+                    filters=filters,
+                    cursor=query.get("cursor", [None])[0],
+                    limit=int(query.get("limit", ["20"])[0]),
+                )
+                self.send_json(HTTPStatus.OK, result)
+            except (BusinessBackendError, ValueError) as error:
+                self.send_business_error(error)
+            return
+        if route.startswith("/api/accounts/") and route.endswith("/360"):
+            try:
+                parts = route.split("/")
+                if len(parts) != 5:
+                    raise ValueError("客户 360 地址无效")
+                account_id = unquote(parts[3])
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=10)
+                sections_text = query.get("sections", [""])[0]
+                sections = [item for item in sections_text.split(",") if item] if sections_text else None
+                result = read_account_360(
+                    ROOT,
+                    account_id,
+                    sections=sections,
+                    since=query.get("since", [None])[0],
+                )
+                self.send_json(HTTPStatus.OK, result)
+            except (BusinessBackendError, ValueError) as error:
+                self.send_business_error(error)
+            return
+        if route == "/api/signals":
+            try:
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=10)
+                result = read_signals(
+                    ROOT,
+                    account_id=query.get("account_id", [None])[0],
+                    status=query.get("status", [None])[0],
+                    severity=query.get("severity", [None])[0],
+                    cursor=query.get("cursor", [None])[0],
+                    limit=int(query.get("limit", ["20"])[0]),
+                )
+                self.send_json(HTTPStatus.OK, result)
+            except (BusinessBackendError, ValueError) as error:
+                self.send_business_error(error)
             return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
@@ -2309,8 +2370,13 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 })
             elif route == "/api/knowledge/file/open":
                 file_path = open_knowledge_file()
+                sqlite_directory = file_path.is_dir()
                 self.send_json(HTTPStatus.OK, {
-                    "message": "已使用系统默认表格软件打开知识库。", "path": str(file_path),
+                    "message": (
+                        "当前知识库使用 SQLite；已打开其所在数据目录，请在工作台知识库页面查看和检索内容。"
+                        if sqlite_directory else "已使用系统默认表格软件打开知识库。"
+                    ),
+                    "path": str(file_path),
                 })
             elif route == "/api/knowledge/source/open":
                 url = open_knowledge_source(payload)

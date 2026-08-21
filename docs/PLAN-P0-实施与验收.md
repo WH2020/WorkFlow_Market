@@ -1,11 +1,11 @@
 # Agent4Market 阶段 A：实施与验收计划
 
-- 状态：执行中——A0、A1 已完成并通过 Windows/macOS 跨平台回归，A2 待开始
+- 状态：执行中——A0、A1 已完成跨平台回归；A2 已实现并等待本提交的跨平台回归，A3 待开始
 - 产品范围：[客户经营核心 PRD](PRD-P0-客户经营核心.md)
 - 数据设计：[SQLite 数据模型与迁移](ARCH-P0-SQLite数据模型与迁移.md)
 - A0 状态：[ADR-001 SQLite 驱动门禁](ADR-001-SQLite驱动门禁.md)
 
-> 执行进度：STORE-A0-01/02/03 与 STORE-A1-01～04 已完成。schema v1、Store、CSV staging、对账、备份恢复、指针切换和 CSV 导出回环已通过 Windows、macOS Intel 与 macOS Apple Silicon 回归（[跨平台 CI #32450446290](https://github.com/WH2020/WorkFlow_Market/actions/runs/32450446290)）。A2 及正式数据迁移尚未开始，当前正式业务数据仍使用原存储。
+> 执行进度：STORE-A0-01/02/03、STORE-A1-01～04 与 STORE-A2-01～03 已完成实现。A2 已接通严格存储指针、`sales.*` / `knowledge.*`、客户查询/360/信号只读接口和存储绑定 Approval；本地回归通过，跨平台 CI 待本提交验证。没有读取、迁移或激活正式业务数据，现有安装仍使用原存储。
 
 ## 1. 交付目标
 
@@ -330,10 +330,10 @@ python -m agent_platform verify-sales-store --database data/agent4market.db
 5. **STORE-A1-02**：实现 `LocalBusinessStore`、参数化查询和事务 mutation。
 6. **STORE-A1-03**：实现 CSV dry-run、staging 导入、对账和隔离报告。
 7. **STORE-A1-04**：实现备份、存储指针切换、回滚和 CSV 导出。
-8. **STORE-A2-01**：将 `sales.read/write` 接入 Store 接口并跑契约回归。
-9. **STORE-A2-02**：将 `knowledge.search/write` 接入来源与证据表。
-10. **ACCOUNT-A3-01**：实现客户搜索和 360 只读 API。
-11. **ACCOUNT-A3-02**：实现客户列表、上下文条和 360 页面。
+8. **STORE-A2-01（已实现）**：将 `sales.read/write` 接入 Store 接口并跑契约回归。
+9. **STORE-A2-02（已实现）**：将 `knowledge.search/write` 接入来源与证据表。
+10. **STORE-A2-03（已实现）**：实现客户搜索、360 和信号只读逻辑工具/本机 API。
+11. **ACCOUNT-A3-01**：实现客户列表、上下文条、时间线和 360 页面。
 12. **SIGNAL-A4-01**：实现五条确定性规则和 fingerprint 幂等。
 13. **SIGNAL-A4-02**：实现建议卡、反馈和 Approval 写入闭环。
 14. **PLAY-A4-01**：定义五个 Play 版本并接入自然语言推荐。

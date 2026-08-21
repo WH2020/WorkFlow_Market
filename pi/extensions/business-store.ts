@@ -116,6 +116,12 @@ const TABLES = {
   },
 } as const satisfies Record<string, TableDefinition>;
 
+const EVIDENCE_TARGETS = {
+  accounts: "accounts", contacts: "contacts", opportunities: "opportunities", activities: "activities",
+  commitments: "commitments", risks: "risks", signals: "signals", actions: "actions",
+  resource_requests: "resource_requests", sales_assets: "sales_assets", artifacts: "artifacts", task_links: "task_links",
+} as const satisfies Record<string, BusinessTable>;
+
 export type BusinessTable = keyof typeof TABLES;
 
 export type BusinessMutation = {
@@ -134,7 +140,12 @@ export type BusinessCommitInput = {
   mutations: BusinessMutation[];
 };
 
-export type BusinessCommitRequest = BusinessCommitInput & { payload_sha256: string };
+export type BusinessCommitRequest = BusinessCommitInput & {
+  /** Hash of the payload frozen and approved by the governed runtime. */
+  approved_payload_sha256?: string;
+  /** Legacy direct-store envelope hash. Retained for the A1 gate only. */
+  payload_sha256?: string;
+};
 
 export type BusinessMutationResult = {
   table: BusinessTable;
@@ -148,6 +159,7 @@ export type BusinessCommitResult = {
   task_id: string;
   logical_tool: string;
   payload_sha256: string;
+  approved_payload_sha256?: string;
   mutations: BusinessMutationResult[];
   committed_at: string;
 };
@@ -277,6 +289,16 @@ function validateMutation(mutation: BusinessMutation): TableDefinition {
   } else if (!Number.isSafeInteger(mutation.expected_version) || (mutation.expected_version ?? 0) < 1) {
     throw new LocalBusinessStoreError("INVALID_INPUT", "update 必须提供正整数 expected_version");
   }
+  if (mutation.table === "accounts") {
+    if (mutation.operation === "update" && "normalized_name" in mutation.values && !("name" in mutation.values)) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "normalized_name 不能脱离 name 单独更新");
+    }
+    if ("name" in mutation.values) {
+      const name = mutation.values.name;
+      const expected = typeof name === "string" ? name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase() : "";
+      if (mutation.values.normalized_name !== expected) throw new LocalBusinessStoreError("INVALID_INPUT", "accounts.normalized_name 必须与规范化 name 一致");
+    }
+  }
   return definition;
 }
 
@@ -298,6 +320,30 @@ function mapSqlError(error: unknown): never {
 
 export function businessPayloadSha256(input: BusinessCommitInput): string {
   return sha256(Buffer.from(canonicalJson(input), "utf8"));
+}
+
+function commitEnvelopeSha256(input: BusinessCommitInput, approvedPayloadSha256: string): string {
+  return sha256(Buffer.from(canonicalJson({ ...input, approved_payload_sha256: approvedPayloadSha256 }), "utf8"));
+}
+
+export type CursorPage = { rows: Record<string, unknown>[]; next_cursor?: string };
+export type BusinessSearchResult = { rows: Record<string, unknown>[]; total_matches: number };
+export type BusinessSearchPage = BusinessSearchResult & { next_cursor?: string };
+export type BusinessPeriodResult = BusinessSearchResult;
+
+function cursorScope(value: unknown): string { return sha256(Buffer.from(canonicalJson(value), "utf8")); }
+function encodeCursor(updatedAt: string, id: string, scope: string): string {
+  return Buffer.from(JSON.stringify({ updated_at: updatedAt, id, scope }), "utf8").toString("base64url");
+}
+
+function decodeCursor(cursor: string | undefined, expectedScope: string): { updated_at: string; id: string } | undefined {
+  if (cursor === undefined) return undefined;
+  if (typeof cursor !== "string" || cursor.length < 1 || cursor.length > 2048) throw new LocalBusinessStoreError("INVALID_CURSOR", "cursor 无效");
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (typeof value.updated_at !== "string" || typeof value.id !== "string" || value.scope !== expectedScope || !value.updated_at || !value.id) throw new Error();
+    return { updated_at: value.updated_at, id: value.id };
+  } catch { throw new LocalBusinessStoreError("INVALID_CURSOR", "cursor 无效或已损坏"); }
 }
 
 export class SalesBusinessStore {
@@ -436,6 +482,310 @@ export class SalesBusinessStore {
     ).all(normalized, `%${escaped}%`, limit) as Record<string, unknown>[];
   }
 
+  searchAccountsPage(
+    query: string,
+    filters: { region?: string; sector?: string; owner?: string; lifecycle_stage?: string; health?: string; project_id?: string } = {},
+    cursor?: string,
+    limit = 20,
+  ): CursorPage {
+    if (typeof query !== "string" || query.length > 500) throw new LocalBusinessStoreError("INVALID_INPUT", "客户查询最多 500 字符");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new LocalBusinessStoreError("INVALID_INPUT", "limit 必须为 1-100");
+    const allowedFilters = new Set(["region", "sector", "owner", "lifecycle_stage", "health", "project_id"]);
+    for (const [key, value] of Object.entries(filters)) {
+      if (!allowedFilters.has(key) || typeof value !== "string" || value.length > 500) {
+        throw new LocalBusinessStoreError("INVALID_INPUT", `${key} 筛选无效`);
+      }
+    }
+    const normalized = query.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+    const escaped = normalized.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+    const normalizedFilters = Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== undefined));
+    const scope = cursorScope({ tool: "account.search", query: normalized, filters: normalizedFilters });
+    const page = decodeCursor(cursor, scope);
+    const rows = this.database.prepare(`
+      SELECT account_id, name, normalized_name, region, sector, owner, lifecycle_stage, health,
+             budget_path, summary, project_id, version, created_at, updated_at
+      FROM accounts
+      WHERE deleted_at IS NULL
+        AND (? = '' OR normalized_name LIKE ? ESCAPE '\\' OR lower(coalesce(summary, '')) LIKE ? ESCAPE '\\'
+          OR lower(coalesce(region, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(sector, '')) LIKE ? ESCAPE '\\'
+          OR lower(coalesce(owner, '')) LIKE ? ESCAPE '\\')
+        AND (? IS NULL OR region = ?) AND (? IS NULL OR sector = ?) AND (? IS NULL OR owner = ?)
+        AND (? IS NULL OR lifecycle_stage = ?) AND (? IS NULL OR health = ?) AND (? IS NULL OR project_id = ?)
+        AND (? IS NULL OR updated_at < ? OR (updated_at = ? AND account_id > ?))
+      ORDER BY updated_at DESC, account_id ASC LIMIT ?
+    `).all(
+      normalized, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`, `%${escaped}%`,
+      filters.region ?? null, filters.region ?? null,
+      filters.sector ?? null, filters.sector ?? null,
+      filters.owner ?? null, filters.owner ?? null,
+      filters.lifecycle_stage ?? null, filters.lifecycle_stage ?? null,
+      filters.health ?? null, filters.health ?? null,
+      filters.project_id ?? null, filters.project_id ?? null,
+      page?.updated_at ?? null, page?.updated_at ?? null, page?.updated_at ?? null, page?.id ?? null,
+      limit + 1,
+    ) as Record<string, unknown>[];
+    const returned = rows.slice(0, limit);
+    const last = returned.at(-1);
+    return {
+      rows: returned,
+      ...(rows.length > limit && last ? { next_cursor: encodeCursor(String(last.updated_at), String(last.account_id), scope) } : {}),
+    };
+  }
+
+  readAccount360(accountId: string, sections?: string[], since?: string): Record<string, unknown> | undefined {
+    assertText(accountId, "account_id", 128);
+    if (since !== undefined && (typeof since !== "string" || !Number.isFinite(Date.parse(since)))) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "since 必须是有效时间");
+    }
+    const allowed = new Set(["contacts", "opportunities", "activities", "commitments", "risks", "signals", "actions", "resource_requests", "sales_assets", "task_links", "artifacts", "evidence_refs"]);
+    const selected = sections === undefined ? allowed : new Set(sections);
+    if ([...selected].some((item) => !allowed.has(item))) throw new LocalBusinessStoreError("INVALID_INPUT", "sections 包含未知客户 360 分区");
+    const account = this.readAccount(accountId);
+    if (!account || account.deleted_at !== null) return undefined;
+    const result: Record<string, unknown> = { account };
+    const sectionLimit = 1000;
+    const truncatedSections = new Set<string>();
+    const query = (sql: string, ...args: SqlValue[]): Record<string, unknown>[] => this.database.prepare(sql).all(...args) as Record<string, unknown>[];
+    const assignSection = (name: string, sql: string, ...args: SqlValue[]): void => {
+      const rows = query(`${sql} LIMIT ?`, ...args, sectionLimit + 1);
+      if (rows.length > sectionLimit) truncatedSections.add(name);
+      result[name] = rows.slice(0, sectionLimit);
+    };
+    if (selected.has("contacts")) assignSection("contacts", `SELECT c.contact_id, c.display_name, c.organization, c.title, c.email, c.phone, c.identity_status, ac.role, ac.influence_level, ac.decision_role, ac.relationship_status, ac.is_primary, c.version, c.updated_at FROM account_contacts ac JOIN contacts c ON c.contact_id=ac.contact_id WHERE ac.account_id=? AND ac.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY ac.is_primary DESC, c.updated_at DESC, c.contact_id`, accountId);
+    if (selected.has("opportunities")) assignSection("opportunities", `SELECT * FROM opportunities WHERE account_id=? AND deleted_at IS NULL AND (? IS NULL OR updated_at>=?) ORDER BY updated_at DESC, opportunity_id`, accountId, since ?? null, since ?? null);
+    for (const table of ["activities", "commitments", "risks", "signals", "actions", "resource_requests", "sales_assets", "task_links", "artifacts"] as const) {
+      if (!selected.has(table)) continue;
+      const time = table === "activities" ? "occurred_at" : table === "signals" ? "last_seen_at" : "updated_at";
+      const id = TABLES[table].id;
+      assignSection(table, `SELECT * FROM ${table} WHERE account_id=? AND deleted_at IS NULL AND (? IS NULL OR ${time}>=?) ORDER BY ${time} DESC, ${id}`, accountId, since ?? null, since ?? null);
+    }
+    if (selected.has("evidence_refs")) {
+      const references: Array<[string, string]> = [["accounts", accountId]];
+      for (const [section, values] of Object.entries(result)) {
+        if (!Array.isArray(values) || !(section in TABLES)) continue;
+        const id = (TABLES as Record<string, TableDefinition>)[section]?.id;
+        if (id) for (const value of values) if (value && typeof value === "object" && (value as Record<string, unknown>)[id]) references.push([section, String((value as Record<string, unknown>)[id])]);
+      }
+      const evidence = new Map<string, Record<string, unknown>>();
+      for (let offset = 0; offset < references.length && evidence.size <= sectionLimit; offset += 300) {
+        const chunk = references.slice(offset, offset + 300);
+        const clauses = chunk.map(() => "(entity_type=? AND entity_id=?)").join(" OR ");
+        for (const row of query(`SELECT * FROM evidence_refs WHERE deleted_at IS NULL AND (${clauses}) ORDER BY entity_type, entity_id, evidence_ref_id LIMIT ?`, ...chunk.flat(), sectionLimit + 1)) {
+          evidence.set(String(row.evidence_ref_id), row);
+        }
+      }
+      const evidenceRows = [...evidence.values()].sort((left, right) =>
+        String(left.entity_type).localeCompare(String(right.entity_type)) ||
+        String(left.entity_id).localeCompare(String(right.entity_id)) ||
+        String(left.evidence_ref_id).localeCompare(String(right.evidence_ref_id))
+      );
+      if (evidenceRows.length > sectionLimit) truncatedSections.add("evidence_refs");
+      result.evidence_refs = evidenceRows.slice(0, sectionLimit);
+    }
+    result.truncated_sections = [...truncatedSections].sort();
+    return result;
+  }
+
+  readSignals(filters: { account_id?: string; status?: string; severity?: string } = {}, cursor?: string, limit = 20): CursorPage {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new LocalBusinessStoreError("INVALID_INPUT", "limit 必须为 1-100");
+    const allowedFilters = new Set(["account_id", "status", "severity"]);
+    for (const [key, value] of Object.entries(filters)) {
+      if (!allowedFilters.has(key) || (value !== undefined && (typeof value !== "string" || value.length > 500))) {
+        throw new LocalBusinessStoreError("INVALID_INPUT", `${key} 筛选无效`);
+      }
+    }
+    const normalizedFilters = Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== undefined));
+    const scope = cursorScope({ tool: "signals.read", filters: normalizedFilters });
+    const page = decodeCursor(cursor, scope);
+    const rows = this.database.prepare(`SELECT * FROM signals WHERE deleted_at IS NULL
+      AND (? IS NULL OR account_id=?) AND (? IS NULL OR status=?) AND (? IS NULL OR severity=?)
+      AND (? IS NULL OR updated_at < ? OR (updated_at = ? AND signal_id > ?))
+      ORDER BY updated_at DESC, signal_id ASC LIMIT ?`).all(
+      filters.account_id ?? null, filters.account_id ?? null, filters.status ?? null, filters.status ?? null,
+      filters.severity ?? null, filters.severity ?? null,
+      page?.updated_at ?? null, page?.updated_at ?? null, page?.updated_at ?? null, page?.id ?? null, limit + 1,
+    ) as Record<string, unknown>[];
+    const returned = rows.slice(0, limit); const last = returned.at(-1);
+    return { rows: returned, ...(rows.length > limit && last ? { next_cursor: encodeCursor(String(last.updated_at), String(last.signal_id), scope) } : {}) };
+  }
+
+  readBusinessTable(table: BusinessTable, query = "", limit = 20): Record<string, unknown>[] {
+    const definition = TABLES[table] as TableDefinition | undefined;
+    if (!definition) throw new LocalBusinessStoreError("INVALID_INPUT", "未知业务表");
+    if (typeof query !== "string" || query.length > 500 || !Number.isSafeInteger(limit) || limit < 1 || limit > 1001) throw new LocalBusinessStoreError("INVALID_INPUT", "业务表查询参数无效");
+    const normalized = query.normalize("NFKC").trim().toLowerCase();
+    const escaped = normalized.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+    const searchable = [definition.id, ...definition.fields].map((field) => `lower(coalesce(CAST(${field} AS TEXT), '')) LIKE ? ESCAPE '\\'`).join(" OR ");
+    const args = normalized ? [ ...Array(definition.fields.length + 1).fill(`%${escaped}%`), limit] : [limit];
+    return this.database.prepare(`SELECT * FROM ${table} WHERE deleted_at IS NULL ${normalized ? `AND (${searchable})` : ""} ORDER BY updated_at DESC, ${definition.id} ASC LIMIT ?`).all(...args) as Record<string, unknown>[];
+  }
+
+  readBusinessTablePeriod(
+    table: BusinessTable,
+    dateFields: string[],
+    startMs: number,
+    endExclusiveMs: number,
+    limit = 1000,
+  ): BusinessPeriodResult {
+    const definition = TABLES[table] as TableDefinition | undefined;
+    if (!definition) throw new LocalBusinessStoreError("INVALID_INPUT", "未知业务表");
+    if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(endExclusiveMs) || startMs >= endExclusiveMs) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "业务表周期无效");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "业务表周期 limit 必须为 1-1000");
+    }
+    const allowedFields = new Set([...definition.fields, "created_at", "updated_at"]);
+    if (dateFields.length < 1 || new Set(dateFields).size !== dateFields.length || dateFields.some((field) => !allowedFields.has(field))) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", `不支持的 ${table} 周期字段`);
+    }
+    const timestamp = (field: string): string =>
+      `unixepoch(CASE WHEN length(trim(coalesce(${field}, '')))=10 THEN trim(${field}) || 'T00:00:00+08:00' ELSE trim(${field}) END)`;
+    const secondsStart = Math.floor(startMs / 1000);
+    const secondsEnd = Math.floor(endExclusiveMs / 1000);
+    const predicates = dateFields.map((field) => `(${timestamp(field)} >= ? AND ${timestamp(field)} < ?)`);
+    const parameters: SqlValue[] = dateFields.flatMap(() => [secondsStart, secondsEnd]);
+    const where = `deleted_at IS NULL AND (${predicates.join(" OR ")})`;
+    const totalMatches = numberFromRow(
+      this.database.prepare(`SELECT count(*) FROM ${table} WHERE ${where}`).get(...parameters),
+      `${table} period count`,
+    );
+    const rows = this.database.prepare(
+      `SELECT * FROM ${table} WHERE ${where} ORDER BY updated_at DESC, ${definition.id} ASC LIMIT ?`,
+    ).all(...parameters, limit) as Record<string, unknown>[];
+    return { rows, total_matches: totalMatches };
+  }
+
+  readWeeklyAccounts(startMs: number, endExclusiveMs: number, limit = 1000): BusinessPeriodResult {
+    if (!Number.isSafeInteger(startMs) || !Number.isSafeInteger(endExclusiveMs) || startMs >= endExclusiveMs) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "客户周报周期无效");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "客户周报 limit 必须为 1-1000");
+    }
+    const secondsStart = Math.floor(startMs / 1000);
+    const secondsEnd = Math.floor(endExclusiveMs / 1000);
+    const timestamp = (expression: string): string =>
+      `unixepoch(CASE WHEN length(trim(coalesce(${expression}, '')))=10 THEN trim(${expression}) || 'T00:00:00+08:00' ELSE trim(${expression}) END)`;
+    const latestActivity = "(SELECT x.occurred_at FROM activities x WHERE x.account_id=a.account_id AND x.deleted_at IS NULL ORDER BY x.occurred_at DESC, x.activity_id ASC LIMIT 1)";
+    const nextOpenAction = "(SELECT x.due_at FROM actions x WHERE x.account_id=a.account_id AND x.deleted_at IS NULL AND x.status NOT IN ('completed','cancelled') ORDER BY CASE WHEN trim(coalesce(x.due_at,''))='' THEN 1 ELSE 0 END, x.due_at ASC, x.action_id ASC LIMIT 1)";
+    const within = (expression: string): string => `(${timestamp(expression)} >= ? AND ${timestamp(expression)} < ?)`;
+    const where = `a.deleted_at IS NULL AND (${within("a.updated_at")} OR ${within(latestActivity)} OR ${within(nextOpenAction)})`;
+    const parameters: SqlValue[] = [secondsStart, secondsEnd, secondsStart, secondsEnd, secondsStart, secondsEnd];
+    const totalMatches = numberFromRow(
+      this.database.prepare(`SELECT count(*) FROM accounts a WHERE ${where}`).get(...parameters),
+      "weekly accounts count",
+    );
+    const rows = this.database.prepare(
+      `SELECT a.* FROM accounts a WHERE ${where} ORDER BY a.updated_at DESC, a.account_id ASC LIMIT ?`,
+    ).all(...parameters, limit) as Record<string, unknown>[];
+    return { rows, total_matches: totalMatches };
+  }
+
+  searchBusinessTable(
+    table: BusinessTable,
+    query = "",
+    exactFilters: Record<string, string> = {},
+    limit = 20,
+  ): BusinessSearchResult {
+    const definition = TABLES[table] as TableDefinition | undefined;
+    if (!definition) throw new LocalBusinessStoreError("INVALID_INPUT", "未知业务表");
+    if (typeof query !== "string" || query.length > 500 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "业务表查询参数无效");
+    }
+    const allowedFilters = new Set([definition.id, ...definition.fields, "version", "created_at", "updated_at"]);
+    for (const [field, value] of Object.entries(exactFilters)) {
+      if (!allowedFilters.has(field) || typeof value !== "string" || value.length > 10_000) {
+        throw new LocalBusinessStoreError("INVALID_INPUT", `不支持的 ${table} 精确筛选字段`);
+      }
+    }
+    const normalized = query.normalize("NFKC").trim().toLowerCase();
+    const escaped = normalized.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+    const searchableFields = [definition.id, ...definition.fields.filter((field) => field !== "deleted_at")];
+    const where = ["deleted_at IS NULL"];
+    const parameters: SqlValue[] = [];
+    if (normalized) {
+      where.push(`(${searchableFields.map((field) => `lower(coalesce(CAST(${field} AS TEXT), '')) LIKE ? ESCAPE '\\'`).join(" OR ")})`);
+      parameters.push(...searchableFields.map(() => `%${escaped}%`));
+    }
+    for (const [field, value] of Object.entries(exactFilters).sort(([left], [right]) => left.localeCompare(right))) {
+      where.push(`coalesce(CAST(${field} AS TEXT), '') = ?`);
+      parameters.push(value);
+    }
+    const predicate = where.join(" AND ");
+    const totalMatches = numberFromRow(
+      this.database.prepare(`SELECT count(*) FROM ${table} WHERE ${predicate}`).get(...parameters),
+      `${table} search count`,
+    );
+    const rows = this.database.prepare(
+      `SELECT * FROM ${table} WHERE ${predicate} ORDER BY updated_at DESC, ${definition.id} ASC LIMIT ?`,
+    ).all(...parameters, limit) as Record<string, unknown>[];
+    return { rows, total_matches: totalMatches };
+  }
+
+  searchBusinessTablePage(
+    table: BusinessTable,
+    query = "",
+    exactFilters: Record<string, string> = {},
+    cursor?: string,
+    limit = 20,
+  ): BusinessSearchPage {
+    const definition = TABLES[table] as TableDefinition | undefined;
+    if (!definition) throw new LocalBusinessStoreError("INVALID_INPUT", "未知业务表");
+    if (typeof query !== "string" || query.length > 500 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new LocalBusinessStoreError("INVALID_INPUT", "业务表分页查询参数无效");
+    }
+    const allowedFilters = new Set([definition.id, ...definition.fields, "version", "created_at", "updated_at"]);
+    for (const [field, value] of Object.entries(exactFilters)) {
+      if (!allowedFilters.has(field) || typeof value !== "string" || value.length > 10_000) {
+        throw new LocalBusinessStoreError("INVALID_INPUT", `不支持的 ${table} 精确筛选字段`);
+      }
+    }
+    const normalized = query.normalize("NFKC").trim().toLowerCase();
+    const escaped = normalized.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+    const normalizedFilters = Object.fromEntries(Object.entries(exactFilters).sort(([left], [right]) => left.localeCompare(right)));
+    const scope = cursorScope({ tool: "business.search", table, query: normalized, filters: normalizedFilters });
+    const page = decodeCursor(cursor, scope);
+    const searchableFields = [definition.id, ...definition.fields.filter((field) => field !== "deleted_at")];
+    const baseWhere = ["deleted_at IS NULL"];
+    const baseParameters: SqlValue[] = [];
+    if (normalized) {
+      baseWhere.push(`(${searchableFields.map((field) => `lower(coalesce(CAST(${field} AS TEXT), '')) LIKE ? ESCAPE '\\'`).join(" OR ")})`);
+      baseParameters.push(...searchableFields.map(() => `%${escaped}%`));
+    }
+    for (const [field, value] of Object.entries(normalizedFilters)) {
+      baseWhere.push(`coalesce(CAST(${field} AS TEXT), '') = ?`);
+      baseParameters.push(value);
+    }
+    const totalMatches = numberFromRow(
+      this.database.prepare(`SELECT count(*) FROM ${table} WHERE ${baseWhere.join(" AND ")}`).get(...baseParameters),
+      `${table} page count`,
+    );
+    const pageWhere = [...baseWhere];
+    const pageParameters = [...baseParameters];
+    if (page) {
+      pageWhere.push(`(updated_at < ? OR (updated_at = ? AND ${definition.id} > ?))`);
+      pageParameters.push(page.updated_at, page.updated_at, page.id);
+    }
+    const fetched = this.database.prepare(
+      `SELECT * FROM ${table} WHERE ${pageWhere.join(" AND ")} ORDER BY updated_at DESC, ${definition.id} ASC LIMIT ?`,
+    ).all(...pageParameters, limit + 1) as Record<string, unknown>[];
+    const rows = fetched.slice(0, limit);
+    const last = rows.at(-1);
+    return {
+      rows,
+      total_matches: totalMatches,
+      ...(fetched.length > limit && last ? { next_cursor: encodeCursor(String(last.updated_at), String(last[definition.id]), scope) } : {}),
+    };
+  }
+
+  readBusinessRecord(table: BusinessTable, recordId: string): Record<string, unknown> | undefined {
+    const definition = TABLES[table] as TableDefinition | undefined;
+    if (!definition) throw new LocalBusinessStoreError("INVALID_INPUT", "未知业务表");
+    assertText(recordId, "record_id", 128);
+    return this.database.prepare(`SELECT * FROM ${table} WHERE ${definition.id}=?`).get(recordId) as Record<string, unknown> | undefined;
+  }
+
   readReceipt(intentId: string): BusinessCommitResult | undefined {
     assertText(intentId, "intent_id", 128);
     const row = this.database.prepare(
@@ -459,7 +809,10 @@ export class SalesBusinessStore {
     assertText(request.task_id, "task_id", 128);
     assertText(request.session_id, "session_id", 128);
     assertText(request.logical_tool, "logical_tool", 128);
-    assertSha(request.payload_sha256, "payload_sha256");
+    const approvedPayloadSha256 = request.approved_payload_sha256;
+    if (approvedPayloadSha256 !== undefined) assertSha(approvedPayloadSha256, "approved_payload_sha256");
+    if (request.payload_sha256 !== undefined) assertSha(request.payload_sha256, "payload_sha256");
+    if (!approvedPayloadSha256 && !request.payload_sha256) throw new LocalBusinessStoreError("INVALID_INPUT", "提交缺少批准载荷 SHA-256");
     if (!Array.isArray(request.mutations) || request.mutations.length < 1 || request.mutations.length > BUSINESS_STORE_MAX_MUTATIONS) {
       throw new LocalBusinessStoreError("INVALID_INPUT", `每个 intent 必须包含 1-${BUSINESS_STORE_MAX_MUTATIONS} 个 mutation`);
     }
@@ -470,7 +823,10 @@ export class SalesBusinessStore {
       logical_tool: request.logical_tool,
       mutations: request.mutations,
     };
-    if (businessPayloadSha256(input) !== request.payload_sha256) {
+    const envelopeSha256 = approvedPayloadSha256
+      ? commitEnvelopeSha256(input, approvedPayloadSha256)
+      : businessPayloadSha256(input);
+    if (!approvedPayloadSha256 && envelopeSha256 !== request.payload_sha256) {
       throw new LocalBusinessStoreError("PAYLOAD_HASH_MISMATCH", "payload_sha256 与规范化 mutation 不一致");
     }
     const definitions = request.mutations.map(validateMutation);
@@ -480,7 +836,7 @@ export class SalesBusinessStore {
       began = true;
       const receipt = this.readReceipt(request.intent_id);
       if (receipt) {
-        if (receipt.payload_sha256 !== request.payload_sha256) {
+        if (receipt.payload_sha256 !== envelopeSha256 || (approvedPayloadSha256 && receipt.approved_payload_sha256 !== approvedPayloadSha256)) {
           throw new LocalBusinessStoreError("INTENT_PAYLOAD_CONFLICT", "同一 intent 不能绑定不同 payload");
         }
         this.database.exec("COMMIT");
@@ -515,17 +871,41 @@ export class SalesBusinessStore {
           });
         }
       }
+      for (const mutation of request.mutations) {
+        if (mutation.table !== "evidence_refs") continue;
+        const row = this.database.prepare("SELECT entity_type, entity_id, source_id, locator_json FROM evidence_refs WHERE evidence_ref_id=? AND deleted_at IS NULL")
+          .get(mutation.record_id) as { entity_type: string; entity_id: string; source_id: string; locator_json: string } | undefined;
+        if (!row) throw new LocalBusinessStoreError("CONSTRAINT", `证据引用 ${mutation.record_id} 不存在`);
+        const targetTable = (EVIDENCE_TARGETS as Record<string, BusinessTable>)[row.entity_type];
+        if (!targetTable) throw new LocalBusinessStoreError("INVALID_EVIDENCE_TARGET", `证据 entity_type 不受支持: ${row.entity_type}`);
+        const target = TABLES[targetTable];
+        const targetExists = this.database.prepare(`SELECT 1 FROM ${targetTable} WHERE ${target.id}=? AND deleted_at IS NULL`).get(row.entity_id);
+        if (!targetExists) throw new LocalBusinessStoreError("INVALID_EVIDENCE_TARGET", `证据目标不存在: ${row.entity_type}/${row.entity_id}`);
+        const source = this.database.prepare("SELECT source_type FROM sources WHERE source_id=? AND deleted_at IS NULL").get(row.source_id) as { source_type: string | null } | undefined;
+        if (!source) throw new LocalBusinessStoreError("INVALID_EVIDENCE_TARGET", `证据来源不存在: ${row.source_id}`);
+        let locator: unknown;
+        try { locator = JSON.parse(row.locator_json); } catch { throw new LocalBusinessStoreError("INVALID_EVIDENCE_LOCATOR", "证据 locator_json 必须是有效 JSON"); }
+        if (!locator || typeof locator !== "object" || Array.isArray(locator)) throw new LocalBusinessStoreError("INVALID_EVIDENCE_LOCATOR", "证据 locator_json 必须是对象");
+        if (source.source_type === "pdf") {
+          const value = locator as Record<string, unknown>;
+          const pages = value.pages;
+          const validPage = Number.isInteger(value.page) && Number(value.page) >= 1 && Number(value.page) <= 100000;
+          const validPages = Array.isArray(pages) && pages.length > 0 && pages.length <= 1000 && pages.every((page) => Number.isInteger(page) && page >= 1 && page <= 100000);
+          if (!validPage && !validPages) throw new LocalBusinessStoreError("INVALID_EVIDENCE_LOCATOR", "PDF 证据必须提供有效 page 或 pages");
+        }
+      }
       const committed: BusinessCommitResult = {
         intent_id: request.intent_id,
         task_id: request.task_id,
         logical_tool: request.logical_tool,
-        payload_sha256: request.payload_sha256,
+        payload_sha256: envelopeSha256,
+        ...(approvedPayloadSha256 ? { approved_payload_sha256: approvedPayloadSha256 } : {}),
         mutations: results,
         committed_at: committedAt,
       };
       this.database.prepare(
         "INSERT INTO write_receipts(intent_id, task_id, session_id, logical_tool, payload_sha256, status, result_json, committed_at) VALUES (?, ?, ?, ?, ?, 'committed', ?, ?)",
-      ).run(request.intent_id, request.task_id, request.session_id, request.logical_tool, request.payload_sha256, JSON.stringify(committed), committedAt);
+      ).run(request.intent_id, request.task_id, request.session_id, request.logical_tool, envelopeSha256, JSON.stringify(committed), committedAt);
       this.database.exec("COMMIT");
       began = false;
       return committed;

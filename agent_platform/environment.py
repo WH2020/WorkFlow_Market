@@ -31,7 +31,7 @@ from .subagents import (
 )
 
 
-MIN_NODE = (22, 19, 0)
+MIN_NODE = (24, 19, 0)
 MIN_PNPM = (9, 0, 0)
 MIN_PI = (0, 84, 2)
 PPT_PACKAGES = ("pptxgenjs", "@napi-rs/canvas", "jszip", "pdfjs-dist")
@@ -68,6 +68,7 @@ def _command_check(
     name: str,
     minimum: tuple[int, int, int] | None,
     environ: Mapping[str, str],
+    maximum_exclusive: tuple[int, int, int] | None = None,
 ) -> dict[str, Any]:
     path = _command_path(project_root, name, environ)
     if path is None:
@@ -85,7 +86,11 @@ def _command_check(
         return {"name": name, "ok": False, "path": str(path), "reason": f"cannot_run:{type(error).__name__}"}
     output = (completed.stdout or completed.stderr).strip()[:200]
     detected = _version(output)
-    ok = completed.returncode == 0 and (minimum is None or (detected is not None and detected >= minimum))
+    ok = (
+        completed.returncode == 0
+        and (minimum is None or (detected is not None and detected >= minimum))
+        and (maximum_exclusive is None or (detected is not None and detected < maximum_exclusive))
+    )
     result: dict[str, Any] = {
         "name": name,
         "ok": ok,
@@ -96,6 +101,8 @@ def _command_check(
         result["reason"] = f"exit_{completed.returncode}"
     elif minimum is not None and (detected is None or detected < minimum):
         result["reason"] = f"requires_{'.'.join(str(part) for part in minimum)}"
+    elif maximum_exclusive is not None and (detected is None or detected >= maximum_exclusive):
+        result["reason"] = f"requires_below_{'.'.join(str(part) for part in maximum_exclusive)}"
     return result
 
 
@@ -221,7 +228,7 @@ def doctor_report(
         platform_check,
         python_check,
         _command_check(root, "git", None, environment),
-        _command_check(root, "node", MIN_NODE, environment),
+        _command_check(root, "node", MIN_NODE, environment, (25, 0, 0)),
         _command_check(root, "pnpm", MIN_PNPM, environment),
         _command_check(root, "pi", MIN_PI, environment),
         _command_check(root, "rg", None, environment),

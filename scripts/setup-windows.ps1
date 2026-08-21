@@ -32,7 +32,12 @@ function Invoke-ProjectPython {
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw "Node.js 22.19+ was not found. Install Node.js and run this script again."
+    throw "Node.js 24.19.x was not found. Install the validated Node.js 24.19 runtime and run this script again."
+}
+$NodeVersionText = (& node --version).Trim().TrimStart("v")
+$NodeVersion = $null
+if (-not [Version]::TryParse($NodeVersionText, [ref]$NodeVersion) -or $NodeVersion -lt [Version]"24.19.0" -or $NodeVersion -ge [Version]"25.0.0") {
+    throw "Unsupported Node.js ${NodeVersionText}. Install Node.js 24.19.0 or newer within the Node 24 line."
 }
 
 $CodexPrivatePathPattern = '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/]|[\\/]OpenAI\.Codex_)'

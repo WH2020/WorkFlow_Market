@@ -24,6 +24,8 @@ import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { normalizePublicUrl, openWebSource, readLocalPdf } from "./source-readers.ts";
 import { searchPublicWeb } from "./web-search.ts";
+import { openBusinessStore, resolveBusinessBackend } from "./business-backend.ts";
+import type { BusinessMutation, BusinessTable, SalesBusinessStore } from "./business-store.ts";
 
 export type AdapterHooks = {
   projectRoot: () => string;
@@ -31,9 +33,11 @@ export type AdapterHooks = {
     intent_id?: string;
     payload_sha256?: string;
     task_id?: string;
+    session_id?: string;
     profile_id?: string;
     authorized_urls?: string[];
     revision_base_payload?: string;
+    storage_binding?: { backend: "csv" | "sqlite"; binding_id: string };
   } | void;
   afterLogicalTool: (logicalTool: string, params: unknown, details: unknown) => void;
   onLogicalToolError: (
@@ -43,6 +47,17 @@ export type AdapterHooks = {
     error: unknown,
   ) => void;
 };
+
+function assertCommitStorageBinding(
+  commit: ReturnType<AdapterHooks["beforeLogicalTool"]>,
+  backend: ReturnType<typeof resolveBusinessBackend>,
+): void {
+  const expected = commit?.storage_binding;
+  if (!expected) throw new Error("业务写入缺少审批时冻结的存储绑定；请重新确认后再写入");
+  if (expected.backend !== backend.backend || expected.binding_id !== backend.binding_id) {
+    throw new Error("业务存储在审批后发生变化；本次未写入，请基于当前数据重新生成并确认");
+  }
+}
 
 type TableDefinition = {
   file: string;
@@ -533,34 +548,87 @@ export function collectWeeklySnapshot(
     activities: ["occurred_at", "created_at", "next_action_due"],
     resource_requests: ["requested_at", "updated_at", "deadline"],
   };
-  if (profileId === "market-director" || profileId === undefined) {
-    for (const tableName of ["customers", "activities", "resource_requests"] as const) {
-      const definition = SALES_TABLES[tableName];
-      const path = resolveDataFile(root, "sales", definition.file);
-      const tableSnapshot = weeklyTextSnapshot(root, path, `sales:${tableName}`, MAX_CSV_BYTES);
-      const table = parseTableContent(tableSnapshot.text, path, definition);
-      account(tableSnapshot.source);
-      const matchingRows = table.rows.filter((row) => dateFields[tableName]!.some((field) => dateInPeriod(row[field], period)));
-      sales[tableName] = publicRows(table, matchingRows).slice(0, 1000);
-      truncation.sales[tableName] = {
-        matched: matchingRows.length,
-        returned: sales[tableName].length,
-        truncated: matchingRows.length > sales[tableName].length,
+  const sqliteDateFields = {
+    activities: ["occurred_at", "created_at"],
+    resource_requests: ["requested_at", "updated_at", "deadline"],
+  } as const;
+  const businessBackend = resolveBusinessBackend(root);
+  const businessStore = businessBackend.kind === "sqlite" ? openBusinessStore(root, true)! : undefined;
+  let matchingKnowledge: Record<string, string>[];
+  let knowledge: Record<string, string>[];
+  try {
+    if (businessBackend.kind === "sqlite") {
+      const pointerSnapshot = weeklyTextSnapshot(
+        root,
+        resolve(root, "data", "storage-backend.json"),
+        "business-store:pointer",
+        64 * 1024,
+      );
+      if (pointerSnapshot.source.sha256 !== businessBackend.pointer_sha256) {
+        throw new Error("周报快照期间业务存储指针发生变化，请重试");
+      }
+      account(pointerSnapshot.source);
+    }
+    if (profileId === "market-director" || profileId === undefined) {
+      for (const tableName of ["customers", "activities", "resource_requests"] as const) {
+        const definition = SALES_TABLES[tableName];
+        let matchingRows: Record<string, string>[];
+        let matchedTotal: number;
+        if (businessStore) {
+          const matched = tableName === "customers"
+            ? businessStore.readWeeklyAccounts(period.startMs, period.endExclusiveMs, 1000)
+            : businessStore.readBusinessTablePeriod(
+              LEGACY_TO_SQLITE[tableName],
+              [...sqliteDateFields[tableName]],
+              period.startMs,
+              period.endExclusiveMs,
+              1000,
+            );
+          matchingRows = matched.rows.map((row) => tableName === "customers" ? enrichSqliteCustomer(businessStore, row) : projectSqliteSalesRow(tableName, row));
+          matchedTotal = matched.total_matches;
+          sales[tableName] = matchingRows;
+        } else {
+          const path = resolveDataFile(root, "sales", definition.file);
+          const tableSnapshot = weeklyTextSnapshot(root, path, `sales:${tableName}`, MAX_CSV_BYTES);
+          const table = parseTableContent(tableSnapshot.text, path, definition);
+          account(tableSnapshot.source);
+          matchingRows = table.rows.filter((row) => dateFields[tableName]!.some((field) => dateInPeriod(row[field], period)));
+          sales[tableName] = publicRows(table, matchingRows).slice(0, 1000);
+          matchedTotal = matchingRows.length;
+        }
+        truncation.sales[tableName] = {
+          matched: matchedTotal,
+          returned: sales[tableName].length,
+          truncated: matchedTotal > sales[tableName].length,
+        };
+      }
+    }
+
+    if (businessStore) {
+      const matched = businessStore.readBusinessTablePeriod("sources", ["accessed_date"], period.startMs, period.endExclusiveMs, 1000);
+      matchingKnowledge = matched.rows.map(projectSqliteSource);
+      knowledge = matchingKnowledge;
+      truncation.knowledge = {
+        matched: matched.total_matches,
+        returned: knowledge.length,
+        truncated: matched.total_matches > knowledge.length,
+      };
+    } else {
+      const knowledgePath = resolveDataFile(root, "knowledge", KNOWLEDGE_DEFINITION.file);
+      const knowledgeSnapshot = weeklyTextSnapshot(root, knowledgePath, "knowledge:source-register", MAX_CSV_BYTES);
+      const knowledgeTable = parseTableContent(knowledgeSnapshot.text, knowledgePath, KNOWLEDGE_DEFINITION);
+      account(knowledgeSnapshot.source);
+      matchingKnowledge = knowledgeTable.rows.filter((row) => dateInPeriod(row.accessed_date, period));
+      knowledge = publicRows(knowledgeTable, matchingKnowledge).slice(0, 1000);
+      truncation.knowledge = {
+        matched: matchingKnowledge.length,
+        returned: knowledge.length,
+        truncated: matchingKnowledge.length > knowledge.length,
       };
     }
+  } finally {
+    businessStore?.close();
   }
-
-  const knowledgePath = resolveDataFile(root, "knowledge", KNOWLEDGE_DEFINITION.file);
-  const knowledgeSnapshot = weeklyTextSnapshot(root, knowledgePath, "knowledge:source-register", MAX_CSV_BYTES);
-  const knowledgeTable = parseTableContent(knowledgeSnapshot.text, knowledgePath, KNOWLEDGE_DEFINITION);
-  account(knowledgeSnapshot.source);
-  const matchingKnowledge = knowledgeTable.rows.filter((row) => dateInPeriod(row.accessed_date, period));
-  const knowledge = publicRows(knowledgeTable, matchingKnowledge).slice(0, 1000);
-  truncation.knowledge = {
-    matched: matchingKnowledge.length,
-    returned: knowledge.length,
-    truncated: matchingKnowledge.length > knowledge.length,
-  };
 
   const outputs: Record<string, unknown>[] = [];
   const outputDirectory = resolve(root, "outputs");
@@ -624,6 +692,109 @@ function matchesFilters(row: Record<string, string>, filters: Record<string, str
     if (!(column in row)) throw new Error(`未知筛选字段：${column}`);
     return row[column].toLocaleLowerCase("zh-CN") === expected.toLocaleLowerCase("zh-CN");
   });
+}
+
+function legacySalesCursorScope(table: SalesTableName, query: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify(["sales.read", table, query.normalize("NFKC").trim().toLocaleLowerCase("zh-CN")]), "utf8")
+    .digest("hex");
+}
+
+function encodeLegacySalesCursor(table: SalesTableName, query: string, updatedAt: string, recordId: string): string {
+  return Buffer.from(JSON.stringify({
+    updated_at: updatedAt,
+    record_id: recordId,
+    scope: legacySalesCursorScope(table, query),
+  }), "utf8").toString("base64url");
+}
+
+function decodeLegacySalesCursor(
+  table: SalesTableName,
+  query: string,
+  cursor: string | undefined,
+): { updated_at: string; record_id: string } | undefined {
+  if (cursor === undefined) return undefined;
+  if (typeof cursor !== "string" || cursor.length < 1 || cursor.length > 2048) throw new Error("sales.read cursor 无效");
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (
+      typeof value.updated_at !== "string" || typeof value.record_id !== "string" || !value.record_id ||
+      value.scope !== legacySalesCursorScope(table, query)
+    ) throw new Error("scope mismatch");
+    return { updated_at: value.updated_at, record_id: value.record_id };
+  } catch {
+    throw new Error("sales.read cursor 无效、已损坏或不属于当前查询");
+  }
+}
+
+function pageLegacySalesRows(
+  tableName: SalesTableName,
+  definition: TableDefinition,
+  table: CsvTable,
+  query: string,
+  cursor: string | undefined,
+  limit: number,
+): { rows: Record<string, string>[]; total_matches: number; next_cursor?: string } {
+  const timestamp = definition.timestamp ?? definition.key;
+  const position = decodeLegacySalesCursor(tableName, query, cursor);
+  const matched = table.rows.filter((row) => matchesQuery(row, query)).sort((left, right) =>
+    right[timestamp].localeCompare(left[timestamp]) || left[definition.key].localeCompare(right[definition.key])
+  );
+  const remaining = position
+    ? matched.filter((row) => row[timestamp] < position.updated_at || (row[timestamp] === position.updated_at && row[definition.key] > position.record_id))
+    : matched;
+  const fetched = remaining.slice(0, limit + 1);
+  const rows = fetched.slice(0, limit);
+  const last = rows.at(-1);
+  return {
+    rows,
+    total_matches: matched.length,
+    ...(fetched.length > limit && last
+      ? { next_cursor: encodeLegacySalesCursor(tableName, query, last[timestamp], last[definition.key]) }
+      : {}),
+  };
+}
+
+function legacyAccountCursorScope(query: string, filters: Record<string, string>): string {
+  return createHash("sha256")
+    .update(JSON.stringify([
+      "account.search",
+      query.normalize("NFKC").trim().toLocaleLowerCase("zh-CN"),
+      Object.entries(filters).sort(([left], [right]) => left.localeCompare(right)),
+    ]), "utf8")
+    .digest("hex");
+}
+
+function encodeLegacyAccountCursor(
+  query: string,
+  filters: Record<string, string>,
+  updatedAt: string,
+  accountId: string,
+): string {
+  return Buffer.from(JSON.stringify({
+    updated_at: updatedAt,
+    account_id: accountId,
+    scope: legacyAccountCursorScope(query, filters),
+  }), "utf8").toString("base64url");
+}
+
+function decodeLegacyAccountCursor(
+  query: string,
+  filters: Record<string, string>,
+  cursor: string | undefined,
+): { updated_at: string; account_id: string } | undefined {
+  if (cursor === undefined) return undefined;
+  if (typeof cursor !== "string" || cursor.length < 1 || cursor.length > 2048) throw new Error("account.search cursor 无效");
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
+    if (
+      typeof value.updated_at !== "string" || typeof value.account_id !== "string" || !value.account_id ||
+      value.scope !== legacyAccountCursorScope(query, filters)
+    ) throw new Error("scope mismatch");
+    return { updated_at: value.updated_at, account_id: value.account_id };
+  } catch {
+    throw new Error("account.search cursor 无效、已损坏或不属于当前查询");
+  }
 }
 
 const ownedDataLocks = new Map<number, string>();
@@ -1364,6 +1535,188 @@ const mutationSchema = Type.Object({
   changes: changesSchema,
   expected_version: Type.Optional(Type.String({ description: "update 时必填，来自 _record_version" })),
 });
+
+const sqliteMutationSchema = Type.Object({
+  operation: Type.Union([Type.Literal("insert"), Type.Literal("update")]),
+  table: Type.Union([
+    Type.Literal("accounts"), Type.Literal("contacts"), Type.Literal("account_contacts"), Type.Literal("opportunities"),
+    Type.Literal("sources"), Type.Literal("activities"), Type.Literal("commitments"), Type.Literal("risks"),
+    Type.Literal("signals"), Type.Literal("actions"), Type.Literal("resource_requests"), Type.Literal("sales_assets"),
+    Type.Literal("evidence_refs"), Type.Literal("action_suggestions"), Type.Literal("plays"), Type.Literal("play_versions"),
+    Type.Literal("play_runs"), Type.Literal("task_links"), Type.Literal("artifacts"),
+  ]),
+  record_id: Type.String({ minLength: 1, maxLength: 128 }),
+  values: Type.Record(Type.String(), Type.Union([Type.String(), Type.Integer(), Type.Null()])),
+  expected_version: Type.Optional(Type.Integer({ minimum: 1 })),
+});
+
+const LEGACY_TO_SQLITE = {
+  customers: "accounts", activities: "activities", resource_requests: "resource_requests", sales_assets: "sales_assets",
+} as const satisfies Record<SalesTableName, BusinessTable>;
+
+const ACCOUNT_360_SECTIONS = [
+  "contacts", "opportunities", "activities", "commitments", "risks", "signals", "actions",
+  "resource_requests", "sales_assets", "task_links", "artifacts", "evidence_refs",
+] as const;
+
+function sqliteVersion(value: unknown): string { return `sqlite:${String(value)}`; }
+function parseSqliteVersion(value: unknown): number {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) return value;
+  if (typeof value === "string" && /^sqlite:[1-9]\d*$/u.test(value)) return Number(value.slice(7));
+  throw new Error("SQLite update 的 expected_version 必须来自本次读取返回的 _record_version");
+}
+
+function projectSqliteSalesRow(table: SalesTableName, row: Record<string, unknown>): Record<string, string> {
+  const text = (key: string): string => row[key] === null || row[key] === undefined ? "" : String(row[key]);
+  if (table === "customers") return {
+    customer_id: text("account_id"), customer_name: text("name"), region: text("region"), sector: text("sector"), owner: text("owner"),
+    stage: text("lifecycle_stage"), health: text("health"), key_contact: "", decision_maker: "", budget_path: text("budget_path"),
+    next_action: "", next_action_due: "", last_evidence_date: "", risks: "", updated_at: text("updated_at"), _record_version: sqliteVersion(row.version),
+  };
+  if (table === "activities") return {
+    activity_id: text("activity_id"), customer_id: text("account_id"), salesperson_id: text("salesperson_id"), occurred_at: text("occurred_at"),
+    channel: text("channel"), activity_type: text("activity_type"), summary: text("summary"), evidence_path: text("source_path"),
+    commitment: "", next_action: "", next_action_due: "", created_at: text("created_at"), _record_version: sqliteVersion(row.version),
+  };
+  if (table === "resource_requests") return {
+    request_id: text("request_id"), customer_id: text("account_id"), salesperson_id: text("salesperson_id"), requested_at: text("requested_at"),
+    resource_type: text("resource_type"), request_summary: text("request_summary"), business_reason: text("business_reason"), deadline: text("deadline"),
+    owner: text("owner"), status: text("status"), decision: text("decision"), decision_reason: text("decision_reason"), updated_at: text("updated_at"), _record_version: sqliteVersion(row.version),
+  };
+  return {
+    asset_id: text("asset_id"), asset_type: text("asset_type"), title: text("title"), scope: text("scope"), customer_id: text("account_id"),
+    audience_role: text("audience_role"), sales_stage: text("sales_stage"), use_case: text("use_case"), owner: text("owner"), status: text("status"),
+    authorization_status: text("authorization_status"), deidentification_status: text("deidentification_status"), version: text("version"),
+    source_path: text("source_path"), evidence_refs: text("legacy_evidence_refs"), last_validated_at: text("last_validated_at"),
+    next_review_at: text("next_review_at"), usage_feedback: text("usage_feedback"), updated_at: text("updated_at"), _record_version: sqliteVersion(row.version),
+  };
+}
+
+function projectLegacyAccount(headers: string[], row: Record<string, string>): Record<string, string | number> {
+  return {
+    account_id: row.customer_id,
+    name: row.customer_name,
+    region: row.region,
+    sector: row.sector,
+    owner: row.owner,
+    lifecycle_stage: row.stage,
+    health: row.health,
+    budget_path: row.budget_path,
+    summary: "",
+    project_id: "",
+    version: recordVersion(headers, row),
+    updated_at: row.updated_at,
+    last_activity_at: row.last_evidence_date,
+    open_actions: row.next_action.trim() ? 1 : 0,
+    open_risks: row.risks.trim() ? 1 : 0,
+  };
+}
+
+function enrichSqliteCustomer(store: SalesBusinessStore, row: Record<string, unknown>): Record<string, string> {
+  const projected = projectSqliteSalesRow("customers", row);
+  const view = store.readAccount360(String(row.account_id), ["contacts", "activities", "actions", "risks"]);
+  if (!view) return projected;
+  const records = (key: string): Record<string, unknown>[] => Array.isArray(view[key]) ? view[key] as Record<string, unknown>[] : [];
+  const contacts = records("contacts");
+  const primary = contacts.find((item) => item.is_primary === 1) ?? contacts[0];
+  const decision = contacts.find((item) => typeof item.decision_role === "string" && item.decision_role.trim() && item.decision_role !== "unknown");
+  const actions = records("actions").filter((item) => item.status !== "completed" && item.status !== "cancelled")
+    .sort((left, right) => String(left.due_at ?? "9999").localeCompare(String(right.due_at ?? "9999")) || String(left.action_id).localeCompare(String(right.action_id)));
+  const latestActivity = records("activities").sort((left, right) => String(right.occurred_at).localeCompare(String(left.occurred_at)))[0];
+  projected.key_contact = primary ? String(primary.display_name ?? "") : "";
+  projected.decision_maker = decision ? String(decision.display_name ?? "") : "";
+  projected.next_action = actions[0] ? String(actions[0].action_text ?? "") : "";
+  projected.next_action_due = actions[0] ? String(actions[0].due_at ?? "") : "";
+  projected.last_evidence_date = latestActivity ? String(latestActivity.occurred_at ?? "") : "";
+  projected.risks = records("risks").filter((item) => item.status !== "closed").map((item) => String(item.risk_text ?? "")).filter(Boolean).join("；");
+  return projected;
+}
+
+function projectSqliteSource(row: Record<string, unknown>): Record<string, string> {
+  const text = (key: string): string => row[key] === null || row[key] === undefined ? "" : String(row[key]);
+  return {
+    source_id: text("source_id"), title: text("title"), url: text("url"), publisher: text("publisher"), published_date: text("published_date"),
+    accessed_date: text("accessed_date"), region: text("region"), topic: text("topic"), source_type: text("source_type"), quality: text("quality"),
+    exposure_status: text("exposure_status"), key_facts: text("legacy_key_facts"), important_quotes: text("legacy_important_quotes"),
+    interpretation: text("legacy_interpretation"), limitations: text("limitations"), status: text("status"), notes: text("notes"),
+    _record_version: sqliteVersion(row.version),
+  };
+}
+
+function projectSqliteEvidenceRef(row: Record<string, unknown>): Record<string, string> {
+  const text = (key: string): string => row[key] === null || row[key] === undefined ? "" : String(row[key]);
+  return {
+    evidence_ref_id: text("evidence_ref_id"),
+    entity_type: text("entity_type"),
+    entity_id: text("entity_id"),
+    field_name: text("field_name"),
+    source_id: text("source_id"),
+    locator_json: text("locator_json"),
+    claim_kind: text("claim_kind"),
+    verification_status: text("verification_status"),
+    note: text("note"),
+    _record_version: sqliteVersion(row.version),
+  };
+}
+
+const LEGACY_FIELD_MAP: Record<SalesTableName, Record<string, string>> = {
+  customers: { customer_name: "name", region: "region", sector: "sector", owner: "owner", stage: "lifecycle_stage", health: "health", budget_path: "budget_path" },
+  activities: { customer_id: "account_id", salesperson_id: "salesperson_id", occurred_at: "occurred_at", channel: "channel", activity_type: "activity_type", summary: "summary", evidence_path: "source_path" },
+  resource_requests: { customer_id: "account_id", salesperson_id: "salesperson_id", requested_at: "requested_at", resource_type: "resource_type", request_summary: "request_summary", business_reason: "business_reason", deadline: "deadline", owner: "owner", status: "status", decision: "decision", decision_reason: "decision_reason" },
+  sales_assets: { asset_type: "asset_type", title: "title", scope: "scope", customer_id: "account_id", audience_role: "audience_role", sales_stage: "sales_stage", use_case: "use_case", owner: "owner", status: "status", authorization_status: "authorization_status", deidentification_status: "deidentification_status", source_path: "source_path", evidence_refs: "legacy_evidence_refs", last_validated_at: "last_validated_at", next_review_at: "next_review_at", usage_feedback: "usage_feedback" },
+};
+
+function legacySalesMutations(table: SalesTableName, input: Mutation[]): BusinessMutation[] {
+  const output: BusinessMutation[] = [];
+  for (const mutation of input) {
+    const values: Record<string, string | number | null> = {};
+    for (const [legacy, value] of Object.entries(mutation.changes)) {
+      const mapped = LEGACY_FIELD_MAP[table][legacy];
+      if (!mapped) {
+        if (value === "") continue;
+        if (table === "customers" && legacy === "next_action") continue;
+        if (table === "customers" && legacy === "next_action_due" && mutation.changes.next_action) continue;
+        throw new Error(`字段 ${legacy} 无法安全映射到 SQLite schema v1，请改用跨表 values 写入`);
+      }
+      values[mapped] = value;
+    }
+    if (table === "customers" && typeof values.name === "string") values.normalized_name = values.name.normalize("NFKC").trim().replace(/\s+/g, " ").toLowerCase();
+    if (Object.keys(values).length > 0) output.push({ operation: mutation.operation, table: LEGACY_TO_SQLITE[table], record_id: mutation.record_id, values, ...(mutation.operation === "update" ? { expected_version: parseSqliteVersion(mutation.expected_version) } : {}) });
+    const action = mutation.changes.next_action;
+    if (action) output.push({ operation: "insert", table: "actions", record_id: `legacy-action-${createHash("sha256").update(`${mutation.record_id}\n${action}\n${mutation.changes.next_action_due ?? ""}`).digest("hex").slice(0, 24)}`, values: { account_id: mutation.record_id, action_text: action, due_at: mutation.changes.next_action_due || null, origin: "workflow", status: "open" } });
+  }
+  if (output.length === 0) throw new Error("写入没有可安全映射的 SQLite 字段");
+  return output;
+}
+
+function legacyKnowledgeMutations(input: Mutation[]): BusinessMutation[] {
+  const map: Record<string, string> = { title: "title", url: "url", publisher: "publisher", published_date: "published_date", accessed_date: "accessed_date", region: "region", topic: "topic", source_type: "source_type", quality: "quality", exposure_status: "exposure_status", status: "status", notes: "notes", limitations: "limitations", key_facts: "legacy_key_facts", important_quotes: "legacy_important_quotes", interpretation: "legacy_interpretation" };
+  return input.map((mutation) => ({
+    operation: mutation.operation, table: "sources", record_id: mutation.record_id,
+    values: Object.fromEntries(Object.entries(mutation.changes).map(([key, value]) => {
+      if (!map[key]) throw new Error(`未知知识来源字段：${key}`); return [map[key], value];
+    })),
+    ...(mutation.operation === "update" ? { expected_version: parseSqliteVersion(mutation.expected_version) } : {}),
+  }));
+}
+
+function inspectBusinessReceipt(
+  projectRoot: string,
+  intentId: string,
+  approvedPayloadSha256: string,
+  storageBinding: { backend: "csv" | "sqlite"; binding_id: string },
+): { outcome: "committed" | "not_committed" | "ambiguous"; result?: unknown } {
+  try {
+    const store = openBusinessStore(projectRoot, true, storageBinding);
+    if (!store) return { outcome: "ambiguous" };
+    try {
+      const receipt = store.readReceipt(intentId);
+      if (!receipt) return { outcome: "not_committed" };
+      if (receipt.approved_payload_sha256 !== approvedPayloadSha256) return { outcome: "ambiguous" };
+      return { outcome: "committed", result: receipt };
+    } finally { store.close(); }
+  } catch { return { outcome: "ambiguous" }; }
+}
 
 type TaskEvidenceState = {
   schema_version: "1.0";
@@ -2462,7 +2815,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
   pi.registerTool({
     name: "director_knowledge_search",
     label: "检索本地知识库",
-    description: "检索 data/knowledge/source-register.csv，返回来源记录与记录版本，不读取个人聊天。",
+    description: "检索当前选定的本地知识存储，返回来源记录、存储绑定与记录版本，不读取个人聊天。",
     parameters: Type.Object({
       queries: Type.Array(Type.String({ minLength: 1, maxLength: 400, description: "在所有字段中进行不区分大小写的包含检索" }), { minItems: 1, maxItems: 10, uniqueItems: true }),
       filters: filtersSchema,
@@ -2471,15 +2824,42 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
     async execute(_toolCallId, params) {
       const context = hooks.beforeLogicalTool("knowledge.search", params);
       assertDistinctQueries(params.queries);
-      const path = resolveDataFile(hooks.projectRoot(), "knowledge", KNOWLEDGE_DEFINITION.file);
-      const table = readTable(path, KNOWLEDGE_DEFINITION);
-      const result = {
-        snapshot_at: new Date().toISOString(),
-        searches: params.queries.map((query) => {
+      const backend = resolveBusinessBackend(hooks.projectRoot());
+      let searches: Array<{ query: string; total_matches: number; returned: number; rows: Record<string, string>[] }>;
+      if (backend.kind === "sqlite") {
+        const store = openBusinessStore(hooks.projectRoot(), true)!;
+        try {
+          const filterMap: Record<string, string> = {
+            source_id: "source_id", title: "title", url: "url", publisher: "publisher",
+            published_date: "published_date", accessed_date: "accessed_date", region: "region", topic: "topic",
+            source_type: "source_type", quality: "quality", exposure_status: "exposure_status",
+            key_facts: "legacy_key_facts", important_quotes: "legacy_important_quotes",
+            interpretation: "legacy_interpretation", limitations: "limitations", status: "status", notes: "notes",
+          };
+          const exactFilters = Object.fromEntries(Object.entries(params.filters ?? {}).map(([key, value]) => {
+            const mapped = filterMap[key];
+            if (!mapped) throw new Error(`未知知识来源筛选字段：${key}`);
+            return [mapped, value];
+          }));
+          searches = params.queries.map((query) => {
+            const matched = store.searchBusinessTable("sources", query, exactFilters, normalizeLimit(params.limit));
+            const rows = matched.rows.map(projectSqliteSource);
+            return { query, total_matches: matched.total_matches, returned: rows.length, rows };
+          });
+        } finally { store.close(); }
+      } else {
+        const path = resolveDataFile(hooks.projectRoot(), "knowledge", KNOWLEDGE_DEFINITION.file);
+        const table = readTable(path, KNOWLEDGE_DEFINITION);
+        searches = params.queries.map((query) => {
           const matched = table.rows.filter((row) => matchesQuery(row, query)).filter((row) => matchesFilters(row, params.filters));
           const rows = matched.slice(0, normalizeLimit(params.limit));
           return { query, total_matches: matched.length, returned: rows.length, rows: publicRows(table, rows) };
-        }),
+        });
+      }
+      const result = {
+        snapshot_at: new Date().toISOString(),
+        storage_binding: backend.binding_id,
+        searches,
       };
       if (result.searches.reduce((total, search) => total + search.returned, 0) > 200) {
         throw new Error("本次知识库检索总返回行数超过 200，请缩小范围或 limit");
@@ -2536,11 +2916,19 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
     description: "经 DAG 审批后新增或带版本更新知识来源；不支持删除或任意文件写入。",
     parameters: Type.Object({
       mutations: Type.Array(mutationSchema, { minItems: 1, maxItems: 100 }),
+      evidence_refs: Type.Optional(Type.Array(sqliteMutationSchema, { maxItems: 100 })),
     }),
     async execute(_toolCallId, params) {
       const commit = hooks.beforeLogicalTool("knowledge.write", params);
       if (!commit?.intent_id || !commit.payload_sha256) throw new Error("写入缺少受管提交上下文");
       let path: string | undefined;
+      const backend = resolveBusinessBackend(hooks.projectRoot());
+      try {
+        assertCommitStorageBinding(commit, backend);
+      } catch (error) {
+        hooks.onLogicalToolError("knowledge.write", params, "not_committed", error);
+        throw error;
+      }
       try {
         const evidence = loadEvidence(commit);
         const registered = evidence.mutations;
@@ -2575,14 +2963,51 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
             assertMutationMatchesSourceAnchor(mutation, anchor);
           }
         }
-        path = resolveDataFile(hooks.projectRoot(), "knowledge", KNOWLEDGE_DEFINITION.file);
-        const result = mutateRecords(path, KNOWLEDGE_DEFINITION, params.mutations, {
-          projectRoot: hooks.projectRoot(), intent_id: commit.intent_id,
-          payload_sha256: commit.payload_sha256, target: "knowledge/source-register",
-        });
+        let result: unknown;
+        if (backend.kind === "sqlite") {
+          if (!commit.task_id || !commit.session_id) throw new Error("SQLite 写入缺少 task_id 或 session_id 受管上下文");
+          const store = openBusinessStore(hooks.projectRoot(), false, commit.storage_binding!)!;
+          try {
+            const evidenceMutations = (params.evidence_refs ?? []) as BusinessMutation[];
+            if (params.mutations.length + evidenceMutations.length > 100) {
+              throw new Error("knowledge.write 的来源与证据引用合计不能超过 100 个 mutation");
+            }
+            if (evidenceMutations.some((item) => item.table !== "evidence_refs")) throw new Error("knowledge.write 的 evidence_refs 只能写 evidence_refs 表");
+            const committed = store.commit({ intent_id: commit.intent_id, task_id: commit.task_id, session_id: commit.session_id, logical_tool: "knowledge.write", approved_payload_sha256: commit.payload_sha256, mutations: [...legacyKnowledgeMutations(params.mutations), ...evidenceMutations] });
+            result = {
+              operations: committed.mutations.map((item) => {
+                const record = store.readBusinessRecord(item.table, item.record_id) ?? {};
+                return {
+                  operation: item.operation,
+                  table: item.table,
+                  record_id: item.record_id,
+                  version: item.version,
+                  record: item.table === "sources" ? projectSqliteSource(record) : projectSqliteEvidenceRef(record),
+                };
+              }),
+              receipt: committed,
+            };
+          } finally { store.close(); }
+        } else {
+          if ((params.evidence_refs?.length ?? 0) > 0) throw new Error("evidence_refs 仅在 SQLite 存储启用后可用");
+          path = resolveDataFile(hooks.projectRoot(), "knowledge", KNOWLEDGE_DEFINITION.file);
+          result = mutateRecords(path, KNOWLEDGE_DEFINITION, params.mutations, {
+            projectRoot: hooks.projectRoot(), intent_id: commit.intent_id,
+            payload_sha256: commit.payload_sha256, target: "knowledge/source-register",
+          });
+        }
         hooks.afterLogicalTool("knowledge.write", params, result);
         return { content: content(result), details: result };
       } catch (error) {
+        if (backend.kind === "sqlite") {
+          const inspected = inspectBusinessReceipt(hooks.projectRoot(), commit.intent_id, commit.payload_sha256, commit.storage_binding!);
+          if (inspected.outcome === "committed" && inspected.result) {
+            hooks.afterLogicalTool("knowledge.write", params, inspected.result);
+            return { content: content(inspected.result), details: inspected.result };
+          }
+          hooks.onLogicalToolError("knowledge.write", params, inspected.outcome === "committed" ? "ambiguous" : inspected.outcome, error);
+          throw error;
+        }
         const inspected = inspectReceipt(hooks.projectRoot(), {
           intent_id: commit.intent_id, payload_sha256: commit.payload_sha256,
           target: "knowledge/source-register",
@@ -2616,26 +3041,57 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
         { minItems: 1, maxItems: 4, uniqueItems: true },
       ),
       query: Type.Optional(Type.String()),
+      cursors: Type.Optional(Type.Object({
+        customers: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+        activities: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+        resource_requests: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+        sales_assets: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+      })),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIMIT })),
     }),
     async execute(_toolCallId, params) {
       hooks.beforeLogicalTool("sales.read", params);
-      const tables = params.tables.map((configuredTable) => {
-        const tableName = configuredTable as SalesTableName;
-        const definition = SALES_TABLES[tableName];
-        const path = resolveDataFile(hooks.projectRoot(), "sales", definition.file);
-        const table = readTable(path, definition);
-        const matched = table.rows.filter((row) => matchesQuery(row, params.query ?? ""));
-        const rows = matched.slice(0, normalizeLimit(params.limit));
-        return {
-          table: tableName,
-          total_matches: matched.length,
-          returned: rows.length,
-          rows: publicRows(table, rows),
-        };
-      });
+      const backend = resolveBusinessBackend(hooks.projectRoot());
+      const store = backend.kind === "sqlite" ? openBusinessStore(hooks.projectRoot(), true)! : undefined;
+      let tables: Array<{ table: SalesTableName; total_matches: number; returned: number; rows: Record<string, string>[]; next_cursor?: string }>;
+      try {
+        tables = params.tables.map((configuredTable) => {
+          const tableName = configuredTable as SalesTableName;
+          const definition = SALES_TABLES[tableName];
+          const cursor = params.cursors?.[tableName];
+          if (store) {
+            const matched = store.searchBusinessTablePage(
+              LEGACY_TO_SQLITE[tableName],
+              params.query ?? "",
+              {},
+              cursor,
+              normalizeLimit(params.limit),
+            );
+            const rows = matched.rows.map((row) => tableName === "customers" ? enrichSqliteCustomer(store, row) : projectSqliteSalesRow(tableName, row));
+            return { table: tableName, total_matches: matched.total_matches, returned: rows.length, rows, ...(matched.next_cursor ? { next_cursor: matched.next_cursor } : {}) };
+          }
+          const path = resolveDataFile(hooks.projectRoot(), "sales", definition.file);
+          const table = readTable(path, definition);
+          const matched = pageLegacySalesRows(
+            tableName,
+            definition,
+            table,
+            params.query ?? "",
+            cursor,
+            normalizeLimit(params.limit),
+          );
+          return {
+            table: tableName,
+            total_matches: matched.total_matches,
+            returned: matched.rows.length,
+            rows: publicRows(table, matched.rows),
+            ...(matched.next_cursor ? { next_cursor: matched.next_cursor } : {}),
+          };
+        });
+      } finally { store?.close(); }
       const result = {
         snapshot_at: new Date().toISOString(),
+        storage_binding: backend.binding_id,
         tables,
       };
       if (tables.reduce((total, table) => total + table.returned, 0) > 200) {
@@ -2651,7 +3107,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
     name: "director_sales_write",
     label: "更新销售台账",
     description: "经 DAG 审批后新增或带版本更新销售台账记录；不支持删除、改主键或任意字段。",
-    parameters: Type.Object({
+    parameters: Type.Union([Type.Object({
       table: Type.Union([
         Type.Literal("customers"),
         Type.Literal("activities"),
@@ -2659,31 +3115,61 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
         Type.Literal("sales_assets"),
       ]),
       mutations: Type.Array(mutationSchema, { minItems: 1, maxItems: 100 }),
-    }),
+    }), Type.Object({ mutations: Type.Array(sqliteMutationSchema, { minItems: 1, maxItems: 100 }) })]),
     async execute(_toolCallId, params) {
       const commit = hooks.beforeLogicalTool("sales.write", params);
       if (!commit?.intent_id || !commit.payload_sha256) throw new Error("写入缺少受管提交上下文");
-      const tableName = params.table as SalesTableName;
-      const definition = SALES_TABLES[tableName];
+      const tableName = "table" in params ? params.table as SalesTableName : undefined;
+      const definition = tableName ? SALES_TABLES[tableName] : undefined;
       let path: string | undefined;
+      const backend = resolveBusinessBackend(hooks.projectRoot());
       try {
-        path = resolveDataFile(hooks.projectRoot(), "sales", definition.file);
-        const result = {
-          table: tableName,
-          ...mutateRecords(path, definition, params.mutations, {
-            projectRoot: hooks.projectRoot(), intent_id: commit.intent_id,
-            payload_sha256: commit.payload_sha256, target: `sales/${tableName}`,
-          }),
-        };
+        assertCommitStorageBinding(commit, backend);
+      } catch (error) {
+        hooks.onLogicalToolError("sales.write", params, "not_committed", error);
+        throw error;
+      }
+      try {
+        let result: unknown;
+        if (backend.kind === "sqlite") {
+          if (!commit.task_id || !commit.session_id) throw new Error("SQLite 写入缺少 task_id 或 session_id 受管上下文");
+          const mutations = tableName
+            ? legacySalesMutations(tableName, params.mutations as Mutation[])
+            : params.mutations as BusinessMutation[];
+          if (mutations.some((item) => item.table === "sources" || item.table === "evidence_refs")) {
+            throw new Error("sales.write 不能绕过来源核验写入 sources/evidence_refs；请使用 knowledge.write");
+          }
+          const store = openBusinessStore(hooks.projectRoot(), false, commit.storage_binding!)!;
+          try {
+            const receipt = store.commit({ intent_id: commit.intent_id, task_id: commit.task_id, session_id: commit.session_id, logical_tool: "sales.write", approved_payload_sha256: commit.payload_sha256, mutations });
+            result = { ...(tableName ? { table: tableName } : {}), operations: receipt.mutations.map((item) => ({ operation: item.operation, table: item.table, record_id: item.record_id, version: item.version })), receipt };
+          } finally { store.close(); }
+        } else {
+          if (!tableName || !definition) throw new Error("跨表 values 写入仅在 SQLite 存储启用后可用");
+          path = resolveDataFile(hooks.projectRoot(), "sales", definition.file);
+          result = { table: tableName, ...mutateRecords(path, definition, params.mutations as Mutation[], {
+              projectRoot: hooks.projectRoot(), intent_id: commit.intent_id,
+              payload_sha256: commit.payload_sha256, target: `sales/${tableName}`,
+            }) };
+        }
         hooks.afterLogicalTool("sales.write", params, result);
         return { content: content(result), details: result };
       } catch (error) {
+        if (backend.kind === "sqlite") {
+          const inspected = inspectBusinessReceipt(hooks.projectRoot(), commit.intent_id, commit.payload_sha256, commit.storage_binding!);
+          if (inspected.outcome === "committed" && inspected.result) {
+            hooks.afterLogicalTool("sales.write", params, inspected.result);
+            return { content: content(inspected.result), details: inspected.result };
+          }
+          hooks.onLogicalToolError("sales.write", params, inspected.outcome === "committed" ? "ambiguous" : inspected.outcome, error);
+          throw error;
+        }
         const inspected = inspectReceipt(hooks.projectRoot(), {
           intent_id: commit.intent_id, payload_sha256: commit.payload_sha256,
-          target: `sales/${tableName}`,
+          target: `sales/${tableName ?? "cross-table"}`,
         }, path);
         if (inspected.outcome === "committed" && inspected.result) {
-          const recovered = { table: tableName, ...inspected.result };
+          const recovered = { ...(tableName ? { table: tableName } : {}), ...inspected.result };
           hooks.afterLogicalTool("sales.write", params, recovered);
           return { content: content(recovered), details: recovered };
         }
@@ -2694,6 +3180,154 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
         );
         throw error;
       }
+    },
+  });
+
+  pi.registerTool({
+    name: "director_account_search",
+    label: "搜索客户",
+    description: "参数化搜索客户，使用稳定排序和不透明游标分页。",
+    parameters: Type.Object({
+      query: Type.Optional(Type.String({ maxLength: 500 })),
+      filters: Type.Optional(Type.Object({ region: Type.Optional(Type.String()), sector: Type.Optional(Type.String()), owner: Type.Optional(Type.String()), lifecycle_stage: Type.Optional(Type.String()), health: Type.Optional(Type.String()), project_id: Type.Optional(Type.String()) })),
+      cursor: Type.Optional(Type.String({ maxLength: 2048 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    }),
+    async execute(_id, params) {
+      hooks.beforeLogicalTool("account.search", params);
+      const backend = resolveBusinessBackend(hooks.projectRoot());
+      let result: Record<string, unknown>;
+      if (backend.kind === "sqlite") {
+        const store = openBusinessStore(hooks.projectRoot(), true)!;
+        try { result = { snapshot_at: new Date().toISOString(), storage_binding: backend.binding_id, ...store.searchAccountsPage(params.query ?? "", params.filters ?? {}, params.cursor, normalizeLimit(params.limit)) }; }
+        finally { store.close(); }
+      } else {
+        const path = resolveDataFile(hooks.projectRoot(), "sales", SALES_TABLES.customers.file);
+        const table = readTable(path, SALES_TABLES.customers);
+        const query = params.query ?? "";
+        const filters = params.filters ?? {};
+        const position = decodeLegacyAccountCursor(query, filters, params.cursor);
+        const normalized = query.normalize("NFKC").trim().toLocaleLowerCase("zh-CN");
+        const matched = table.rows.map((row) => projectLegacyAccount(table.headers, row)).filter((row) => {
+          if (normalized && !Object.values(row).some((value) => String(value).toLocaleLowerCase("zh-CN").includes(normalized))) return false;
+          return Object.entries(filters).every(([key, value]) => String(row[key] ?? "") === value);
+        }).sort((left, right) =>
+          String(right.updated_at).localeCompare(String(left.updated_at)) || String(left.account_id).localeCompare(String(right.account_id))
+        );
+        const remaining = position
+          ? matched.filter((row) => String(row.updated_at) < position.updated_at || (String(row.updated_at) === position.updated_at && String(row.account_id) > position.account_id))
+          : matched;
+        const limit = normalizeLimit(params.limit);
+        const fetched = remaining.slice(0, limit + 1);
+        const rows = fetched.slice(0, limit);
+        const last = rows.at(-1);
+        result = {
+          snapshot_at: new Date().toISOString(),
+          storage_binding: backend.binding_id,
+          rows,
+          ...(fetched.length > limit && last
+            ? { next_cursor: encodeLegacyAccountCursor(query, filters, String(last.updated_at), String(last.account_id)) }
+            : {}),
+        };
+      }
+      assertResultSize(result); hooks.afterLogicalTool("account.search", params, result);
+      return { content: content(result), details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "director_account_read_360",
+    label: "读取客户 360",
+    description: "按客户稳定 ID 聚合联系人、机会、互动、承诺、风险、信号、行动、资源和资产。",
+    parameters: Type.Object({
+      account_id: Type.String({ minLength: 1, maxLength: 128 }),
+      sections: Type.Optional(Type.Array(Type.Union([
+        Type.Literal("contacts"), Type.Literal("opportunities"), Type.Literal("activities"), Type.Literal("commitments"),
+        Type.Literal("risks"), Type.Literal("signals"), Type.Literal("actions"), Type.Literal("resource_requests"),
+        Type.Literal("sales_assets"), Type.Literal("task_links"), Type.Literal("artifacts"), Type.Literal("evidence_refs"),
+      ]), { uniqueItems: true, maxItems: 12 })),
+      since: Type.Optional(Type.String({ maxLength: 64 })),
+    }),
+    async execute(_id, params) {
+      hooks.beforeLogicalTool("account.read_360", params);
+      if (params.since && !Number.isFinite(Date.parse(params.since))) throw new Error("since 必须是有效时间");
+      const backend = resolveBusinessBackend(hooks.projectRoot());
+      let account360: Record<string, unknown> | undefined;
+      if (backend.kind === "sqlite") {
+        const store = openBusinessStore(hooks.projectRoot(), true)!;
+        try { account360 = store.readAccount360(params.account_id, params.sections, params.since); } finally { store.close(); }
+      } else {
+        const customerTable = readTable(resolveDataFile(hooks.projectRoot(), "sales", SALES_TABLES.customers.file), SALES_TABLES.customers);
+        const customer = customerTable.rows.find((row) => row.customer_id === params.account_id);
+        if (customer) {
+          const section = new Set<string>(params.sections ?? ACCOUNT_360_SECTIONS);
+          const account = projectLegacyAccount(customerTable.headers, customer);
+          account360 = { account };
+          const truncatedSections: string[] = [];
+          const assign = (name: string, rows: Record<string, unknown>[]): void => {
+            if (rows.length > 1000) truncatedSections.push(name);
+            account360![name] = rows.slice(0, 1000);
+          };
+          if (section.has("contacts")) {
+            const contacts: Record<string, unknown>[] = [];
+            if (customer.key_contact.trim()) contacts.push({
+              contact_id: `legacy-${params.account_id}-key`, display_name: customer.key_contact,
+              role: "key_contact", identity_status: "legacy_text", version: account.version,
+            });
+            if (customer.decision_maker.trim()) contacts.push({
+              contact_id: `legacy-${params.account_id}-decision`, display_name: customer.decision_maker,
+              role: "decision_maker", identity_status: "legacy_text", version: account.version,
+            });
+            assign("contacts", contacts);
+          }
+          for (const name of ["activities", "resource_requests", "sales_assets"] as const) {
+            if (!section.has(name)) continue;
+            const table = readTable(resolveDataFile(hooks.projectRoot(), "sales", SALES_TABLES[name].file), SALES_TABLES[name]);
+            assign(name, publicRows(table, table.rows.filter((row) =>
+              row.customer_id === params.account_id &&
+              (!params.since || Object.values(row).some((value) => Number.isFinite(Date.parse(value)) && Date.parse(value) >= Date.parse(params.since!)))
+            )));
+          }
+          if (section.has("risks")) assign("risks", customer.risks.trim() ? [{
+            risk_id: `legacy-risk-${params.account_id}`, account_id: params.account_id,
+            risk_text: customer.risks, status: "open", version: account.version,
+          }] : []);
+          if (section.has("actions")) assign("actions", customer.next_action.trim() ? [{
+            action_id: `legacy-action-${params.account_id}`, account_id: params.account_id,
+            action_text: customer.next_action, due_at: customer.next_action_due, status: "open",
+            origin: "imported", version: account.version,
+          }] : []);
+          for (const empty of ["opportunities", "commitments", "signals", "task_links", "artifacts", "evidence_refs"]) {
+            if (section.has(empty)) assign(empty, []);
+          }
+          account360.truncated_sections = truncatedSections.sort();
+        }
+      }
+      const result = { snapshot_at: new Date().toISOString(), storage_binding: backend.binding_id, found: Boolean(account360), account_360: account360 ?? null };
+      assertResultSize(result); hooks.afterLogicalTool("account.read_360", params, result);
+      return { content: content(result), details: result };
+    },
+  });
+
+  pi.registerTool({
+    name: "director_signals_read",
+    label: "读取销售预警",
+    description: "按客户、状态和严重程度读取可解释规则信号。CSV 模式返回受支持空集。",
+    parameters: Type.Object({ account_id: Type.Optional(Type.String()), status: Type.Optional(Type.String()), severity: Type.Optional(Type.String()), cursor: Type.Optional(Type.String({ maxLength: 2048 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }),
+    async execute(_id, params) {
+      hooks.beforeLogicalTool("signals.read", params);
+      const backend = resolveBusinessBackend(hooks.projectRoot());
+      let result: Record<string, unknown>;
+      if (backend.kind === "sqlite") {
+        const store = openBusinessStore(hooks.projectRoot(), true)!;
+        try { result = { snapshot_at: new Date().toISOString(), storage_binding: backend.binding_id, ...store.readSignals({ account_id: params.account_id, status: params.status, severity: params.severity }, params.cursor, normalizeLimit(params.limit)) }; }
+        finally { store.close(); }
+      } else {
+        if (params.cursor) throw new Error("CSV 信号空集不接受 cursor");
+        result = { snapshot_at: new Date().toISOString(), storage_binding: backend.binding_id, rows: [], storage_capability: "signals_unavailable_in_csv" };
+      }
+      assertResultSize(result);
+      hooks.afterLogicalTool("signals.read", params, result);
+      return { content: content(result), details: result };
     },
   });
   return runtime;

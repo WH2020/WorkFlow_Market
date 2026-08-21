@@ -959,6 +959,22 @@ class ControlCentreTests(unittest.TestCase):
         self.assertEqual(opened, target.resolve())
         startfile.assert_called_once_with(str(target.resolve()))
 
+    def test_sqlite_knowledge_opens_data_directory_instead_of_stale_csv_or_database(self):
+        root = Path(self.temporary.name) / "sqlite-knowledge-root"
+        data = root / "data"
+        data.mkdir(parents=True)
+        backend = type("Backend", (), {"backend": "sqlite"})()
+        with (
+            patch.object(server, "ROOT", root),
+            patch.object(server, "DATA", data),
+            patch.object(server, "resolve_business_backend", return_value=backend),
+            patch.object(server.sys, "platform", "win32"),
+            patch.object(server.os, "startfile", create=True) as startfile,
+        ):
+            opened = server.open_knowledge_file()
+        self.assertEqual(opened, data.resolve())
+        startfile.assert_called_once_with(str(data.resolve()))
+
     def test_presentation_brief_limits_match_the_plan_contract(self):
         brief = {
             "schema_version": "1.0", "scene": "industry", "mode": "standard",
