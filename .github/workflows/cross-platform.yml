@@ -10,6 +10,47 @@ permissions:
   contents: read
 
 jobs:
+  sqlite-driver-gate:
+    name: SQLite gate · ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+            expected_arch: x64
+            report_name: windows-x64
+          - os: macos-15
+            label: macOS Apple Silicon
+            expected_arch: arm64
+            report_name: macos-arm64
+          - os: macos-15-intel
+            label: macOS Intel
+            expected_arch: x64
+            report_name: macos-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+      - name: Run SQLite transaction and recovery gate
+        run: >-
+          node --no-warnings pi/tests/sqlite-driver-gate.mjs
+          --expect-arch ${{ matrix.expected_arch }}
+          --report tmp/sqlite-driver-gate/${{ matrix.report_name }}.json
+      - name: Upload SQLite gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-driver-gate-${{ matrix.report_name }}-${{ github.sha }}
+          path: tmp/sqlite-driver-gate/${{ matrix.report_name }}.json
+          if-no-files-found: error
+          retention-days: 14
+
   validate:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

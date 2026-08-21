@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent4Market 销售总监 Agent：竞品能力、架构差距与改造优先级</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f3f5f7;
+      --surface: #ffffff;
+      --surface-alt: #f8fafb;
+      --ink: #17202a;
+      --muted: #5d6975;
+      --line: #d9e0e6;
+      --accent: #2d5b70;
+      --accent-soft: #eaf2f5;
+      --good: #20734a;
+      --good-soft: #e9f5ee;
+      --warn: #956515;
+      --warn-soft: #fbf3df;
+      --risk: #9d3d36;
+      --risk-soft: #faeceb;
+      --shadow: 0 12px 30px rgba(23, 32, 42, 0.08);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.65 "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    }
+    a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    .shell { max-width: 1440px; margin: 0 auto; padding: 32px 24px 64px; }
+    header {
+      position: relative;
+      overflow: hidden;
+      padding: 42px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: linear-gradient(135deg, #fff 0%, #edf3f5 100%);
+      box-shadow: var(--shadow);
+    }
+    header::after {
+      content: "";
+      position: absolute;
+      right: -80px;
+      top: -110px;
+      width: 320px;
+      height: 320px;
+      border-radius: 50%;
+      border: 48px solid rgba(45, 91, 112, 0.08);
+    }
+    .eyebrow { margin: 0 0 10px; color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { max-width: 980px; margin: 0; font-size: clamp(30px, 4vw, 52px); line-height: 1.15; letter-spacing: -.03em; }
+    .subtitle { max-width: 960px; margin: 18px 0 0; color: var(--muted); font-size: 17px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    .tag, .priority, .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .tag { color: var(--accent); background: var(--accent-soft); }
+    nav {
+      position: sticky;
+      top: 12px;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      width: fit-content;
+      margin: 20px auto;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255,255,255,.92);
+      box-shadow: 0 8px 24px rgba(23,32,42,.09);
+      backdrop-filter: blur(12px);
+    }
+    nav a { padding: 7px 13px; border-radius: 999px; color: var(--ink); font-size: 13px; font-weight: 700; text-decoration: none; }
+    nav a:hover { background: var(--accent-soft); color: var(--accent); }
+    section { scroll-margin-top: 90px; margin-top: 22px; }
+    .panel {
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: 0 6px 18px rgba(23, 32, 42, 0.04);
+    }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+    h2 { margin: 0; font-size: 28px; line-height: 1.25; }
+    h3 { margin: 0 0 10px; font-size: 19px; }
+    h4 { margin: 0 0 6px; font-size: 15px; }
+    p { margin: 8px 0; }
+    .muted { color: var(--muted); }
+    .grid { display: grid; gap: 16px; }
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-alt); }
+    .card strong.metric { display: block; margin-bottom: 4px; color: var(--accent); font-size: 29px; line-height: 1; }
+    .good { background: var(--good-soft); border-color: #c7e3d3; }
+    .warn { background: var(--warn-soft); border-color: #ead7ab; }
+    .risk { background: var(--risk-soft); border-color: #edc8c5; }
+    .fact-label { color: var(--good); background: var(--good-soft); }
+    .inference-label { color: var(--warn); background: var(--warn-soft); }
+    .unknown-label { color: var(--risk); background: var(--risk-soft); }
+    .priority.p0 { color: #fff; background: var(--risk); }
+    .priority.p1 { color: #fff; background: var(--warn); }
+    .priority.p2 { color: #fff; background: var(--accent); }
+    .status.strong { color: var(--good); background: var(--good-soft); }
+    .status.partial { color: var(--warn); background: var(--warn-soft); }
+    .status.missing { color: var(--risk); background: var(--risk-soft); }
+    .status.deferred { color: var(--accent); background: var(--accent-soft); }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; }
+    table { width: 100%; min-width: 980px; border-collapse: collapse; background: #fff; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; z-index: 1; background: #eef3f5; color: #33414d; font-size: 12px; letter-spacing: .04em; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #fafcfd; }
+    ul, ol { margin: 8px 0 0; padding-left: 20px; }
+    li { margin: 5px 0; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(120px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+    .flow .node { position: relative; padding: 16px 12px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-alt); text-align: center; }
+    .flow .node:not(:last-child)::after { content: "→"; position: absolute; right: -14px; top: 50%; z-index: 2; transform: translateY(-50%); color: var(--accent); font-size: 20px; font-weight: 800; }
+    .flow .node b { display: block; margin-bottom: 5px; color: var(--accent); }
+    .architecture {
+      display: grid;
+      grid-template-columns: 1.1fr 2fr 1.1fr;
+      gap: 14px;
+      align-items: stretch;
+    }
+    .stack { display: grid; gap: 10px; }
+    .layer { padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-alt); }
+    .layer core { color: var(--accent); }
+    .layer.new { border-color: #cba5a1; background: var(--risk-soft); }
+    .layer.keep { border-color: #b9d9c6; background: var(--good-soft); }
+    .layer.later { border-color: #dec88e; background: var(--warn-soft); }
+    .callout { padding: 18px 20px; border-left: 5px solid var(--accent); border-radius: 10px; background: var(--accent-soft); }
+    .roadmap { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .roadmap .stage { padding: 20px; border: 1px solid var(--line); border-radius: 15px; background: #fff; }
+    .roadmap .stage:first-child { border-top: 5px solid var(--risk); }
+    .roadmap .stage:nth-child(2) { border-top: 5px solid var(--warn); }
+    .roadmap .stage:nth-child(3) { border-top: 5px solid var(--accent); }
+    code { padding: 2px 5px; border-radius: 5px; background: #edf1f3; font-family: Consolas, "SFMono-Regular", monospace; font-size: .9em; }
+    .sources li { margin-bottom: 9px; }
+    footer { margin-top: 22px; padding: 20px; color: var(--muted); text-align: center; font-size: 12px; }
+    @media (max-width: 1100px) {
+      .grid.cols-4, .grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow .node::after { display: none; }
+      .architecture { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .shell { padding: 16px 12px 40px; }
+      header, .panel { padding: 22px; border-radius: 15px; }
+      nav { position: static; border-radius: 16px; }
+      .grid.cols-2, .grid.cols-3, .grid.cols-4, .roadmap, .flow { grid-template-columns: 1fr; }
+      .section-head { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <p class="eyebrow">Product &amp; Architecture Review · 2026-08-21</p>
+      <h1>Agent4Market 销售总监 Agent：竞品能力、架构差距与改造优先级</h1>
+      <p class="subtitle">以当前仓库代码和官方产品资料为依据，回答三个问题：已经具备什么、与成熟销售 Agent 的实质差距是什么、下一阶段先改哪些能力。</p>
+      <div class="meta">
+        <span class="tag">销售总监单角色发行版</span>
+        <span class="tag">本地优先</span>
+        <span class="tag">主 Agent＋DAG＋受控 Subagent</span>
+        <span class="tag">结论不含真实客户数据评估</span>
+      </div>
+    </header>
+
+    <nav aria-label="报告导航">
+      <a href="#overview">现状</a>
+      <a href="#competitors">对标</a>
+      <a href="#matrix">差距矩阵</a>
+      <a href="#architecture">目标架构</a>
+      <a href="#roadmap">优先级</a>
+      <a href="#acceptance">验收</a>
+      <a href="#sources">来源</a>
+    </nav>
+
+    <section id="overview" class="panel">
+      <div class="section-head">
+        <div><p class="eyebrow">Overview</p><h2>当前基线：安全与产物能力较强，客户运营闭环偏弱</h2></div>
+        <span class="status strong">技术基线已通过平台校验</span>
+      </div>
+      <div class="grid cols-4">
+        <div class="card"><strong class="metric">7</strong><b>销售总监服务</b><p class="muted">销售复盘、行业研究、资料入库、政府方案、销售文件、PPT 工作室、周报。</p></div>
+        <div class="card"><strong class="metric">14</strong><b>受管工作流</b><p class="muted">仓库平台校验统计；桌面发行版仅向用户暴露销售总监依赖闭包。</p></div>
+        <div class="card"><strong class="metric">2</strong><b>受控 Subagent 类型</b><p class="muted">公开研究员和只读复核员，均受工具、轮次和写入范围限制。</p></div>
+        <div class="card"><strong class="metric">1</strong><b>最终用户角色</b><p class="muted">Windows 桌面发行版固定销售总监，不要求用户选择 Profile。</p></div>
+      </div>
+
+      <div class="grid cols-3" style="margin-top:16px">
+        <article class="card good">
+          <h3>已证实优势</h3>
+          <ul>
+            <li>持久 DAG、任务恢复、硬审批、冻结载荷和审计收据。</li>
+            <li>公开检索、受控正文读取、PDF 页码证据、知识入库。</li>
+            <li>可编辑 PPTX、逐页渲染与 QA、来源备注。</li>
+            <li>项目空间、每日任务、自定义操作、模型与思考强度选择。</li>
+            <li>Windows/macOS 本地部署，不依赖 Codex Desktop。</li>
+          </ul>
+        </article>
+        <article class="card warn">
+          <h3>已证实限制</h3>
+          <ul>
+            <li>客户、活动、资源和销售资产仍分散在 CSV 与文件目录。</li>
+            <li>没有正式的客户 360、关系图、承诺账本和信号收件箱。</li>
+            <li>没有 CRM、销售邮箱、日历或通话记录的业务连接器。</li>
+            <li>每日任务按时间触发，尚不能由商机变化或客户信号触发。</li>
+            <li>不自动外发、改客户阶段或提交外部审批。</li>
+          </ul>
+        </article>
+        <article class="card risk">
+          <h3>当前未知</h3>
+          <ul>
+            <li>真实销售总监每周任务量、重复劳动时长和高频入口。</li>
+            <li>客户数据目前主要来自何种 CRM、表格、邮件或人工记录。</li>
+            <li>实际采用的销售方法论及阶段定义。</li>
+            <li>任务建议被采纳后是否推动了客户阶段或缩短了跟进时间。</li>
+          </ul>
+        </article>
+      </div>
+      <div class="callout" style="margin-top:16px"><b>产品判断：</b>下一阶段不应继续堆“服务按钮”。最有价值的改造，是让客户上下文、信号、下一步行动和复盘结果跨任务持续存在，使 Agent 从“接到任务后生成产物”升级为“持续帮助销售总监经营客户”。</div>
+    </section>
+
+    <section id="competitors" class="panel">
+      <div class="section-head">
+        <div><p class="eyebrow">Competitors</p><h2>五个最值得借鉴的对标对象</h2></div>
+        <p class="muted">只采用官方公开能力；未公开的内部实现标为未知。</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>对标对象</th><th>公开流程</th><th>公开架构</th><th>对 Agent4Market 的价值</th><th>不宜照搬</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><b>Salesforce Agentforce</b></td>
+              <td>渠道/邮件进入 → 意图识别 → CRM 与知识上下文 → 多轮培育 → 预约/更新 → 超范围转人工。</td>
+              <td>主题、指令、动作、护栏、上下文和日志组成 Agent；Data 360 提供数据层；支持 Orchestrator、MCP 与 A2A。</td>
+              <td>主 Agent、专业 Agent、业务动作和治理边界的分层方式。</td>
+              <td>完整 CRM 云平台和企业集成复杂度，不符合当前单用户本地目标。</td>
+            </tr>
+            <tr>
+              <td><b>Microsoft Dynamics 365 Sales Agents</b></td>
+              <td>筛选线索 → 公司/竞品/关键人研究 → 画像匹配 → 邮箱验证 → 外联 → 意向判断 → 转交销售。</td>
+              <td>资格、成交、机会等上层 Agent，调用研究、资格、外联、关键人、总结等 skill-based agents；Copilot Studio 与 Entra 管理身份。</td>
+              <td>最清晰的“主 Agent＋共享专业 Agent”职责拆分参考。</td>
+              <td>不要为每个细小动作都创建 Agent；确定性校验仍应使用普通工具或状态机。</td>
+            </tr>
+            <tr>
+              <td><b>HubSpot Breeze</b></td>
+              <td>创建 Play → 选择客群/角色/信号 → 补充业务上下文 → 定时或自适应触达 → 审批/自动发送 → 跟进。</td>
+              <td>CRM 共享上下文＋专业 Agent；用户通过 Play 配置受众、信号、节奏、护栏和输出。</td>
+              <td>减少填写、保存常用销售动作、以“目标和触发条件”组织界面。</td>
+              <td>首版不启用自动发送；应保留当前硬审批和本地数据边界。</td>
+            </tr>
+            <tr>
+              <td><b>Gong Agents</b></td>
+              <td>通话/邮件/CRM → 结构化客户事实 → 识别主题、异议和风险 → 简报/预测 → 建议或执行下一步。</td>
+              <td>Revenue Graph 作为客户上下文层，Revenue Harness 负责编排、权限、审计和人工监督，专业/自定义 Agent 在其上运行。</td>
+              <td>客户事实层、证据化复盘、跨客户主题分析和下一步队列。</td>
+              <td>当前没有真实通话和团队级收入数据，不能先做复杂预测模型。</td>
+            </tr>
+            <tr>
+              <td><b>Comp AI CRM（开源）</b></td>
+              <td>任务队列认领客户 → 读取 CRM 历史 → 研究 → 证据定价 → 强证据写入/弱证据待确认 → 安排下次检查。</td>
+              <td>独立 Agent 部署、持久会话、Tools＋Skills＋Schedule、带租约的工作队列、证据账本、无网络/无数据库凭据沙箱。</td>
+              <td>与本地单用户路线最接近；尤其值得借鉴任务租约、证据分级和“为什么下次再查”。</td>
+              <td>其技术栈和部署模型无需整体迁入；只吸收领域模型与持久任务思想。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="matrix" class="panel">
+      <div class="section-head">
+        <div><p class="eyebrow">Gap Matrix</p><h2>竞品能力—当前功能—缺口—优先级</h2></div>
+        <div><span class="priority p0">P0 必须先做</span> <span class="priority p1">P1 建议实现</span> <span class="priority p2">P2 可以延期</span></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>能力域</th><th>当前状态</th><th>竞品成熟做法</th><th>实质缺口</th><th>优先级</th><th>建议落点</th></tr></thead>
+          <tbody>
+            <tr><td><b>自然语言总入口</b></td><td><span class="status partial">部分具备</span><br>首页快捷指令、服务卡与引导表单。</td><td>自然语言识别目标，再路由专业 Agent/Play。</td><td>仍以“选择服务”为主要心智，跨服务目标需要用户自行拆分。</td><td><span class="priority p0">P0</span></td><td>目标识别器生成任务计划，只追问一个真正阻塞的问题。</td></tr>
+            <tr><td><b>销售 Play</b></td><td><span class="status partial">部分具备</span><br>固定 DAG、自定义操作、每日任务。</td><td>受众、信号、步骤、审批和产物组成可复用 Play。</td><td>自定义操作尚不能保存为带版本的业务流程，也不能绑定信号。</td><td><span class="priority p0">P0</span></td><td>新增 Play Registry，支持从自然语言生成、预览、确认和复用。</td></tr>
+            <tr><td><b>客户 360</b></td><td><span class="status missing">缺失</span><br>客户、活动、资源和材料分别存储。</td><td>账户、关键人、互动、承诺、风险、材料和行动形成统一上下文。</td><td>打开客户后不能一次看到“发生了什么、为什么、下一步是什么”。</td><td><span class="priority p0">P0</span></td><td>新增客户工作台与统一 Account Context API。</td></tr>
+            <tr><td><b>关系与承诺记忆</b></td><td><span class="status partial">部分具备</span><br>活动表含承诺与下一步字段。</td><td>关系角色、影响力、承诺、负责人、截止日期和兑现状态持续跟踪。</td><td>承诺埋在活动记录中，缺少独立生命周期与到期提醒。</td><td><span class="priority p0">P0</span></td><td>拆出 stakeholder、commitment、open-loop 领域实体。</td></tr>
+            <tr><td><b>信号驱动</b></td><td><span class="status missing">缺失</span><br>只有人工和每日时间触发。</td><td>融资、招聘、互动、阶段变化、长期无活动等信号自动进入队列。</td><td>Agent 不会因客户状态变化主动创建可解释的待办。</td><td><span class="priority p0">P0</span></td><td>Signal Store＋去重/过期规则＋Next Action Engine。</td></tr>
+            <tr><td><b>下一步行动队列</b></td><td><span class="status partial">部分具备</span><br>销售复盘可写 next_action。</td><td>按影响、紧迫度和证据排序，并说明推荐原因。</td><td>没有跨客户排序、接受/忽略/稍后处理和结果反馈。</td><td><span class="priority p0">P0</span></td><td>首页改为可操作的“今日优先事项”，不是静态统计。</td></tr>
+            <tr><td><b>业务数据存储</b></td><td><span class="status partial">部分具备</span><br>CSV＋文件锁＋原子替换。</td><td>事务型关系存储承载账户、互动、任务、信号和审计。</td><td>跨表一致性、关系查询、增量同步和并发扩展困难。</td><td><span class="priority p0">P0</span></td><td>SQLite 作为本地业务源；保留 CSV 导入/导出和原始文件。</td></tr>
+            <tr><td><b>销售方法论</b></td><td><span class="status missing">缺失</span><br>有阶段和风险，但无标准资格框架。</td><td>按 MEDDPICC、BANT、SPIN 等提取字段、证据和空缺。</td><td>复盘难以跨客户比较，也无法判断缺失的是事实还是销售动作。</td><td><span class="priority p1">P1</span></td><td>方法论模板插件；字段必须附来源和确认状态。</td></tr>
+            <tr><td><b>CRM/邮箱/日历/会议接入</b></td><td><span class="status missing">缺失</span><br>报销邮箱只读且隔离于销售业务。</td><td>持续同步客户对象、邮件、会议和通话。</td><td>销售总监仍需手工上传或录入关键上下文。</td><td><span class="priority p1">P1</span></td><td>Connector Gateway；先 CSV/Excel 导入，再接单一真实系统。</td></tr>
+            <tr><td><b>销售教练与趋势</b></td><td><span class="status partial">部分具备</span><br>支持单次销售复盘。</td><td>跨多次互动识别重复异议、承诺质量和行为变化。</td><td>没有面向个人/团队的长期趋势与复盘闭环。</td><td><span class="priority p1">P1</span></td><td>先基于结构化记录做趋势，不做消息数量式人员评价。</td></tr>
+            <tr><td><b>质量评估与反馈</b></td><td><span class="status partial">部分具备</span><br>技术测试、验证器和审计较完整。</td><td>记录建议采纳率、资料准确率、行动完成率及业务结果。</td><td>不能判断 Agent 是否真正减少工作或改善客户推进。</td><td><span class="priority p1">P1</span></td><td>Evaluation Store＋用户一键反馈＋任务结果回填。</td></tr>
+            <tr><td><b>文件与 PPT</b></td><td><span class="status strong">优势能力</span><br>资料、方案、PPT、逐页 QA、来源备注。</td><td>商业销售平台通常只生成草稿或简报。</td><td>当前不是主要差距；继续扩充容易偏离客户经营主线。</td><td><span class="priority p2">P2</span></td><td>维持质量，优先让产物自动继承客户上下文与证据。</td></tr>
+            <tr><td><b>自动对外执行</b></td><td><span class="status deferred">明确不做</span><br>不自动发送、改阶段或外部审批。</td><td>数字 SDR 自动发送、跟进和预约。</td><td>自动化程度低，但当前安全边界合理。</td><td><span class="priority p2">P2</span></td><td>未来仅在连接器成熟后增加逐动作审批、限额和撤销。</td></tr>
+            <tr><td><b>多人协作/云端运营</b></td><td><span class="status deferred">明确延期</span><br>本地单用户。</td><td>团队权限、共享账户、经理视图和集中审计。</td><td>无法支撑多销售并行使用。</td><td><span class="priority p2">P2</span></td><td>当前第一用户仍是单个销售总监，不提前建设多租户。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="architecture" class="panel">
+      <div class="section-head">
+        <div><p class="eyebrow">Target Architecture</p><h2>建议目标：轻本体保持不变，新增客户上下文与信号平面</h2></div>
+        <span class="tag">红色为新增核心能力</span>
+      </div>
+
+      <div class="flow" aria-label="目标用户流程">
+        <div class="node"><b>触发</b>用户目标 / 定时 / 客户信号</div>
+        <div class="node"><b>Play</b>确定受众、步骤、资料与审批</div>
+        <div class="node"><b>主 Agent</b>理解目标、规划、分派</div>
+        <div class="node"><b>DAG</b>约束顺序、状态和恢复</div>
+        <div class="node"><b>专业能力</b>研究 / 客户 / 方案 / PPT</div>
+        <div class="node"><b>人工关口</b>核对事实、变更与外部动作</div>
+        <div class="node"><b>反馈闭环</b>更新客户、行动、证据和效果</div>
+      </div>
+
+      <div class="architecture" style="margin-top:18px">
+        <div class="stack">
+          <div class="layer later"><h4>连接器层（P1）</h4><p>CSV/Excel、CRM、销售邮箱、日历、会议记录。</p></div>
+          <div class="layer keep"><h4>现有受控来源</h4><p>公开检索、网页正文、PDF、本地文件。</p></div>
+          <div class="layer later"><h4>外部动作（P2）</h4><p>邮件、日程、CRM 更新；逐动作审批和限额。</p></div>
+        </div>
+        <div class="stack">
+          <div class="layer new"><h4>目标与 Play 层（P0）</h4><p>自然语言入口、Play Registry、版本、触发条件、资料范围、审批和产物契约。</p></div>
+          <div class="layer keep"><h4>轻本体与受管运行时（保留）</h4><p>服务路由、持久 DAG、任务状态、硬 Approval、冻结载荷、恢复、受控 Subagent。</p></div>
+          <div class="layer new"><h4>客户上下文平面（P0）</h4><p>Account 360、Stakeholder、Commitment、Risk、Opportunity、Evidence、Artifact。</p></div>
+          <div class="layer new"><h4>信号与行动平面（P0）</h4><p>Signal 归一化、去重、过期、优先级、推荐原因、接受/忽略/稍后和结果回填。</p></div>
+          <div class="layer keep"><h4>专业插件（保留并收敛）</h4><p>行业研究、政府合作、销售复盘、销售文件、PPT、周报、报销。</p></div>
+        </div>
+        <div class="stack">
+          <div class="layer new"><h4>SQLite 业务库（P0）</h4><p>事务、关系查询、FTS、版本迁移、备份；CSV 继续作为导入导出格式。</p></div>
+          <div class="layer keep"><h4>证据与文件库（保留）</h4><p>原始资料不动，记录来源、页码、哈希、状态和使用范围。</p></div>
+          <div class="layer later"><h4>评估与运营层（P1）</h4><p>采纳率、完成率、准确率、节省时间、失败类型和业务结果。</p></div>
+        </div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:16px">
+        <article class="card">
+          <h3>为什么推荐 SQLite，而不是继续扩展 CSV</h3>
+          <ul>
+            <li>单用户桌面无需部署数据库服务，仍保持开箱即用。</li>
+            <li>客户、关键人、承诺、信号和行动需要事务与关系查询。</li>
+            <li>可以使用 WAL、完整备份、迁移版本和全文检索。</li>
+            <li>保留 CSV 导入导出，避免锁死用户数据。</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>为什么不直接使用 Postgres 或向量数据库</h3>
+          <ul>
+            <li>Postgres 会增加安装、升级、端口和备份复杂度，不符合当前单用户范围。</li>
+            <li>客户事实首先需要关系和状态一致性，不是相似度检索。</li>
+            <li>向量索引可作为以后可替换的知识检索部件，不能充当业务源。</li>
+            <li>原始文件继续保存在项目空间，数据库只存结构化记录和索引。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="roadmap" class="panel">
+      <div class="section-head">
+        <div><p class="eyebrow">Guidance</p><h2>分阶段改造顺序</h2></div>
+        <p class="muted">不以日历工期承诺；每阶段以前一阶段数据契约稳定为入口条件。</p>
+      </div>
+      <div class="roadmap">
+        <article class="stage">
+          <span class="priority p0">阶段 A · P0</span>
+          <h3 style="margin-top:12px">从任务助手变成客户经营助手</h3>
+          <ol>
+            <li>建立 SQLite 业务库和兼容导入/导出。</li>
+            <li>建立 Account 360、关键人、承诺、风险和证据模型。</li>
+            <li>建立 Signal Store 与下一步行动队列。</li>
+            <li>建立自然语言目标入口和可复用 Play。</li>
+            <li>首页改成“今日客户优先事项＋原因＋操作”。</li>
+          </ol>
+          <p class="muted"><b>阶段出口：</b>不用先选择服务，输入一个客户目标即可得到可解释、可恢复、可执行的计划。</p>
+        </article>
+        <article class="stage">
+          <span class="priority p1">阶段 B · P1</span>
+          <h3 style="margin-top:12px">减少人工搬运并形成复盘闭环</h3>
+          <ol>
+            <li>增加安全的 CSV/Excel 批量导入与字段映射。</li>
+            <li>选择一个真实 CRM 或销售邮箱做首个业务连接器。</li>
+            <li>增加销售方法论模板和缺口检测。</li>
+            <li>增加跨互动趋势、建议采纳和行动完成反馈。</li>
+            <li>将客户上下文自动传递给方案、PPT 与周报。</li>
+          </ol>
+          <p class="muted"><b>阶段出口：</b>Agent 能持续更新客户事实、发现停滞并证明哪些建议有效。</p>
+        </article>
+        <article class="stage">
+          <span class="priority p2">阶段 C · P2</span>
+          <h3 style="margin-top:12px">受控执行与团队化</h3>
+          <ol>
+            <li>增加邮件草稿、日程和 CRM 更新的逐动作审批。</li>
+            <li>增加限额、撤销、幂等与错误补偿。</li>
+            <li>评估多人协作、角色权限和团队共享。</li>
+            <li>评估 MCP/A2A 生态与第三方 Play 市场。</li>
+            <li>真实数据足够后再评估预测和自动优化。</li>
+          </ol>
+          <p class="muted"><b>阶段出口：</b>安全边界可验证后，再把“建议”逐步扩展成“经批准执行”。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="acceptance" class="panel">
+      <div class="section-head">
+        <div><p class="eyebrow">Acceptance</p><h2>P0 可验证验收标准</h2></div>
+        <span class="status strong">每项都能转成自动测试与用户验收</span>
+      </div>
+      <div class="grid cols-2">
+        <article class="card">
+          <h3>客户 360 与数据迁移</h3>
+          <ul>
+            <li>一个页面展示客户事实、阶段、关键人、承诺、风险、证据、行动、任务、资料和产物。</li>
+            <li>每条事实含来源、状态、时间和适用范围；推断不能自动升级为事实。</li>
+            <li>现有 CSV 可预览映射、校验、导入；失败不产生部分写入。</li>
+            <li>数据库可备份、恢复并导出为不锁定用户的 CSV/JSON。</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>信号与下一步行动</h3>
+          <ul>
+            <li>同一客户的重复信号可去重，过期信号不继续影响优先级。</li>
+            <li>每条推荐显示触发信号、证据、推荐原因、截止日期和所需审批。</li>
+            <li>用户可接受、编辑、忽略或稍后处理，并记录原因。</li>
+            <li>推荐不会直接改变客户阶段、写入正式事实或对外发送。</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>目标入口与 Play</h3>
+          <ul>
+            <li>用户可以直接输入“准备 A 客户拜访并找出推进障碍”，无需先理解服务分类。</li>
+            <li>系统生成受众、资料、步骤、审批和产物预览；只追问一个阻塞性问题。</li>
+            <li>Play 有稳定 ID、版本、启停状态和变更记录，可被手动或定时触发。</li>
+            <li>Play 不能扩大 Profile 权限、绕过 DAG 或复用旧审批。</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>可靠性与回归</h3>
+          <ul>
+            <li>应用崩溃后任务和信号租约可恢复，不重复写入或生成重复行动。</li>
+            <li>迁移前后的客户、活动和资源记录数量、稳定 ID 与哈希可核对。</li>
+            <li>Windows/macOS 安装、升级、回滚和备份恢复均有自动化验证。</li>
+            <li>现有研究、政府方案、PPT、周报、报销和文件回收功能全部回归通过。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head"><div><p class="eyebrow">Positioning</p><h2>应保持的产品边界</h2></div></div>
+      <div class="grid cols-3">
+        <article class="card good"><h3>继续强化</h3><p>本地优先、证据可追溯、硬审批、政府合作、正式文件/PPT、可选模型、双平台桌面体验。</p></article>
+        <article class="card warn"><h3>谨慎增加</h3><p>CRM/邮箱/日历接入、销售方法论、跨客户分析；每项都要有来源身份、同步游标和撤销边界。</p></article>
+        <article class="card risk"><h3>暂不承诺</h3><p>无人值守外联、自动改变客户阶段、销售人员排名、成交预测、多租户云平台和个人微信读取。</p></article>
+      </div>
+      <div class="callout" style="margin-top:16px"><b>推荐定位：</b>“面向销售总监的本地客户经营与决策助手”，而不是“自动替代 SDR 的获客机器人”。差异化来自可信客户上下文、政府合作与正式材料能力，以及用户可控的本地数据和审批链。</div>
+    </section>
+
+    <section id="sources" class="panel sources">
+      <div class="section-head"><div><p class="eyebrow">Sources</p><h2>依据、限制与来源</h2></div></div>
+      <h3>当前项目证据</h3>
+      <ul>
+        <li><code>profiles/sales-director/profile.json</code>：销售总监的 7 个服务及插件依赖。</li>
+        <li><code>vertical_plugins/</code>：销售、研究、政府合作、周报与 PPT 的确定性 DAG。</li>
+        <li><code>pi/extensions/</code>：持久任务、受控数据适配器、网页/PDF 阅读和 Subagent 边界。</li>
+        <li><code>ui/</code>：项目空间、任务中心、定时任务、自定义操作、模型选择、审批、报销和文件回收界面。</li>
+        <li><code>data/sales/*.example.csv</code>：当前客户、活动、资源申请和销售资产数据结构。</li>
+        <li>2026-08-21 本地执行 <code>python -m agent_platform validate</code>：12 个插件、14 个工作流、3 个源码 Profile、21 个源码服务通过校验；桌面发行版锁定 <code>sales-director</code>。</li>
+      </ul>
+
+      <h3 style="margin-top:20px">官方竞品与开源来源</h3>
+      <ul>
+        <li><a href="https://architect.salesforce.com/docs/architect/fundamentals/guide/enterprise-agentic-architecture.html">Salesforce Enterprise Agentic Architecture</a>：Agent 子系统、Data 360、MCP、A2A 与多 Agent 模式。</li>
+        <li><a href="https://architect.salesforce.com/docs/architect/fundamentals/guide/agentic-patterns">Salesforce Agentic Patterns</a>：销售开发邮件培育、动作、护栏和人工升级流程。</li>
+        <li><a href="https://learn.microsoft.com/en-us/dynamics365/sales/sales-qualification-agent">Microsoft Sales Qualification Agent</a>：研究模式与研究＋互动模式。</li>
+        <li><a href="https://learn.microsoft.com/en-us/dynamics365/sales/ai-agents-apps">Microsoft skill-based sales agents</a>：研究、竞品、资格、关键人、外联和总结等专业 Agent。</li>
+        <li><a href="https://www.hubspot.com/products/artificial-intelligence/use-cases/send-personalized-sales-outreach">HubSpot Breeze Prospecting Agent</a>：Play、目标客群、购买信号、触达和审核流程。</li>
+        <li><a href="https://www.gong.io/platform/ai-agents-for-revenue-teams">Gong Agents</a> 与 <a href="https://www.gong.io/press/gong-launches-mission-big-dipper-revenue-harness">Gong Revenue Harness</a>：Revenue Graph、专业 Agent、权限、审计和人工监督。</li>
+        <li><a href="https://github.com/trycompai/crm">Comp AI CRM</a>：持久队列、Tools/Skills/Schedule、证据账本和隔离 Agent。</li>
+      </ul>
+
+      <h3 style="margin-top:20px">证据姿态</h3>
+      <ul>
+        <li><span class="status fact-label">已证实事实</span> 当前能力来自仓库代码、配置与本地平台校验；竞品能力来自其官方文档或官方仓库。</li>
+        <li><span class="status inference-label">分析判断</span> P0/P1/P2 排序基于“单个销售总监、本地优先、不自动外发”的既定范围，而不是商业 ROI 数据。</li>
+        <li><span class="status unknown-label">未知信息</span> 未使用真实 CRM、客户、邮件、通话、内部消息或采用率数据；因此没有评估实际节省时间、赢单率或销售人员表现。</li>
+        <li>商业产品没有完整公开内部代码，本报告只描述可公开证实的产品流程和架构边界，不把推断写成实现事实。</li>
+      </ul>
+    </section>
+
+    <footer>Agent4Market 销售总监 Agent · 产品与架构对照 · 生成于 2026-08-21</footer>
+  </main>
+</body>
+</html>

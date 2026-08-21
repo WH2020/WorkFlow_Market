@@ -62,6 +62,19 @@ class MacOSDistributionTests(unittest.TestCase):
         ):
             self.assertIn(artifact, workflow)
 
+    def test_sqlite_gate_runs_on_windows_and_both_macos_architectures(self):
+        workflow = (ROOT / ".github/workflows/cross-platform.yml").read_text(encoding="utf-8")
+        for required in (
+            "sqlite-driver-gate:",
+            'node-version: "24.19.0"',
+            "windows-latest",
+            "macos-15",
+            "macos-15-intel",
+            "--expect-arch ${{ matrix.expected_arch }}",
+            "sqlite-driver-gate-${{ matrix.report_name }}-${{ github.sha }}",
+        ):
+            self.assertIn(required, workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@
   "scripts": {
     "check:types": "tsc --noEmit",
     "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/data-adapters.test.ts pi/tests/source-readers.test.ts pi/tests/subagent-contracts.test.ts pi/tests/web-search.test.ts pi/tests/deck-builder.test.mjs",
+    "test:sqlite-gate": "node pi/tests/sqlite-driver-gate.mjs",
     "test:ppt-e2e": "node pi/tests/standalone-deck-e2e.mjs",
     "build:macos": "bash scripts/build-macos-desktop.sh"
   },

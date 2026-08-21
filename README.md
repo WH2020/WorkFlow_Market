@@ -28,6 +28,18 @@ flowchart LR
 
 详见 [轻本体插件架构](docs/轻本体插件架构.md) 和 [插件开发指南](docs/插件开发指南.md)。
 
+### 销售总监下一阶段产品路线
+
+当前销售总监版本的阶段 A 设计已拆成可开发交付包：
+
+- [竞品能力、架构差距与改造优先级](docs/agent4market-sales-agent-architecture-2026-08-21.html)
+- [P0 客户经营核心 PRD](docs/PRD-P0-客户经营核心.md)
+- [P0 SQLite 数据模型与 CSV 迁移/回滚设计](docs/ARCH-P0-SQLite数据模型与迁移.md)
+- [ADR-001 SQLite 驱动与崩溃恢复门禁](docs/ADR-001-SQLite驱动门禁.md)
+- [P0 实施任务、测试矩阵与发布门禁](docs/PLAN-P0-实施与验收.md)
+
+阶段 A 的方向是把现有研究、政府合作、资源协调、复盘和 PPT 统一到客户经营上下文中，并以 SQLite 承载可事务化的业务关系。该路线目前是待实施设计，不代表当前版本已经从 CSV 完成迁移。
+
 ## Pi 快速开始（Windows / macOS）
 
 正式支持 Windows 10/11 与 macOS 13+ 的本机部署。基础要求为 Python 3.11+、Node.js 22.19+、Git；安装器会检查或配置 pnpm 10、Pi 0.84.2+、项目依赖、本地数据和项目级 Pi Package。建议把仓库作为实际工作 Project 使用，以便知识库、台账、模板和输出目录都位于当前工作目录。
