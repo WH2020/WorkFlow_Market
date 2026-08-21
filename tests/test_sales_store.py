@@ -32,7 +32,10 @@ from agent_platform.sales_store import (
 class SalesStoreMigrationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        # macOS exposes temporary directories through /var while resolve() returns
+        # the canonical /private/var path used by the production path guard. Keep
+        # fault-injection comparisons on that same canonical identity.
+        self.root = Path(self.temporary.name).resolve()
         self.sales = self.root / "data" / "sales"
         self.knowledge = self.root / "data" / "knowledge"
         self.inputs = self.root / "inputs"
