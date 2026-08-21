@@ -1,11 +1,11 @@
 # Agent4Market 阶段 A：实施与验收计划
 
-- 状态：执行中——A0、A1 已完成跨平台回归；A2 已实现并等待本提交的跨平台回归，A3 待开始
+- 状态：执行中——A0、A1、A2 已完成跨平台回归，A3 待开始
 - 产品范围：[客户经营核心 PRD](PRD-P0-客户经营核心.md)
 - 数据设计：[SQLite 数据模型与迁移](ARCH-P0-SQLite数据模型与迁移.md)
 - A0 状态：[ADR-001 SQLite 驱动门禁](ADR-001-SQLite驱动门禁.md)
 
-> 执行进度：STORE-A0-01/02/03、STORE-A1-01～04 与 STORE-A2-01～03 已完成实现。A2 已接通严格存储指针、`sales.*` / `knowledge.*`、客户查询/360/信号只读接口和存储绑定 Approval；本地回归通过，跨平台 CI 待本提交验证。没有读取、迁移或激活正式业务数据，现有安装仍使用原存储。
+> 执行进度：STORE-A0-01/02/03、STORE-A1-01～04 与 STORE-A2-01～03 已完成实现。A2 已接通严格存储指针、`sales.*` / `knowledge.*`、客户查询/360/信号只读接口和存储绑定 Approval，并通过 [跨平台 CI #32457534384](https://github.com/WH2020/WorkFlow_Market/actions/runs/32457534384)：Windows/macOS 完整回归及 Windows x64、macOS Intel、macOS Apple Silicon 三套 SQLite 门禁全部成功。没有读取、迁移或激活正式业务数据，现有安装仍使用原存储。
 
 ## 1. 交付目标
 
