@@ -1,6 +1,6 @@
 # A1 SQLite 存储与迁移使用说明
 
-- 状态：实现完成，本地回归通过，等待 Windows/macOS CI 复核
+- 状态：实现完成；Windows、macOS Intel 与 macOS Apple Silicon 回归通过（[跨平台 CI #32450446290](https://github.com/WH2020/WorkFlow_Market/actions/runs/32450446290)）
 - 适用范围：销售总监本地版 schema v1
 - 关联设计：[SQLite 数据模型与迁移](ARCH-P0-SQLite数据模型与迁移.md)
 - 关联计划：[实施与验收计划](PLAN-P0-实施与验收.md)

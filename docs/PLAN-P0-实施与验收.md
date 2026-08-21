@@ -1,11 +1,11 @@
 # Agent4Market 阶段 A：实施与验收计划
 
-- 状态：执行中——A0 已完成，A1 已实现并通过本地回归，跨平台 CI 待确认
+- 状态：执行中——A0、A1 已完成并通过 Windows/macOS 跨平台回归，A2 待开始
 - 产品范围：[客户经营核心 PRD](PRD-P0-客户经营核心.md)
 - 数据设计：[SQLite 数据模型与迁移](ARCH-P0-SQLite数据模型与迁移.md)
 - A0 状态：[ADR-001 SQLite 驱动门禁](ADR-001-SQLite驱动门禁.md)
 
-> 执行进度：STORE-A0-01/02/03 已完成。STORE-A1-01～04 已实现 schema v1、Store、CSV staging、对账、备份恢复、指针切换和 CSV 导出回环，本地回归通过，等待三平台 CI 复核。A2 及正式数据迁移尚未开始，当前正式业务数据仍使用原存储。
+> 执行进度：STORE-A0-01/02/03 与 STORE-A1-01～04 已完成。schema v1、Store、CSV staging、对账、备份恢复、指针切换和 CSV 导出回环已通过 Windows、macOS Intel 与 macOS Apple Silicon 回归（[跨平台 CI #32450446290](https://github.com/WH2020/WorkFlow_Market/actions/runs/32450446290)）。A2 及正式数据迁移尚未开始，当前正式业务数据仍使用原存储。
 
 ## 1. 交付目标
 
