@@ -54,15 +54,20 @@ class ControlCentreTests(unittest.TestCase):
 
     def test_desktop_self_test_mode_never_starts_the_daily_scheduler(self):
         arguments = ["server.py", "--port", "0", "--profile", "sales-director", "--disable-scheduler"]
+        encoded_output = io.BytesIO()
+        encoded_stdout = io.TextIOWrapper(encoded_output, encoding="cp1252")
         with (
             patch("sys.argv", arguments),
+            patch("sys.stdout", encoded_stdout),
             patch.object(server, "ThreadingHTTPServer") as http_server,
             patch.object(server.threading, "Thread") as scheduler_thread,
         ):
             http_server.return_value.serve_forever.return_value = None
             server.main()
+            encoded_stdout.flush()
         scheduler_thread.assert_not_called()
         http_server.return_value.server_close.assert_called_once_with()
+        self.assertIn(b"Agent4Market workbench started", encoded_output.getvalue())
 
     def test_atomic_json_round_trip(self):
         target = server.TASKS / "task-a.json"

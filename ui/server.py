@@ -3089,6 +3089,14 @@ def schedule_loop(stop: threading.Event) -> None:
         stop.wait(20)
 
 
+def console_message(message: str, ascii_fallback: str) -> None:
+    """Keep startup diagnostics usable on Windows consoles without CJK support."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(ascii_fallback)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="启动仅本机可访问的销售总监工作台")
     parser.add_argument("--port", type=int, default=8765)
@@ -3105,11 +3113,14 @@ def main() -> None:
     if not args.disable_scheduler:
         schedule_thread = threading.Thread(target=schedule_loop, args=(schedule_stop,), name="director-daily-scheduler", daemon=True)
         schedule_thread.start()
-    print(f"销售总监工作台已启动：http://127.0.0.1:{args.port}")
+    console_message(
+        f"销售总监工作台已启动：http://127.0.0.1:{args.port}",
+        f"Agent4Market workbench started: http://127.0.0.1:{args.port}",
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n销售总监工作台已停止")
+        console_message("\n销售总监工作台已停止", "\nAgent4Market workbench stopped")
     finally:
         schedule_stop.set()
         if schedule_thread is not None:
