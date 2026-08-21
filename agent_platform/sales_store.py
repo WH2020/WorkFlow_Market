@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 
 SCHEMA_VERSION = 1
-APPLICATION_VERSION = "0.13.6"
+APPLICATION_VERSION = "0.14.0"
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_ROWS_PER_FILE = 250_000
 MIGRATIONS = Path(__file__).resolve().parent / "migrations"

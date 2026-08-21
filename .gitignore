@@ -33,5 +33,6 @@ library/templates/office-template-catalog.json
 library/templates/company/
 *.log
 /Agent4Market.exe
+/dist/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/

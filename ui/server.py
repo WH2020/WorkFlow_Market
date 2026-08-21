@@ -69,7 +69,9 @@ from agent_platform.business_backend import (  # noqa: E402
     knowledge_entries as business_knowledge_entries,
     knowledge_urls as business_knowledge_urls,
     read_account_360,
+    read_account_timeline,
     read_signals,
+    read_today_focus,
     resolve_business_backend,
     search_accounts,
     search_business_records,
@@ -2119,7 +2121,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
             status = HTTPStatus.NOT_FOUND
         elif code.startswith("INVALID"):
             status = HTTPStatus.BAD_REQUEST
-        elif code in {"STORE_BUSY"}:
+        elif code in {"STORE_BUSY", "SCAN_LIMIT"}:
             status = HTTPStatus.SERVICE_UNAVAILABLE
         else:
             status = HTTPStatus.CONFLICT
@@ -2256,6 +2258,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     ROOT,
                     query=query.get("query", [""])[0],
                     filters=filters,
+                    updated_since=query.get("updated_since", [None])[0],
                     cursor=query.get("cursor", [None])[0],
                     limit=int(query.get("limit", ["20"])[0]),
                 )
@@ -2278,6 +2281,34 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     sections=sections,
                     since=query.get("since", [None])[0],
                 )
+                self.send_json(HTTPStatus.OK, result)
+            except (BusinessBackendError, ValueError) as error:
+                self.send_business_error(error)
+            return
+        if route.startswith("/api/accounts/") and route.endswith("/timeline"):
+            try:
+                parts = route.split("/")
+                if len(parts) != 5:
+                    raise ValueError("客户时间线地址无效")
+                account_id = unquote(parts[3])
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=10)
+                kinds_text = query.get("kinds", [""])[0]
+                kinds = [item for item in kinds_text.split(",") if item] if kinds_text else None
+                result = read_account_timeline(
+                    ROOT,
+                    account_id,
+                    kinds=kinds,
+                    cursor=query.get("cursor", [None])[0],
+                    limit=int(query.get("limit", ["20"])[0]),
+                )
+                self.send_json(HTTPStatus.OK, result)
+            except (BusinessBackendError, ValueError) as error:
+                self.send_business_error(error)
+            return
+        if route == "/api/attention":
+            try:
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=5)
+                result = read_today_focus(ROOT, limit=int(query.get("limit", ["20"])[0]))
                 self.send_json(HTTPStatus.OK, result)
             except (BusinessBackendError, ValueError) as error:
                 self.send_business_error(error)

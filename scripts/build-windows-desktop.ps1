@@ -26,13 +26,26 @@ if (-not (Test-Path -LiteralPath $OutputDirectory -PathType Container)) {
 Copy-Item -LiteralPath $BuiltExecutable -Destination $OutputPath -Force
 
 if (-not $SkipSelfTest) {
-    $SelfTest = Start-Process -FilePath $OutputPath -ArgumentList "--self-test" -WindowStyle Hidden -Wait -PassThru
-    if ($SelfTest.ExitCode -ne 0) {
-        $LauncherLog = Join-Path $ProjectRoot ".pi\director-runtime\desktop-launcher.log"
-        $Diagnostic = if (Test-Path -LiteralPath $LauncherLog -PathType Leaf) {
-            (@(Get-Content -LiteralPath $LauncherLog -Tail 20 -ErrorAction SilentlyContinue) -join " | ")
-        } else { "no desktop launcher log" }
-        throw "Tauri desktop self-test failed with exit code $($SelfTest.ExitCode): $Diagnostic"
+    $SelfTestPath = $OutputPath
+    $TemporarySelfTestPath = $null
+    if ((Split-Path -Parent $OutputPath) -ne $ProjectRoot) {
+        $TemporarySelfTestPath = Join-Path $ProjectRoot ".Agent4Market-self-test-$([Guid]::NewGuid().ToString('N')).exe"
+        Copy-Item -LiteralPath $BuiltExecutable -Destination $TemporarySelfTestPath
+        $SelfTestPath = $TemporarySelfTestPath
+    }
+    try {
+        $SelfTest = Start-Process -FilePath $SelfTestPath -ArgumentList "--self-test" -WindowStyle Hidden -Wait -PassThru
+        if ($SelfTest.ExitCode -ne 0) {
+            $LauncherLog = Join-Path $ProjectRoot ".pi\director-runtime\desktop-launcher.log"
+            $Diagnostic = if (Test-Path -LiteralPath $LauncherLog -PathType Leaf) {
+                (@(Get-Content -LiteralPath $LauncherLog -Tail 20 -ErrorAction SilentlyContinue) -join " | ")
+            } else { "no desktop launcher log" }
+            throw "Tauri desktop self-test failed with exit code $($SelfTest.ExitCode): $Diagnostic"
+        }
+    } finally {
+        if ($TemporarySelfTestPath -and (Test-Path -LiteralPath $TemporarySelfTestPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $TemporarySelfTestPath -Force
+        }
     }
 }
 

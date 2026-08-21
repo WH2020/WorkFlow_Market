@@ -13,7 +13,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -23,6 +23,11 @@ MAX_POINTER_BYTES = 64 * 1024
 MAX_CSV_BYTES = 16 * 1024 * 1024
 MAX_LIMIT = 100
 MAX_360_SECTION_ROWS = 1000
+MAX_TIMELINE_SCAN_ROWS = 5000
+MAX_BUSINESS_CSV_SCAN_ROWS = 250_000
+MAX_TIMELINE_CSV_SCAN_ROWS = MAX_BUSINESS_CSV_SCAN_ROWS
+FOCUS_DUE_DAYS = 7
+FOCUS_STALE_DAYS = 30
 
 
 class BusinessBackendError(RuntimeError):
@@ -135,6 +140,13 @@ def _csv_rows(root: Path, relative: str, limit: int = 5000) -> list[dict[str, st
         raise BusinessBackendError("CSV_INVALID", f"无法读取 {relative}：{error}") from error
 
 
+def _complete_business_csv_rows(root: Path, relative: str) -> list[dict[str, str]]:
+    rows = _csv_rows(root, relative, MAX_BUSINESS_CSV_SCAN_ROWS + 1)
+    if len(rows) > MAX_BUSINESS_CSV_SCAN_ROWS:
+        raise BusinessBackendError("SCAN_LIMIT", f"{relative} 超过受控扫描上限，无法返回完整结果")
+    return rows
+
+
 def _row_version(row: Mapping[str, Any]) -> str:
     payload = json.dumps(dict(sorted(row.items())), ensure_ascii=False, separators=(",", ":"))
     return _sha256(payload.encode("utf-8"))
@@ -182,6 +194,22 @@ def _normalize_query(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def _parse_iso8601(value: str, label: str) -> datetime:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise BusinessBackendError("INVALID_INPUT", f"{label} 无效")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as error:
+        raise BusinessBackendError("INVALID_INPUT", f"{label} 必须是有效的 ISO 8601 日期或时间") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _canonical_iso(value: str, label: str) -> str:
+    return _parse_iso8601(value, label).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 ACCOUNT_FILTERS = {"owner", "region", "sector", "lifecycle_stage", "health", "project_id"}
 
 
@@ -190,6 +218,7 @@ def search_accounts(
     *,
     query: str = "",
     filters: Mapping[str, str] | None = None,
+    updated_since: str | None = None,
     cursor: str | None = None,
     limit: int = 20,
 ) -> dict[str, Any]:
@@ -199,12 +228,17 @@ def search_accounts(
     filters = dict(filters or {})
     if any(key not in ACCOUNT_FILTERS or not isinstance(value, str) or len(value) > 500 for key, value in filters.items()):
         raise BusinessBackendError("INVALID_INPUT", "客户筛选字段或值无效")
-    scope = _cursor_scope({"kind": "accounts", "query": normalized, "filters": sorted(filters.items())})
+    updated_since_value = _canonical_iso(updated_since, "updated_since") if updated_since is not None else None
+    updated_since_moment = _parse_iso8601(updated_since_value, "updated_since") if updated_since_value else None
+    scope = _cursor_scope({
+        "kind": "accounts", "query": normalized, "filters": sorted(filters.items()),
+        "updated_since": updated_since_value,
+    })
     position = _decode_cursor(cursor, "accounts", 2, scope)
     rows: list[dict[str, Any]]
     if backend.backend == "csv":
         projected = []
-        for row in _csv_rows(backend.root, "data/sales/customers.csv", 250_000):
+        for row in _complete_business_csv_rows(backend.root, "data/sales/customers.csv"):
             item = {
                 "account_id": row.get("customer_id", ""), "name": row.get("customer_name", ""),
                 "region": row.get("region", ""), "sector": row.get("sector", ""), "owner": row.get("owner", ""),
@@ -219,6 +253,12 @@ def search_accounts(
                 continue
             if any(str(item.get(key, "")) != value for key, value in filters.items()):
                 continue
+            if updated_since_moment is not None:
+                try:
+                    if _parse_iso8601(str(item.get("updated_at", "")), "客户更新时间") < updated_since_moment:
+                        continue
+                except BusinessBackendError:
+                    continue
             projected.append(item)
         projected.sort(key=lambda item: (str(item["updated_at"]), str(item["account_id"])), reverse=True)
         if position:
@@ -234,6 +274,9 @@ def search_accounts(
         for key, value in filters.items():
             conditions.append(f"a.{key} = ?")
             parameters.append(value)
+        if updated_since_value is not None:
+            conditions.append("julianday(a.updated_at) >= julianday(?)")
+            parameters.append(updated_since_value)
         if position:
             conditions.append("(a.updated_at < ? OR (a.updated_at = ? AND a.account_id < ?))")
             parameters.extend([position[0], position[0], position[1]])
@@ -282,7 +325,8 @@ def read_account_360(
             raise BusinessBackendError("INVALID_INPUT", "since 必须是有效的 ISO 8601 日期或时间") from error
     backend = resolve_business_backend(project_root)
     if backend.backend == "csv":
-        customer = next((row for row in _csv_rows(backend.root, "data/sales/customers.csv", 250_000) if row.get("customer_id") == account_id), None)
+        customer_rows = _complete_business_csv_rows(backend.root, "data/sales/customers.csv")
+        customer = next((row for row in customer_rows if row.get("customer_id") == account_id), None)
         if customer is None:
             raise BusinessBackendError("NOT_FOUND", "客户不存在")
         account = {
@@ -300,13 +344,13 @@ def read_account_360(
         legacy: dict[str, list[dict[str, Any]]] = {
             "contacts": contacts,
             "opportunities": [],
-            "activities": [dict(row, version=_row_version(row)) for row in _csv_rows(backend.root, "data/sales/activities.csv", 250_000) if row.get("customer_id") == account_id and (not since or row.get("occurred_at", "") >= since)],
+            "activities": [dict(row, version=_row_version(row)) for row in (_complete_business_csv_rows(backend.root, "data/sales/activities.csv") if "activities" in selected else []) if row.get("customer_id") == account_id and (not since or row.get("occurred_at", "") >= since)],
             "commitments": [],
             "risks": ([{"risk_id": f"legacy-risk-{account_id}", "account_id": account_id, "risk_text": customer.get("risks", ""), "status": "open", "version": account["version"]}] if customer.get("risks", "").strip() else []),
             "signals": [],
             "actions": ([{"action_id": f"legacy-action-{account_id}", "account_id": account_id, "action_text": customer.get("next_action", ""), "due_at": customer.get("next_action_due", ""), "status": "open", "origin": "imported", "version": account["version"]}] if customer.get("next_action", "").strip() else []),
-            "resource_requests": [dict(row, version=_row_version(row)) for row in _csv_rows(backend.root, "data/sales/resource-requests.csv", 250_000) if row.get("customer_id") == account_id],
-            "sales_assets": [dict(row, version=_row_version(row)) for row in _csv_rows(backend.root, "data/sales/sales-assets.csv", 250_000) if row.get("customer_id") == account_id],
+            "resource_requests": [dict(row, version=_row_version(row)) for row in (_complete_business_csv_rows(backend.root, "data/sales/resource-requests.csv") if "resource_requests" in selected else []) if row.get("customer_id") == account_id],
+            "sales_assets": [dict(row, version=_row_version(row)) for row in (_complete_business_csv_rows(backend.root, "data/sales/sales-assets.csv") if "sales_assets" in selected else []) if row.get("customer_id") == account_id],
             "evidence_refs": [], "task_links": [], "artifacts": [],
         }
         truncated_sections: list[str] = []
@@ -368,7 +412,16 @@ def read_account_360(
                 clauses = " OR ".join("(entity_type=? AND entity_id=?)" for _ in chunk)
                 parameters = [value for pair in chunk for value in pair]
                 evidence_rows.extend(dict(row) for row in connection.execute(
-                    f"SELECT * FROM evidence_refs WHERE deleted_at IS NULL AND ({clauses}) ORDER BY entity_type, entity_id, evidence_ref_id",
+                    f"""SELECT e.*,
+                               s.title AS source_title,
+                               s.url AS source_url,
+                               s.publisher AS source_publisher,
+                               s.accessed_date AS source_accessed_date,
+                               s.status AS source_status
+                        FROM evidence_refs e
+                        LEFT JOIN sources s ON s.source_id=e.source_id AND s.deleted_at IS NULL
+                        WHERE e.deleted_at IS NULL AND ({clauses})
+                        ORDER BY e.entity_type, e.entity_id, e.evidence_ref_id""",
                     parameters,
                 ).fetchall())
                 if len(evidence_rows) > MAX_360_SECTION_ROWS:
@@ -416,6 +469,420 @@ def read_signals(
     rows = rows[:limit]
     next_cursor = _encode_cursor("signals", [str(rows[-1]["last_seen_at"]), str(rows[-1]["signal_id"])], scope) if has_more and rows else None
     return {"backend": "sqlite", "binding_id": backend.binding_id, "rows": rows, "next_cursor": next_cursor, "has_more": has_more}
+
+
+TIMELINE_KINDS = ("activity", "commitment", "task_link", "write_receipt", "sales_asset", "artifact")
+
+
+def _account_id(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 128 or any(char in value for char in "\0\r\n"):
+        raise BusinessBackendError("INVALID_INPUT", "客户 ID 无效")
+    return value
+
+
+def _timeline_row(
+    kind: str,
+    identity: str,
+    event_at: str,
+    title: str,
+    *,
+    summary: str = "",
+    status: str = "",
+    target_section: str,
+    extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "timeline_id": f"{kind}:{identity}",
+        "kind": kind,
+        "event_at": event_at,
+        "title": title,
+        "summary": summary,
+        "status": status,
+        "target_section": target_section,
+        "evidence_type": kind,
+        "evidence_id": identity,
+        **dict(extra or {}),
+    }
+
+
+def read_account_timeline(
+    project_root: Path | str,
+    account_id: str,
+    *,
+    kinds: Sequence[str] | None = None,
+    cursor: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Return a read-only, evidence-addressable account timeline.
+
+    The timeline only projects existing records.  It does not infer meetings,
+    commitments or approvals that are absent from the selected backend.
+    """
+    account_id = _account_id(account_id)
+    limit = _limit(limit)
+    selected = tuple(kinds or TIMELINE_KINDS)
+    if not selected or len(set(selected)) != len(selected) or any(kind not in TIMELINE_KINDS for kind in selected):
+        raise BusinessBackendError("INVALID_INPUT", "客户时间线类别无效")
+    scope = _cursor_scope({"kind": "account_timeline", "account_id": account_id, "kinds": sorted(selected)})
+    position = _decode_cursor(cursor, "account_timeline", 3, scope)
+    backend = resolve_business_backend(project_root)
+    items: list[dict[str, Any]] = []
+    timeline_truncated = False
+
+    def bounded(values: Sequence[Any]) -> Sequence[Any]:
+        nonlocal timeline_truncated
+        if len(values) > MAX_TIMELINE_SCAN_ROWS:
+            timeline_truncated = True
+        return values[:MAX_TIMELINE_SCAN_ROWS]
+
+    if backend.backend == "csv":
+        scanned_customers = _csv_rows(backend.root, "data/sales/customers.csv", MAX_TIMELINE_CSV_SCAN_ROWS + 1)
+        if len(scanned_customers) > MAX_TIMELINE_CSV_SCAN_ROWS:
+            timeline_truncated = True
+        customer = next((row for row in scanned_customers[:MAX_TIMELINE_CSV_SCAN_ROWS] if row.get("customer_id") == account_id), None)
+        if customer is None:
+            if len(scanned_customers) > MAX_TIMELINE_CSV_SCAN_ROWS:
+                raise BusinessBackendError("SCAN_LIMIT", "客户文件超过受控扫描上限，无法确认该客户是否存在")
+            raise BusinessBackendError("NOT_FOUND", "客户不存在")
+        activities: list[dict[str, str]] = []
+        if "activity" in selected or "commitment" in selected:
+            scanned_activities = _csv_rows(backend.root, "data/sales/activities.csv", MAX_TIMELINE_CSV_SCAN_ROWS + 1)
+            if len(scanned_activities) > MAX_TIMELINE_CSV_SCAN_ROWS:
+                timeline_truncated = True
+            activities = [
+                row for row in scanned_activities[:MAX_TIMELINE_CSV_SCAN_ROWS]
+                if row.get("customer_id") == account_id
+            ]
+            activities.sort(key=lambda row: (str(row.get("occurred_at") or row.get("created_at") or ""), str(row.get("activity_id") or "")), reverse=True)
+        if "activity" in selected:
+            for row in bounded(activities):
+                identity = str(row.get("activity_id") or "")
+                event_at = str(row.get("occurred_at") or row.get("created_at") or "")
+                if identity and event_at:
+                    items.append(_timeline_row(
+                        "activity", identity, event_at, str(row.get("summary") or "客户互动"),
+                        summary=" · ".join(value for value in (row.get("channel", ""), row.get("activity_type", "")) if value),
+                        status=str(row.get("evidence_status") or ""), target_section="activities",
+                    ))
+        if "commitment" in selected:
+            commitments = [row for row in activities if str(row.get("commitment") or "").strip()]
+            for row in bounded(commitments):
+                commitment = str(row.get("commitment") or "").strip()
+                activity_id = str(row.get("activity_id") or "")
+                event_at = str(row.get("occurred_at") or row.get("created_at") or "")
+                if commitment and activity_id and event_at:
+                    items.append(_timeline_row(
+                        "commitment", f"legacy-{activity_id}", event_at, commitment,
+                        summary="来自已记录互动", status="legacy_text", target_section="commitments",
+                        extra={"source_activity_id": activity_id},
+                    ))
+        if "sales_asset" in selected:
+            scanned_artifacts = _csv_rows(backend.root, "data/sales/sales-assets.csv", MAX_TIMELINE_CSV_SCAN_ROWS + 1)
+            if len(scanned_artifacts) > MAX_TIMELINE_CSV_SCAN_ROWS:
+                timeline_truncated = True
+            artifacts = [
+                row for row in scanned_artifacts[:MAX_TIMELINE_CSV_SCAN_ROWS]
+                if row.get("customer_id") == account_id
+            ]
+            artifacts.sort(key=lambda row: (str(row.get("updated_at") or row.get("last_validated_at") or ""), str(row.get("asset_id") or "")), reverse=True)
+            for row in bounded(artifacts):
+                identity = str(row.get("asset_id") or "")
+                event_at = str(row.get("updated_at") or row.get("last_validated_at") or "")
+                if row.get("customer_id") == account_id and identity and event_at:
+                    items.append(_timeline_row(
+                        "sales_asset", identity, event_at, str(row.get("title") or "销售资料"),
+                        summary=str(row.get("asset_type") or ""), status=str(row.get("status") or ""),
+                        target_section="sales_assets", extra={"relative_path": row.get("source_path", "")},
+                    ))
+    else:
+        with _sqlite_connection(backend) as connection:
+            if connection.execute("SELECT 1 FROM accounts WHERE account_id=? AND deleted_at IS NULL", (account_id,)).fetchone() is None:
+                raise BusinessBackendError("NOT_FOUND", "客户不存在")
+            scan_limit = MAX_TIMELINE_SCAN_ROWS + 1
+            if "activity" in selected:
+                rows = connection.execute(
+                    "SELECT activity_id,occurred_at,summary,channel,activity_type,evidence_status FROM activities WHERE account_id=? AND deleted_at IS NULL ORDER BY occurred_at DESC,activity_id DESC LIMIT ?",
+                    (account_id, scan_limit),
+                ).fetchall()
+                for row in bounded(rows):
+                    items.append(_timeline_row(
+                        "activity", row["activity_id"], row["occurred_at"], row["summary"],
+                        summary=" · ".join(str(value) for value in (row["channel"], row["activity_type"]) if value),
+                        status=row["evidence_status"], target_section="activities",
+                    ))
+            if "commitment" in selected:
+                rows = connection.execute(
+                    "SELECT commitment_id,updated_at,commitment_text,status,due_at,direction,source_activity_id FROM commitments WHERE account_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,commitment_id DESC LIMIT ?",
+                    (account_id, scan_limit),
+                ).fetchall()
+                for row in bounded(rows):
+                    items.append(_timeline_row(
+                        "commitment", row["commitment_id"], row["updated_at"], row["commitment_text"],
+                        summary=(f"承诺期限：{row['due_at']}" if row["due_at"] else ""), status=row["status"],
+                        target_section="commitments", extra={"due_at": row["due_at"], "direction": row["direction"], "source_activity_id": row["source_activity_id"]},
+                    ))
+            if "task_link" in selected:
+                rows = connection.execute(
+                    "SELECT task_link_id,task_id,relation_type,updated_at,project_id FROM task_links WHERE account_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,task_link_id DESC LIMIT ?",
+                    (account_id, scan_limit),
+                ).fetchall()
+                for row in bounded(rows):
+                    items.append(_timeline_row(
+                        "task_link", row["task_link_id"], row["updated_at"], "关联任务",
+                        summary=str(row["relation_type"] or ""), status="linked", target_section="task_links",
+                        extra={"task_id": row["task_id"], "project_id": row["project_id"]},
+                    ))
+            if "artifact" in selected:
+                rows = connection.execute(
+                    "SELECT artifact_id,relative_path,artifact_type,status,task_id,updated_at FROM artifacts WHERE account_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,artifact_id DESC LIMIT ?",
+                    (account_id, scan_limit),
+                ).fetchall()
+                for row in bounded(rows):
+                    items.append(_timeline_row(
+                        "artifact", row["artifact_id"], row["updated_at"], str(row["relative_path"] or "产物"),
+                        summary=str(row["artifact_type"] or ""), status=row["status"], target_section="artifacts",
+                        extra={"relative_path": row["relative_path"], "task_id": row["task_id"]},
+                    ))
+            if "sales_asset" in selected:
+                rows = connection.execute(
+                    "SELECT asset_id,title,asset_type,status,source_path,updated_at FROM sales_assets WHERE account_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,asset_id DESC LIMIT ?",
+                    (account_id, scan_limit),
+                ).fetchall()
+                for row in bounded(rows):
+                    items.append(_timeline_row(
+                        "sales_asset", row["asset_id"], row["updated_at"], str(row["title"] or "销售资料"),
+                        summary=str(row["asset_type"] or ""), status=row["status"], target_section="sales_assets",
+                        extra={"relative_path": row["source_path"] or ""},
+                    ))
+            if "write_receipt" in selected:
+                receipt_sql = """
+                    SELECT wr.intent_id,wr.task_id,wr.logical_tool,wr.status,wr.committed_at
+                    FROM write_receipts wr
+                    WHERE wr.status='committed'
+                      AND json_extract(wr.result_json,'$.approved_payload_sha256') IS NOT NULL
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM json_each(wr.result_json,'$.mutations') mutation
+                          WHERE
+                            (json_extract(mutation.value,'$.table')='accounts' AND json_extract(mutation.value,'$.record_id')=?) OR
+                            (json_extract(mutation.value,'$.table')='activities' AND json_extract(mutation.value,'$.record_id') IN (SELECT activity_id FROM activities WHERE account_id=?)) OR
+                            (json_extract(mutation.value,'$.table')='commitments' AND json_extract(mutation.value,'$.record_id') IN (SELECT commitment_id FROM commitments WHERE account_id=?)) OR
+                            (json_extract(mutation.value,'$.table')='actions' AND json_extract(mutation.value,'$.record_id') IN (SELECT action_id FROM actions WHERE account_id=?)) OR
+                            (json_extract(mutation.value,'$.table')='resource_requests' AND json_extract(mutation.value,'$.record_id') IN (SELECT request_id FROM resource_requests WHERE account_id=?)) OR
+                            (json_extract(mutation.value,'$.table')='sales_assets' AND json_extract(mutation.value,'$.record_id') IN (SELECT asset_id FROM sales_assets WHERE account_id=?)) OR
+                            (json_extract(mutation.value,'$.table')='task_links' AND json_extract(mutation.value,'$.record_id') IN (SELECT task_link_id FROM task_links WHERE account_id=?)) OR
+                            (json_extract(mutation.value,'$.table')='artifacts' AND json_extract(mutation.value,'$.record_id') IN (SELECT artifact_id FROM artifacts WHERE account_id=?))
+                        )
+                        OR EXISTS (SELECT 1 FROM task_links link WHERE link.task_id=wr.task_id AND link.account_id=? AND link.deleted_at IS NULL)
+                      )
+                    ORDER BY wr.committed_at DESC,wr.intent_id DESC LIMIT ?
+                """
+                parameters = (account_id, account_id, account_id, account_id, account_id, account_id, account_id, account_id, account_id, scan_limit)
+                rows = connection.execute(receipt_sql, parameters).fetchall()
+                for row in bounded(rows):
+                    items.append(_timeline_row(
+                        "write_receipt", row["intent_id"], row["committed_at"], "已批准写入",
+                        summary=str(row["logical_tool"] or ""), status=row["status"], target_section="write_receipts",
+                        extra={"task_id": row["task_id"]},
+                    ))
+
+    items.sort(key=lambda item: (str(item["event_at"]), str(item["kind"]), str(item["timeline_id"])), reverse=True)
+    if position:
+        items = [item for item in items if (str(item["event_at"]), str(item["kind"]), str(item["timeline_id"])) < position]
+    has_more = len(items) > limit
+    page = items[:limit]
+    next_cursor = (
+        _encode_cursor("account_timeline", [str(page[-1]["event_at"]), str(page[-1]["kind"]), str(page[-1]["timeline_id"])], scope)
+        if has_more and page else None
+    )
+    return {
+        "backend": backend.backend, "binding_id": backend.binding_id, "account_id": account_id,
+        "rows": page, "next_cursor": next_cursor, "has_more": has_more,
+        "truncated": timeline_truncated,
+    }
+
+
+def _focus_item(
+    account_id: str,
+    account_name: str,
+    kind: str,
+    reason: str,
+    *,
+    due_at: str | None,
+    event_at: str | None,
+    target_section: str,
+    evidence_type: str,
+    evidence_id: str,
+    severity: str = "attention",
+) -> dict[str, Any]:
+    return {
+        "focus_id": f"{kind}:{evidence_type}:{evidence_id}",
+        "account_id": account_id, "account_name": account_name, "kind": kind, "reason": reason,
+        "due_at": due_at, "event_at": event_at, "target_section": target_section,
+        "evidence_type": evidence_type, "evidence_id": evidence_id, "severity": severity,
+    }
+
+
+def read_today_focus(
+    project_root: Path | str,
+    *,
+    limit: int = 20,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Project current attention facts without persisting inferred signals.
+
+    This is intentionally a deterministic read model, not the A4 rule engine.
+    """
+    limit = _limit(limit)
+    if now is not None and not isinstance(now, datetime):
+        raise BusinessBackendError("INVALID_INPUT", "now 必须是 datetime")
+    local_zone = datetime.now().astimezone().tzinfo or timezone.utc
+    reference = now or datetime.now().astimezone()
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=local_zone)
+    reference = reference.astimezone(local_zone)
+    reference_utc = reference.astimezone(timezone.utc)
+    today = reference.date()
+    horizon = today + timedelta(days=FOCUS_DUE_DAYS)
+    stale_before = today - timedelta(days=FOCUS_STALE_DAYS)
+    backend = resolve_business_backend(project_root)
+    items: list[dict[str, Any]] = []
+
+    def parsed_date(value: Any) -> Any:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return _parse_iso8601(text, "业务日期").date()
+        except BusinessBackendError:
+            return None
+
+    def parsed_moment(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return _parse_iso8601(text, "业务时间")
+        except BusinessBackendError:
+            return None
+
+    if backend.backend == "csv":
+        customers = {
+            str(row.get("customer_id") or ""): row
+            for row in _complete_business_csv_rows(backend.root, "data/sales/customers.csv")
+            if row.get("customer_id")
+        }
+        for account_id, row in customers.items():
+            name = str(row.get("customer_name") or "")
+            action_due = parsed_moment(row.get("next_action_due"))
+            if str(row.get("next_action") or "").strip() and action_due and action_due < reference_utc:
+                items.append(_focus_item(
+                    account_id, name, "overdue_action", f"行动已逾期：{row['next_action']}",
+                    due_at=str(row.get("next_action_due") or ""), event_at=None, target_section="actions",
+                    evidence_type="account", evidence_id=account_id, severity="high",
+                ))
+            last_activity = parsed_date(row.get("last_evidence_date"))
+            if last_activity and last_activity < stale_before:
+                items.append(_focus_item(
+                    account_id, name, "stale_account", f"超过 {FOCUS_STALE_DAYS} 天没有已记录互动",
+                    due_at=None, event_at=str(row.get("last_evidence_date") or ""), target_section="activities",
+                    evidence_type="account", evidence_id=account_id,
+                ))
+        for row in _complete_business_csv_rows(backend.root, "data/sales/resource-requests.csv"):
+            account_id = str(row.get("customer_id") or "")
+            deadline = parsed_date(row.get("deadline"))
+            status = str(row.get("status") or "").casefold()
+            if account_id in customers and deadline and deadline <= horizon and status not in {"completed", "closed", "rejected", "cancelled"}:
+                items.append(_focus_item(
+                    account_id, str(customers[account_id].get("customer_name") or ""), "resource_deadline",
+                    f"资源申请临近期限：{row.get('request_summary') or '未命名申请'}",
+                    due_at=str(row.get("deadline") or ""), event_at=str(row.get("requested_at") or ""),
+                    target_section="resource_requests", evidence_type="resource_request",
+                    evidence_id=str(row.get("request_id") or ""), severity="high" if deadline < today else "attention",
+                ))
+    else:
+        with _sqlite_connection(backend) as connection:
+            scan_limit = MAX_TIMELINE_SCAN_ROWS + 1
+            existing_signal_subjects: set[tuple[str, str, str]] = set()
+            signal_reason = {
+                "overdue_action": "已有规则信号：行动逾期",
+                "stale_account": "已有规则信号：客户长期无互动",
+                "commitment_due": "已有规则信号：承诺临近期限",
+                "missing_critical_field": "已有规则信号：客户关键信息缺失",
+                "resource_deadline": "已有规则信号：资源申请临近期限",
+            }
+            for row in connection.execute(
+                "SELECT x.signal_id,x.account_id,a.name,x.signal_type,x.subject_type,x.subject_id,x.severity,x.last_seen_at FROM signals x JOIN accounts a ON a.account_id=x.account_id AND a.deleted_at IS NULL WHERE x.deleted_at IS NULL AND x.resolved_at IS NULL AND x.status='open' ORDER BY x.last_seen_at DESC,x.signal_id DESC LIMIT ?",
+                (scan_limit,),
+            ).fetchall():
+                account_id = str(row["account_id"])
+                existing_signal_subjects.add((str(row["signal_type"]), str(row["subject_type"]), str(row["subject_id"])))
+                items.append(_focus_item(
+                    account_id, str(row["name"]), str(row["signal_type"]), signal_reason.get(str(row["signal_type"]), "已有待处理规则信号"),
+                    due_at=None, event_at=row["last_seen_at"], target_section="signals",
+                    evidence_type="signal", evidence_id=row["signal_id"], severity=str(row["severity"] or "attention"),
+                ))
+            for row in connection.execute(
+                "SELECT x.action_id,x.account_id,a.name,x.action_text,x.due_at FROM actions x JOIN accounts a ON a.account_id=x.account_id AND a.deleted_at IS NULL WHERE x.deleted_at IS NULL AND x.due_at IS NOT NULL AND julianday(x.due_at)<julianday(?) AND x.status NOT IN ('completed','cancelled') ORDER BY julianday(x.due_at),x.action_id LIMIT ?",
+                (reference_utc.isoformat(), scan_limit),
+            ).fetchall():
+                if ("overdue_action", "action", str(row["action_id"])) not in existing_signal_subjects:
+                    items.append(_focus_item(
+                        row["account_id"], row["name"], "overdue_action", f"行动已逾期：{row['action_text']}",
+                        due_at=row["due_at"], event_at=None, target_section="actions", evidence_type="action",
+                        evidence_id=row["action_id"], severity="high",
+                    ))
+            for row in connection.execute(
+                "SELECT x.commitment_id,x.account_id,a.name,x.commitment_text,x.due_at,x.updated_at FROM commitments x JOIN accounts a ON a.account_id=x.account_id AND a.deleted_at IS NULL WHERE x.deleted_at IS NULL AND x.due_at IS NOT NULL AND date(x.due_at)<=date(?) AND x.status IN ('open','overdue','unknown') ORDER BY x.due_at,x.commitment_id LIMIT ?",
+                (horizon.isoformat(), scan_limit),
+            ).fetchall():
+                if ("commitment_due", "commitment", str(row["commitment_id"])) not in existing_signal_subjects:
+                    items.append(_focus_item(
+                        row["account_id"], row["name"], "commitment_due", f"承诺临近期限：{row['commitment_text']}",
+                        due_at=row["due_at"], event_at=row["updated_at"], target_section="commitments",
+                        evidence_type="commitment", evidence_id=row["commitment_id"], severity="high" if parsed_date(row["due_at"]) and parsed_date(row["due_at"]) < today else "attention",
+                    ))
+            for row in connection.execute(
+                "SELECT x.request_id,x.account_id,a.name,x.request_summary,x.deadline,x.requested_at FROM resource_requests x JOIN accounts a ON a.account_id=x.account_id AND a.deleted_at IS NULL WHERE x.deleted_at IS NULL AND x.deadline IS NOT NULL AND date(x.deadline)<=date(?) AND lower(coalesce(x.status,'')) NOT IN ('completed','closed','rejected','cancelled') ORDER BY x.deadline,x.request_id LIMIT ?",
+                (horizon.isoformat(), scan_limit),
+            ).fetchall():
+                if ("resource_deadline", "resource_request", str(row["request_id"])) not in existing_signal_subjects:
+                    deadline = parsed_date(row["deadline"])
+                    items.append(_focus_item(
+                        row["account_id"], row["name"], "resource_deadline", f"资源申请临近期限：{row['request_summary']}",
+                        due_at=row["deadline"], event_at=row["requested_at"], target_section="resource_requests",
+                        evidence_type="resource_request", evidence_id=row["request_id"], severity="high" if deadline and deadline < today else "attention",
+                    ))
+            for row in connection.execute(
+                """
+                SELECT a.account_id,a.name,a.created_at,max(x.occurred_at) AS last_activity_at
+                FROM accounts a LEFT JOIN activities x ON x.account_id=a.account_id AND x.deleted_at IS NULL
+                WHERE a.deleted_at IS NULL
+                GROUP BY a.account_id,a.name,a.created_at
+                HAVING date(coalesce(max(x.occurred_at),a.created_at))<date(?)
+                ORDER BY coalesce(max(x.occurred_at),a.created_at),a.account_id LIMIT ?
+                """,
+                (stale_before.isoformat(), scan_limit),
+            ).fetchall():
+                if ("stale_account", "account", str(row["account_id"])) not in existing_signal_subjects:
+                    last_seen = row["last_activity_at"] or row["created_at"]
+                    items.append(_focus_item(
+                        row["account_id"], row["name"], "stale_account", f"超过 {FOCUS_STALE_DAYS} 天没有已记录互动",
+                        due_at=None, event_at=last_seen, target_section="activities", evidence_type="account",
+                        evidence_id=row["account_id"],
+                    ))
+
+    rank = {"overdue_action": 0, "commitment_due": 1, "resource_deadline": 2, "missing_critical_field": 3, "stale_account": 4}
+    items.sort(key=lambda item: (
+        rank.get(str(item["kind"]), 3), str(item.get("due_at") or "9999-12-31"),
+        str(item.get("event_at") or ""), str(item["account_id"]), str(item["focus_id"]),
+    ))
+    truncated = len(items) > limit
+    return {
+        "backend": backend.backend, "binding_id": backend.binding_id,
+        "generated_at": reference.isoformat(), "rows": items[:limit],
+        "truncated": truncated, "read_model": "deterministic_attention_projection_v1",
+    }
 
 
 KNOWLEDGE_FIELDS = (

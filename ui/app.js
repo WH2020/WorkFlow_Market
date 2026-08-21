@@ -31,6 +31,18 @@
   const taskCardExpansion = new Map();
   const knowledgeCardExpansion = new Map();
   const reimbursementBatchExpansion = new Map();
+  const customerState = {
+    filters: { query: "", owner: "", region: "", industry: "", stage: "", health: "", updated: "" },
+    rows: [], cursor: "", hasMore: false, loading: false, loaded: false, error: "", selectedId: "", detail: null,
+    detailLoading: false, detailError: "", timeline: [], timelineCursor: "", timelineHasMore: false,
+    timelineLoading: false, timelineError: "", activeTab: "overview",
+    listGeneration: 0, detailGeneration: 0, timelineGeneration: 0,
+    attention: [], attentionLoaded: false, attentionLoading: false, attentionError: "", attentionGeneration: 0,
+    listController: null, detailController: null, timelineController: null, attentionController: null,
+  };
+  let customerRenderedKey = "";
+  let customerDetailRenderedKey = "";
+  let attentionRenderedKey = "";
   const thinkingLabels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
 
   function captureTaskComposerFocus() {
@@ -179,6 +191,7 @@
     ["SALES PRESENTATION", "销售演示文稿"],
     ["TASK CENTRE", "任务中心"],
     ["CUSTOMERS & SALES", "客户与销售"],
+    ["CUSTOMER OPERATIONS", "客户经营"],
     ["KNOWLEDGE BASE", "知识库"],
     ["WEEKLY REPORT", "每周汇报"],
     ["OUTPUT CENTRE", "输出中心"],
@@ -1692,6 +1705,263 @@
     filesBox.replaceChildren(...recentFiles.map((item) => fileRow(item)));
   }
 
+  function accountId(account) { return String(account?.account_id || account?.customer_id || account?.id || ""); }
+  function accountName(account) { return String(account?.account_name || account?.customer_name || account?.name || "未命名客户"); }
+  function accountField(account, ...names) { return names.map((name) => account?.[name]).find((value) => value !== undefined && value !== null && String(value).trim()) || ""; }
+  function customerContextAccount() { return customerState.rows.find((row) => accountId(row) === customerState.selectedId) || customerState.detail?.account || null; }
+  function selectedCustomerContextText() {
+    const account = customerContextAccount();
+    return account ? `\n【当前客户上下文】\n客户：${accountName(account)}\n客户编号：${accountId(account)}\n请优先结合该客户的全景、时间线、风险、行动与证据；信息不足时明确待确认。` : "";
+  }
+  function formatCustomerTime(value) {
+    const text = String(value || "").trim();
+    if (!text) return "暂无记录";
+    const time = new Date(text);
+    return Number.isNaN(time.getTime()) ? text : `${time.getFullYear()}-${String(time.getMonth() + 1).padStart(2, "0")}-${String(time.getDate()).padStart(2, "0")}`;
+  }
+  function freshnessText(value) {
+    const time = new Date(value || "");
+    if (Number.isNaN(time.getTime())) return "新鲜度待确认";
+    const days = Math.max(0, Math.floor((Date.now() - time.getTime()) / 86400000));
+    return days === 0 ? "今天更新" : days <= 7 ? `${days} 天前更新` : `${days} 天未更新`;
+  }
+  function customerHealth(value) {
+    const raw = String(value || "").trim();
+    const normalized = raw.toLowerCase();
+    const text = ({ healthy: "健康", good: "健康", normal: "一般", watch: "需关注", risk: "有风险", at_risk: "有风险", red: "有风险" })[normalized] || raw || "未标注";
+    const tone = /风险|关注|risk|watch|red/iu.test(raw) ? "risk" : /健康|good|healthy/iu.test(raw) ? "healthy" : "normal";
+    return { text, tone };
+  }
+  const customerValueLabels = {
+    activity: "互动", commitment: "承诺", task_link: "关联任务", write_receipt: "批准写入", sales_asset: "销售资料", artifact: "正式产出",
+    overdue_action: "行动逾期", stale_account: "长期无互动", commitment_due: "承诺临期",
+    missing_critical_field: "关键信息缺失", resource_deadline: "资源申请临期",
+    verified: "已核验", pending: "待核验", missing_file: "来源文件缺失", rejected: "已否定",
+    superseded: "已被取代", legacy_text: "历史文本", unknown: "待确认", open: "待处理", overdue: "已逾期",
+    fulfilled: "已完成", completed: "已完成", cancelled: "已取消", committed: "已提交", linked: "已关联",
+    ready: "可使用", active: "使用中", draft: "草稿", proposal: "方案阶段", discovery: "需求探索",
+    qualification: "资格确认", negotiation: "商务谈判", won: "已赢单", lost: "已失单",
+    customer_to_us: "客户对我方", us_to_customer: "我方对客户", mutual: "双方承诺",
+    fact: "事实", analysis: "分析", hypothesis: "假设",
+  };
+  function customerDisplayValue(value) {
+    const text = String(value ?? "").trim();
+    return customerValueLabels[text.toLowerCase()] || text;
+  }
+  function accountOptionValues(fieldNames) {
+    return [...new Set(customerState.rows.map((row) => String(accountField(row, ...fieldNames)).trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  }
+  function updateCustomerFilterOptions() {
+    const configs = [
+      ["customer-owner-options", ["owner", "owner_name", "account_owner", "负责人"]], ["customer-region-options", ["region", "area", "地区"]],
+      ["customer-industry-options", ["sector", "industry", "行业"]], ["customer-stage-options", ["lifecycle_stage", "stage", "sales_stage", "阶段"]], ["customer-health-options", ["health", "health_status", "健康度"]],
+    ];
+    configs.forEach(([id, fields]) => {
+      const list = $(id); if (!list) return;
+      list.replaceChildren(...accountOptionValues(fields).map((value) => new Option(value, value)));
+    });
+  }
+  function customerQuery() {
+    const params = new URLSearchParams();
+    const filterMap = { query: "query", owner: "owner", region: "region", industry: "sector", stage: "lifecycle_stage", health: "health" };
+    Object.entries(filterMap).forEach(([key, apiKey]) => { if (customerState.filters[key]) params.set(apiKey, customerState.filters[key]); });
+    if (customerState.filters.updated) { const since = new Date(); since.setDate(since.getDate() - Number(customerState.filters.updated)); params.set("updated_since", since.toISOString()); }
+    if (customerState.cursor) params.set("cursor", customerState.cursor);
+    return params.toString();
+  }
+  async function loadCustomers({ append = false, force = false } = {}) {
+    if (customerState.loading && !force) return;
+    customerState.listController?.abort();
+    const controller = new AbortController(); customerState.listController = controller;
+    const generation = ++customerState.listGeneration;
+    customerState.loading = true; customerState.error = ""; renderCustomerOperations();
+    try {
+      const response = await api(`/api/accounts?${customerQuery()}`, { signal: controller.signal });
+      if (generation !== customerState.listGeneration) return;
+      const rows = Array.isArray(response.rows) ? response.rows : Array.isArray(response.accounts) ? response.accounts : [];
+      customerState.rows = append ? [...customerState.rows, ...rows.filter((row) => !customerState.rows.some((old) => accountId(old) === accountId(row)))] : rows;
+      customerState.cursor = String(response.next_cursor || response.cursor || ""); customerState.hasMore = Boolean(response.has_more || customerState.cursor); customerState.loaded = true;
+      updateCustomerFilterOptions();
+    } catch (error) { if (error.name !== "AbortError" && generation === customerState.listGeneration) customerState.error = error.message || "客户列表暂时无法读取"; }
+    finally { if (generation === customerState.listGeneration) { customerState.loading = false; renderCustomerOperations(); } }
+  }
+  async function loadAttention({ force = false } = {}) {
+    if ((customerState.attentionLoaded || customerState.attentionLoading) && !force) return;
+    customerState.attentionController?.abort(); const controller = new AbortController(); customerState.attentionController = controller;
+    const generation = ++customerState.attentionGeneration;
+    customerState.attentionLoading = true; customerState.attentionError = ""; renderAttention();
+    try {
+      const response = await api("/api/attention", { signal: controller.signal });
+      if (generation !== customerState.attentionGeneration) return;
+      customerState.attention = Array.isArray(response.rows) ? response.rows : Array.isArray(response.items) ? response.items : [];
+      customerState.attentionLoaded = true; customerState.attentionError = "";
+    } catch (error) { if (error.name !== "AbortError" && generation === customerState.attentionGeneration) { customerState.attentionError = error.message || "今日关注暂时无法读取"; customerState.attentionLoaded = true; } }
+    finally { if (generation === customerState.attentionGeneration) { customerState.attentionLoading = false; renderAttention(); } }
+  }
+  function customerTabFor(section) {
+    return ({ activities: "timeline", commitments: "actions", actions: "actions", risks: "signals", resource_requests: "resources", sales_assets: "resources", artifacts: "resources", evidence_refs: "evidence", task_links: "evidence" })[String(section || "")] || (String(section || "") || "overview");
+  }
+  async function selectCustomer(id, { tab = "overview", focus = false } = {}) {
+    const customerId = String(id || ""); if (!customerId) return;
+    customerState.selectedId = customerId; customerState.activeTab = customerTabFor(tab); customerState.detail = null; customerState.timeline = []; customerState.timelineCursor = ""; customerState.timelineHasMore = false; customerState.detailError = ""; customerState.timelineError = ""; customerState.detailLoading = true; customerState.timelineLoading = true;
+    customerState.detailController?.abort(); const controller = new AbortController(); customerState.detailController = controller; const generation = ++customerState.detailGeneration;
+    customerState.timelineController?.abort(); customerState.timelineGeneration += 1;
+    renderCustomerOperations(); renderCustomerContext();
+    let focusAnchor = null;
+    if (focus) queueMicrotask(() => { if (generation === customerState.detailGeneration && customerState.selectedId === customerId) { focusAnchor = $("customer-detail").hidden ? $("customer-detail-empty") : $("customer-detail"); focusAnchor?.focus?.({ preventScroll: true }); } });
+    try {
+      const [detail, timeline] = await Promise.allSettled([
+        api(`/api/accounts/${encodeURIComponent(customerId)}/360`, { signal: controller.signal }), api(`/api/accounts/${encodeURIComponent(customerId)}/timeline`, { signal: controller.signal }),
+      ]);
+      if (generation !== customerState.detailGeneration) return;
+      if (detail.status === "fulfilled") customerState.detail = detail.value; else if (detail.reason?.name !== "AbortError") customerState.detailError = detail.reason?.message || "客户全景暂时无法读取";
+      if (timeline.status === "fulfilled") { customerState.timeline = Array.isArray(timeline.value.rows) ? timeline.value.rows : Array.isArray(timeline.value.timeline) ? timeline.value.timeline : []; customerState.timelineCursor = String(timeline.value.next_cursor || ""); customerState.timelineHasMore = Boolean(timeline.value.has_more && customerState.timelineCursor); } else if (timeline.reason?.name !== "AbortError") customerState.timelineError = timeline.reason?.message || "时间线暂时无法读取";
+    } finally { if (generation === customerState.detailGeneration) { const keepDetailFocus = Boolean(focus && focusAnchor && document.activeElement === focusAnchor); customerState.detailLoading = false; customerState.timelineLoading = false; renderCustomerOperations(); renderCustomerContext(); if (keepDetailFocus) $("customer-detail")?.focus?.({ preventScroll: true }); } }
+  }
+  async function loadMoreCustomerTimeline() {
+    if (!customerState.selectedId || !customerState.timelineCursor || customerState.timelineLoading) return;
+    customerState.timelineController?.abort(); const controller = new AbortController(); customerState.timelineController = controller; const generation = ++customerState.timelineGeneration;
+    const accountAtStart = customerState.selectedId; customerState.timelineLoading = true; customerState.timelineError = ""; renderCustomerDetail();
+    try {
+      const response = await api(`/api/accounts/${encodeURIComponent(accountAtStart)}/timeline?cursor=${encodeURIComponent(customerState.timelineCursor)}`, { signal: controller.signal });
+      if (generation !== customerState.timelineGeneration || accountAtStart !== customerState.selectedId) return;
+      const rows = Array.isArray(response.rows) ? response.rows : [];
+      const known = new Set(customerState.timeline.map((item) => String(item.timeline_id || `${item.kind}:${item.evidence_id}`)));
+      customerState.timeline.push(...rows.filter((item) => !known.has(String(item.timeline_id || `${item.kind}:${item.evidence_id}`))));
+      customerState.timelineCursor = String(response.next_cursor || ""); customerState.timelineHasMore = Boolean(response.has_more && customerState.timelineCursor);
+    } catch (error) { if (error.name !== "AbortError" && generation === customerState.timelineGeneration) customerState.timelineError = error.message || "更多时间线暂时无法读取"; }
+    finally { if (generation === customerState.timelineGeneration) { customerState.timelineLoading = false; renderCustomerDetail(); } }
+  }
+  function renderCustomerContext() {
+    const account = customerContextAccount(); const bar = $("customer-context-bar"); const inline = $("quick-customer-context"); const global = $("global-customer-context");
+    bar.hidden = !account; inline.hidden = !account; global.hidden = !account;
+    if (!account) return;
+    const opportunity = customerState.detail?.sections?.opportunities?.[0];
+    const stage = customerDisplayValue(accountField(opportunity, "stage") || accountField(account, "lifecycle_stage", "stage", "sales_stage", "阶段"));
+    const metadata = [accountField(opportunity, "name", "opportunity_name"), accountField(account, "owner", "owner_name", "负责人"), stage, `更新于 ${formatCustomerTime(accountField(account, "updated_at", "last_updated_at"))}`].filter(Boolean);
+    $("customer-context-name").textContent = accountName(account); $("quick-customer-context-name").textContent = `当前客户：${accountName(account)}`; $("global-customer-context-name").textContent = accountName(account);
+    $("customer-context-meta").textContent = metadata.join(" · ") || "已带入后续工作";
+  }
+  function clearCustomerContext() {
+    customerState.detailController?.abort(); customerState.timelineController?.abort(); customerState.detailGeneration += 1; customerState.timelineGeneration += 1;
+    customerState.selectedId = ""; customerState.detail = null; customerState.timeline = []; customerState.timelineCursor = ""; customerState.timelineHasMore = false;
+    customerState.detailLoading = false; customerState.timelineLoading = false; customerState.detailError = ""; customerState.timelineError = "";
+    renderCustomerOperations(); renderCustomerContext();
+  }
+  function customerCard(account) {
+    const id = accountId(account); const button = document.createElement("button"); button.type = "button"; button.className = `customer-row ${id === customerState.selectedId ? "selected" : ""}`; button.setAttribute("aria-pressed", String(id === customerState.selectedId));
+    const header = document.createElement("div"); const name = document.createElement("strong"); name.textContent = accountName(account); const health = customerHealth(accountField(account, "health", "health_status", "健康度")); const badge = document.createElement("span"); badge.className = `customer-health ${health.tone}`; badge.textContent = health.text; header.append(name, badge);
+    const meta = document.createElement("small"); meta.textContent = [accountField(account, "owner", "owner_name", "负责人") || "负责人待补充", customerDisplayValue(accountField(account, "lifecycle_stage", "stage", "sales_stage", "阶段")) || "阶段待补充", accountField(account, "region", "地区")].filter(Boolean).join(" · ");
+    const metrics = document.createElement("div"); metrics.className = "customer-row-metrics"; const activity = accountField(account, "last_activity_at", "last_activity", "最近互动"); const actions = accountField(account, "open_actions", "action_count"); const risks = accountField(account, "open_risks", "risk_count");
+    [["最近互动", formatCustomerTime(activity)], ["开放行动", actions || "0"], ["风险", risks || "0"], ["新鲜度", freshnessText(accountField(account, "updated_at", "last_updated_at", "last_activity_at"))]].forEach(([labelText, value]) => { const item = document.createElement("span"); item.textContent = `${labelText}：${value}`; metrics.append(item); });
+    button.append(header, meta, metrics); button.onclick = () => selectCustomer(id, { focus: true }); return button;
+  }
+  function detailSection(title, rows, fields) {
+    const section = document.createElement("section"); section.className = "customer-section"; const heading = document.createElement("h3"); heading.textContent = title; section.append(heading);
+    if (!Array.isArray(rows) || !rows.length) { const empty = document.createElement("p"); empty.className = "hint"; empty.textContent = "暂无可显示记录。"; section.append(empty); return section; }
+    const list = document.createElement("div"); list.className = "customer-detail-list"; rows.slice(0, 100).forEach((row) => { const item = document.createElement("article"); fields.forEach(([labelText, names, displayKind]) => { const value = accountField(row, ...names); if (value === "" || value === null || value === undefined) return; const line = document.createElement("p"); const key = document.createElement("strong"); key.textContent = `${labelText}：`; line.append(key); if (displayKind === "source-url") { const open = document.createElement("button"); open.type = "button"; open.className = "customer-source-link"; open.textContent = "打开来源"; open.title = String(value); open.onclick = async () => { open.disabled = true; try { const response = await api("/api/knowledge/source/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: String(value) }) }); note(response.message); } catch (error) { note(error.message, true); } finally { open.disabled = false; } }; line.append(open); } else line.append(document.createTextNode(customerDisplayValue(value))); item.append(line); }); if (!item.children.length) item.textContent = "该记录尚无可显示字段。"; list.append(item); }); section.append(list); return section;
+  }
+  function opportunityAmount(row) {
+    const minimum = row?.amount_min_minor; const maximum = row?.amount_max_minor;
+    if (minimum === null || minimum === undefined) { if (maximum === null || maximum === undefined) return ""; }
+    const format = (value) => Number.isFinite(Number(value)) ? new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(Number(value) / 100) : "";
+    const range = minimum !== null && minimum !== undefined && maximum !== null && maximum !== undefined ? `${format(minimum)}–${format(maximum)}` : format(minimum ?? maximum);
+    return [row?.currency, range].filter(Boolean).join(" ");
+  }
+  function missingCustomerFacts(account, sections) {
+    const missing = [];
+    if (!accountField(account, "owner", "owner_name")) missing.push("负责人");
+    if (!accountField(account, "lifecycle_stage", "stage")) missing.push("客户阶段");
+    if (!accountField(account, "region")) missing.push("地区");
+    if (!accountField(account, "sector", "industry")) missing.push("行业");
+    if (!Array.isArray(sections.contacts) || !sections.contacts.length) missing.push("关键人");
+    if (!Array.isArray(sections.opportunities) || !sections.opportunities.length) missing.push("销售机会");
+    return missing;
+  }
+  function detailTabs() {
+    const detail = customerState.detail || {}; const sections = detail.sections || {}; const account = detail.account || customerContextAccount() || {}; const tabs = [
+      ["overview", "概览"], ["timeline", "时间线"], ["contacts", "关键人"], ["opportunities", "机会"], ["signals", "信号"], ["resources", "资源与资料"], ["evidence", "证据"],
+    ];
+    tabs.splice(4, 0, ["actions", "行动与承诺"]);
+    const tabBox = $("customer-tabs"); tabBox.replaceChildren(...tabs.map(([id, text]) => { const button = document.createElement("button"); button.type = "button"; button.id = `customer-tab-${id}`; button.setAttribute("role", "tab"); button.setAttribute("aria-controls", "customer-tab-panel"); button.textContent = text; button.dataset.tab = id; const active = customerState.activeTab === id; button.className = active ? "active" : ""; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; button.onclick = () => { customerState.activeTab = id; renderCustomerDetail(); }; button.onkeydown = (event) => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); const buttons = [...tabBox.querySelectorAll("button")]; let index = buttons.indexOf(button); if (event.key === "ArrowLeft") index = (index - 1 + buttons.length) % buttons.length; if (event.key === "ArrowRight") index = (index + 1) % buttons.length; if (event.key === "Home") index = 0; if (event.key === "End") index = buttons.length - 1; const targetId = buttons[index].dataset.tab; buttons[index].click(); queueMicrotask(() => tabBox.querySelector(`[data-tab="${targetId}"]`)?.focus({ preventScroll: true })); }; return button; }));
+    const panel = $("customer-tab-panel"); panel.setAttribute("aria-labelledby", `customer-tab-${customerState.activeTab}`); panel.replaceChildren();
+    if (customerState.activeTab === "overview") {
+      const missing = missingCustomerFacts(account, sections);
+      panel.append(
+        detailSection("客户事实", [account], [["负责人", ["owner", "owner_name", "负责人"]], ["阶段", ["lifecycle_stage", "stage", "sales_stage", "阶段"]], ["行业", ["sector", "industry", "行业"]], ["地区", ["region", "地区"]], ["健康度", ["health", "health_status", "健康度"]], ["信息更新时间", ["updated_at", "last_updated_at"]], ["概况", ["summary"]]]),
+        detailSection("当前机会", (sections.opportunities || []).slice(0, 3).map((row) => ({ ...row, amount_display: opportunityAmount(row) })), [["机会", ["name", "opportunity_name", "title"]], ["阶段", ["stage"]], ["负责人", ["owner"]], ["金额范围", ["amount_display"]], ["预计决策时间", ["expected_decision_at"]], ["下一阶段条件", ["next_stage_condition"]]]),
+        detailSection("主要风险", (sections.risks || []).filter((row) => !["closed", "resolved", "cancelled"].includes(String(row.status || "").toLowerCase())).slice(0, 3), [["风险", ["risk_text", "risk", "summary"]], ["影响", ["impact"]], ["可能性", ["likelihood"]], ["负责人", ["owner"]], ["缓解动作", ["mitigation_action"]], ["状态", ["status"]]]),
+        detailSection("首要行动", (sections.actions || []).filter((row) => !["completed", "cancelled"].includes(String(row.status || "").toLowerCase())).slice(0, 3), [["行动", ["action_text", "title", "summary"]], ["负责人", ["owner"]], ["截止日期", ["due_at"]], ["优先级", ["priority"]], ["状态", ["status"]]])
+      );
+      if (missing.length) panel.append(detailSection("待补充信息", [{ missing: missing.join("、") }], [["尚未登记", ["missing"]]]));
+    } else if (customerState.activeTab === "timeline") {
+      if (!customerState.timeline.length && customerState.timelineLoading) panel.textContent = "正在读取时间线…"; else { if (customerState.timelineError) { const error = document.createElement("p"); error.className = "customer-inline-error"; error.textContent = `时间线暂时无法读取：${customerState.timelineError}`; panel.append(error); } panel.append(detailSection("客户时间线", customerState.timeline, [["时间", ["event_at", "occurred_at", "created_at", "date"]], ["类型", ["kind", "activity_type", "type", "event_type"]], ["事项", ["title", "summary", "description"]], ["状态", ["status"]], ["证据类型", ["evidence_type"]], ["证据编号", ["evidence_id"]]])); if (customerState.timelineHasMore) { const more = document.createElement("button"); more.type = "button"; more.className = "secondary customer-timeline-more"; more.textContent = customerState.timelineLoading ? "正在加载…" : "加载更多时间线"; more.disabled = customerState.timelineLoading; more.onclick = loadMoreCustomerTimeline; panel.append(more); } }
+    } else if (customerState.activeTab === "contacts") panel.append(detailSection("关键人", sections.contacts, [["姓名", ["display_name", "name", "contact_name"]], ["职位", ["title"]], ["角色", ["role"]], ["影响力", ["influence_level", "influence"]], ["决策关系", ["decision_role"]], ["身份状态", ["identity_status"]], ["邮箱", ["email"]], ["电话", ["phone"]]]));
+    else if (customerState.activeTab === "opportunities") panel.append(detailSection("销售机会", (sections.opportunities || []).map((row) => ({ ...row, amount_display: opportunityAmount(row) })), [["机会", ["name", "opportunity_name", "title"]], ["阶段", ["stage", "sales_stage"]], ["健康度", ["health"]], ["负责人", ["owner"]], ["金额范围", ["amount_display"]], ["预计决策时间", ["expected_decision_at"]], ["下一阶段条件", ["next_stage_condition"]], ["赢单判断", ["win_hypothesis"]]]));
+    else if (customerState.activeTab === "actions") panel.append(
+      detailSection("我方行动", sections.actions, [["行动", ["action_text", "title", "summary"]], ["负责人", ["owner"]], ["截止日期", ["due_at"]], ["优先级", ["priority"]], ["状态", ["status"]], ["来源任务", ["source_task_id"]], ["完成依据", ["completion_evidence"]]]),
+      detailSection("客户与双方承诺", sections.commitments, [["承诺", ["commitment_text", "title", "summary"]], ["方向", ["direction"]], ["截止日期", ["due_at"]], ["状态", ["status"]], ["来源互动", ["source_activity_id"]]])
+    );
+    else if (customerState.activeTab === "signals") panel.append(
+      detailSection("确定性信号", sections.signals, [["信号", ["signal_type", "title", "summary"]], ["等级", ["severity", "level"]], ["状态", ["status"]], ["计算时间", ["last_seen_at", "updated_at"]], ["触发对象", ["subject_type"]], ["触发记录", ["subject_id"]], ["规则版本", ["rule_version"]]]),
+      detailSection("已登记风险", sections.risks, [["风险", ["risk_text", "risk", "summary"]], ["类别", ["category"]], ["影响", ["impact"]], ["可能性", ["likelihood"]], ["负责人", ["owner"]], ["缓解动作", ["mitigation_action"]], ["状态", ["status"]]])
+    );
+    else if (customerState.activeTab === "resources") { panel.append(
+      detailSection("资源请求", sections.resource_requests, [["需求", ["request_summary", "summary", "title"]], ["业务原因", ["business_reason"]], ["截止日期", ["deadline", "due_date"]], ["状态", ["status"]], ["负责人", ["owner", "owner_name"]], ["审批决定", ["decision"]], ["决定原因", ["decision_reason"]]]),
+      detailSection("销售资料", sections.sales_assets, [["资料", ["title", "name", "asset_name"]], ["类型", ["asset_type", "type"]], ["使用场景", ["use_case"]], ["版本", ["version"]], ["状态", ["status"]], ["使用反馈", ["usage_feedback"]]]),
+      detailSection("正式产出", sections.artifacts, [["路径", ["relative_path"]], ["类型", ["artifact_type"]], ["状态", ["status"]], ["任务编号", ["task_id"]], ["更新时间", ["updated_at"]]])
+    ); }
+    else panel.append(
+      detailSection("证据引用", sections.evidence_refs, [["证据编号", ["evidence_ref_id"]], ["支持字段", ["field_name"]], ["内容类型", ["claim_kind"]], ["核验状态", ["verification_status"]], ["来源标题", ["source_title"]], ["发布机构", ["source_publisher"]], ["来源链接", ["source_url"], "source-url"], ["定位", ["locator_json"]], ["最后访问", ["source_accessed_date"]], ["说明", ["note"]]]),
+      detailSection("关联任务", sections.task_links, [["任务编号", ["task_id"]], ["关联方式", ["relation_type"]], ["项目编号", ["project_id"]], ["更新时间", ["updated_at"]]])
+    );
+  }
+  function customerQuickAction(serviceId, text, tab = "overview") {
+    const button = document.createElement("button"); button.type = "button"; button.className = "secondary"; button.textContent = text;
+    button.onclick = () => {
+      if (!customerState.selectedId) return;
+      const account = customerContextAccount(); const name = accountName(account);
+      if (serviceId === "sales-review") guidedDrafts[serviceId] = { scope: name, focus: "阶段、风险与下一步动作" };
+      if (serviceId === "government-proposal") guidedDrafts[serviceId] = { region: accountField(account, "region", "地区"), direction: `${name} 合作机会` };
+      if (serviceId === "industry-research") guidedDrafts[serviceId] = { topic: `${name} 所在行业与合作机会`, purpose: "支持客户沟通与机会判断", period: "近 12 个月，并补充关键历史背景" };
+      if (serviceId === "office-document") guidedDrafts[serviceId] = { document: "内部资源协调单", audience: "销售、产品、技术与交付负责人", materials: `请结合当前客户“${name}”的客户全景与${tab === "resources" ? "资源需求" : "当前进展"}。` };
+      openService(serviceId);
+      if (serviceId === "presentation-studio") { $("ppt-topic").value = `为${name}制作客户推进与合作方案汇报`; $("ppt-audience").value = "客户决策人和销售管理层"; $("ppt-decision").value = "确认下一步行动、合作范围与所需资源"; }
+      renderTaskForm();
+    };
+    return button;
+  }
+  function renderCustomerDetail() {
+    const empty = $("customer-detail-empty"); const detailBox = $("customer-detail"); const account = customerState.detail?.account || customerContextAccount();
+    const sectionKey = Object.entries(customerState.detail?.sections || {}).map(([name, rows]) => `${name}:${Array.isArray(rows) ? rows.length : 0}`).join("|");
+    const detailKey = `${customerState.selectedId}|${accountField(account, "version")}|${accountField(account, "updated_at")}|${customerState.activeTab}|${customerState.detailLoading}|${customerState.detailError}|${customerState.timelineLoading}|${customerState.timelineError}|${customerState.timeline.length}|${customerState.timelineCursor}|${sectionKey}`;
+    if (detailKey === customerDetailRenderedKey) return;
+    customerDetailRenderedKey = detailKey;
+    empty.hidden = Boolean(account); detailBox.hidden = !account;
+    if (!account) { if (customerState.detailLoading) empty.querySelector("p").textContent = "正在读取客户全景…"; else if (customerState.detailError) empty.querySelector("p").textContent = `客户全景暂时无法读取：${customerState.detailError}`; return; }
+    const sections = customerState.detail?.sections || {}; const primaryOpportunity = sections.opportunities?.[0]; const primaryRisk = (sections.risks || []).find((row) => !["closed", "resolved", "cancelled"].includes(String(row.status || "").toLowerCase())); const primaryAction = (sections.actions || []).find((row) => !["completed", "cancelled"].includes(String(row.status || "").toLowerCase()));
+    $("customer-detail-name").textContent = accountName(account); $("customer-detail-meta").textContent = [accountField(primaryOpportunity, "name"), accountField(account, "owner", "owner_name", "负责人"), customerDisplayValue(accountField(primaryOpportunity, "stage") || accountField(account, "lifecycle_stage", "stage", "sales_stage", "阶段")), freshnessText(accountField(account, "updated_at", "last_updated_at"))].filter(Boolean).join(" · ") || "客户信息待补充";
+    const status = $("customer-detail-status"); status.textContent = customerState.detailLoading ? "正在更新客户全景…" : customerState.detailError ? `部分信息暂时无法读取：${customerState.detailError}` : customerState.detail?.truncated_sections?.length ? `部分信息已截断：${customerState.detail.truncated_sections.join("、")}` : `主要风险：${accountField(primaryRisk, "risk_text") || "暂无已登记开放风险"} · 首要下一步：${accountField(primaryAction, "action_text") || "暂无已登记开放行动"}`;
+    const actions = $("customer-quick-actions"); actions.replaceChildren(customerQuickAction("sales-review", "客户复盘"), customerQuickAction("government-proposal", "政府合作"), customerQuickAction("industry-research", "行业研究"), customerQuickAction("office-document", "资源协调/文件", "resources"), customerQuickAction("presentation-studio", "制作演示文稿")); detailTabs();
+  }
+  function renderCustomerOperations() {
+    const list = $("customer-list"); if (!list) return;
+    const beforeScroll = list.scrollTop; const rowKey = customerState.rows.map((row) => `${accountId(row)}:${accountField(row, "version")}:${accountField(row, "updated_at")}:${accountField(row, "open_actions")}:${accountField(row, "open_risks")}`).join("|"); const key = `${rowKey}|${customerState.selectedId}|${customerState.loading}|${customerState.error}`;
+    if (key !== customerRenderedKey) { customerRenderedKey = key; list.classList.toggle("empty", !customerState.rows.length); if (customerState.error && !customerState.rows.length) { list.textContent = `客户列表暂时无法读取：${customerState.error}`; } else if (!customerState.rows.length && customerState.loading) list.textContent = "正在读取客户…"; else if (!customerState.rows.length) list.textContent = "没有符合筛选条件的客户。"; else list.replaceChildren(...customerState.rows.map(customerCard)); queueMicrotask(() => { list.scrollTop = Math.min(beforeScroll, Math.max(0, list.scrollHeight - list.clientHeight)); }); }
+    $("customer-list-count").textContent = String(customerState.rows.length); $("customer-list-status").textContent = customerState.loading ? "正在更新客户…" : customerState.error ? `读取未完成：${customerState.error}` : customerState.loaded ? `已显示 ${customerState.rows.length} 个客户` : "尚未读取"; $("customer-load-more").hidden = !customerState.hasMore; $("customer-load-more").disabled = customerState.loading; renderCustomerDetail(); renderCustomerContext();
+  }
+  function renderAttention() {
+    const box = $("home-attention"); if (!box) return;
+    const attentionKey = `${customerState.attentionLoaded}|${customerState.attentionLoading}|${customerState.attentionError}|${customerState.attention.map((item) => `${item.focus_id || ""}:${item.event_at || ""}:${item.due_at || ""}`).join("|")}`;
+    if (attentionKey === attentionRenderedKey) return;
+    attentionRenderedKey = attentionKey; box.replaceChildren();
+    if (customerState.attentionError) { box.className = "attention-list empty"; box.textContent = `今日关注暂时无法读取：${customerState.attentionError}`; return; }
+    if (!customerState.attentionLoaded || customerState.attentionLoading) { box.className = "attention-list empty"; box.textContent = "正在读取今日关注…"; return; }
+    if (!customerState.attention.length) { box.className = "attention-list empty"; box.textContent = "今天没有已识别的优先客户事项。"; return; }
+    const targetLabels = { overview: "客户概览", timeline: "时间线", actions: "行动与承诺", signals: "信号与风险", resources: "资源与资料", evidence: "证据" };
+    box.className = "attention-list"; customerState.attention.slice(0, 6).forEach((item) => { const id = accountId(item); const targetTab = customerTabFor(item.target_section); const card = document.createElement("button"); card.type = "button"; card.className = `attention-card ${String(item.severity || "") === "high" ? "high" : ""}`; const title = document.createElement("strong"); title.textContent = String(item.account_name || accountName(item)); const reason = document.createElement("p"); reason.textContent = accountField(item, "reason", "summary", "title") || "需要关注的客户事项"; const due = accountField(item, "due_at"); const meta = document.createElement("small"); meta.textContent = `${due ? `截止 ${formatCustomerTime(due)}` : `记录于 ${formatCustomerTime(accountField(item, "event_at", "updated_at"))}`} · 首要操作：查看${targetLabels[targetTab] || "客户信息"}`; card.append(title, reason, meta); card.onclick = async () => { switchView("sales"); await selectCustomer(id, { tab: targetTab, focus: true }); }; box.append(card); });
+  }
+
   function renderOutputs() {
     const box = $("outputs");
     box.replaceChildren();
@@ -1996,7 +2266,7 @@
 
   function render() {
     renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
-    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); switchView(currentView);
+    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderCustomerOperations(); renderAttention(); switchView(currentView);
   }
 
   async function createTask(request) {
@@ -2011,7 +2281,7 @@
     }
     return api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, project_id: selectedProject, request, ...taskRuntimeSelection() }),
+      body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, project_id: selectedProject, request: `${request}${selectedCustomerContextText()}`, ...taskRuntimeSelection() }),
     });
   }
 
@@ -2101,6 +2371,8 @@
     }
     render();
     restoreTaskComposerFocus(composerFocus);
+    if (currentView === "sales" && !customerState.loaded && !customerState.loading) loadCustomers();
+    if (!customerState.attentionLoaded) loadAttention();
   }
 
   $("create").onclick = async () => {
@@ -2116,6 +2388,7 @@
   $("request-notes").addEventListener("input", () => { guidedNotes[selectedService] = $("request-notes").value; });
 
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
+  document.querySelector('[data-view="sales"]')?.addEventListener("click", () => { if (!customerState.loaded && !customerState.loading) loadCustomers(); });
   $("go-back").onclick = navigateBack;
   window.addEventListener("keydown", (event) => {
     if (event.altKey && event.key === "ArrowLeft" && viewHistory.length) { event.preventDefault(); navigateBack(); }
@@ -2127,6 +2400,16 @@
   $("schedule-project").onchange = () => { selectedProject = $("schedule-project").value; $("task-project").value = selectedProject; };
   $("knowledge-query").addEventListener("input", () => { knowledgeRenderedKey = ""; renderKnowledge(); });
   $("knowledge-status-filter").addEventListener("change", () => { knowledgeRenderedKey = ""; renderKnowledge(); });
+  const customerFilterMap = [["customer-filter-query", "query", "input"], ["customer-filter-owner", "owner", "input"], ["customer-filter-region", "region", "input"], ["customer-filter-industry", "industry", "input"], ["customer-filter-stage", "stage", "input"], ["customer-filter-health", "health", "input"], ["customer-filter-updated", "updated", "change"]];
+  let customerFilterTimer = null;
+  customerFilterMap.forEach(([id, key, eventName]) => $(id)?.addEventListener(eventName, () => { customerState.filters[key] = $(id).value.trim(); customerState.cursor = ""; clearTimeout(customerFilterTimer); customerFilterTimer = setTimeout(() => loadCustomers({ force: true }), eventName === "input" ? 260 : 0); }));
+  $("customer-filter-clear").onclick = () => { Object.keys(customerState.filters).forEach((key) => { customerState.filters[key] = ""; }); customerState.cursor = ""; customerFilterMap.forEach(([id]) => { $(id).value = ""; }); loadCustomers({ force: true }); };
+  $("customer-refresh").onclick = async () => { const selected = customerState.selectedId; const tab = customerState.activeTab; customerState.cursor = ""; const refresh = loadCustomers({ force: true }); const generation = customerState.listGeneration; await refresh; if (selected && customerState.selectedId === selected && customerState.listGeneration === generation) await selectCustomer(selected, { tab }); };
+  $("customer-load-more").onclick = () => { if (!customerState.loading && customerState.hasMore) loadCustomers({ append: true }); };
+  $("customer-context-clear").onclick = clearCustomerContext; $("clear-quick-customer").onclick = clearCustomerContext; $("clear-global-customer").onclick = clearCustomerContext;
+  $("customer-context-open").onclick = () => { if (customerState.selectedId) { switchView("sales"); $("customer-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }); } };
+  $("global-customer-open").onclick = () => { if (customerState.selectedId) { switchView("sales"); $("customer-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }); } };
+  $("refresh-attention").onclick = () => loadAttention({ force: true });
   $("open-knowledge-file").onclick = async () => {
     try {
       const reply = await api("/api/knowledge/file/open", {
