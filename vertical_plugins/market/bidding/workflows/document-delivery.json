@@ -1,0 +1,15 @@
+{
+  "id": "market.bidding.document-delivery",
+  "plugin": "market.bidding",
+  "display_name": "正式标书生成",
+  "entry_nodes": ["load_bid"],
+  "output_nodes": ["validate_bid_document"],
+  "nodes": [
+    {"id": "load_bid", "type": "tool", "tool": "bid.read", "depends_on": [], "permissions": ["bid.read", "knowledge.read"]},
+    {"id": "prepare_bid_document", "type": "agent", "skill": "manage-intelligent-bidding", "depends_on": ["load_bid"], "permissions": ["artifact.write"]},
+    {"id": "freeze_bid_document", "type": "validator", "check": "document_payload_uses_document_snapshot_sha256_and_matches_approved_sections_facts_and_sources", "depends_on": ["prepare_bid_document"], "permissions": []},
+    {"id": "approve_bid_document", "type": "approval", "policy": "owner_confirms_formal_bid_document", "depends_on": ["freeze_bid_document"], "permissions": []},
+    {"id": "render_bid_document", "type": "tool", "tool": "artifact.document.write", "depends_on": ["approve_bid_document"], "permissions": ["artifact.write"]},
+    {"id": "validate_bid_document", "type": "validator", "check": "docx_render_structure_sources_hash_and_no_overwrite", "depends_on": ["render_bid_document"], "permissions": []}
+  ]
+}

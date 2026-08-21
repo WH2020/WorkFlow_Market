@@ -1,0 +1,14 @@
+{
+  "id": "market.bidding.go-no-go",
+  "plugin": "market.bidding",
+  "display_name": "参投决策",
+  "entry_nodes": ["load_bid"],
+  "output_nodes": ["validate_bid_write"],
+  "nodes": [
+    {"id": "load_bid", "type": "tool", "tool": "bid.read", "depends_on": [], "permissions": ["bid.read", "sales.read"]},
+    {"id": "assess_bid", "type": "agent", "skill": "manage-intelligent-bidding", "depends_on": ["load_bid"], "permissions": []},
+    {"id": "approve_bid_data", "type": "approval", "policy": "owner_decides_go_no_go", "depends_on": ["assess_bid"], "permissions": []},
+    {"id": "write_bid_data", "type": "tool", "tool": "bid.write", "depends_on": ["approve_bid_data"], "permissions": ["bid.write"]},
+    {"id": "validate_bid_write", "type": "validator", "check": "decision_receipt_rationale_and_stage", "depends_on": ["write_bid_data"], "permissions": []}
+  ]
+}

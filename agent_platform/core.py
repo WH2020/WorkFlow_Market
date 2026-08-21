@@ -16,6 +16,8 @@ TOOL_REQUIRED_PERMISSIONS = {
     "knowledge.write": {"knowledge.write"},
     "sales.read": {"sales.read"},
     "sales.write": {"sales.write"},
+    "bid.read": {"bid.read"},
+    "bid.write": {"bid.write"},
     "account.search": {"sales.read"},
     "account.read_360": {"sales.read"},
     "signals.read": {"sales.read"},
@@ -25,6 +27,7 @@ TOOL_REQUIRED_PERMISSIONS = {
     "presentation.plan.write": {"presentation.plan.write"},
     "weekly.snapshot": {"knowledge.read", "sales.read", "task.audit.read", "artifact.read"},
     "artifact.deck.write": {"artifact.write"},
+    "artifact.document.write": {"artifact.write"},
 }
 SUBAGENT_TOOL_REQUIRED_PERMISSIONS = {
     "web.search": {"web.read"},
@@ -281,7 +284,7 @@ def validate_workflow(workflow: dict[str, Any], plugin: Plugin | dict[str, Any])
 
     for node_id, node in node_map.items():
         if node.get("type") != "tool" or node.get("tool") not in {
-            "knowledge.write", "sales.write", "artifact.deck.write"
+            "knowledge.write", "sales.write", "bid.write", "artifact.deck.write", "artifact.document.write"
         }:
             continue
         dependencies = node.get("depends_on", [])
@@ -306,7 +309,7 @@ def validate_workflow(workflow: dict[str, Any], plugin: Plugin | dict[str, Any])
         protected_writes = [
             candidate for candidate in node_map.values()
             if candidate.get("type") == "tool"
-            and candidate.get("tool") in {"knowledge.write", "sales.write", "artifact.deck.write"}
+            and candidate.get("tool") in {"knowledge.write", "sales.write", "bid.write", "artifact.deck.write", "artifact.document.write"}
             and approval_id in candidate.get("depends_on", [])
         ]
         if len(protected_writes) != 1:

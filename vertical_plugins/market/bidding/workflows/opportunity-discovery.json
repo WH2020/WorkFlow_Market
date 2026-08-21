@@ -1,0 +1,13 @@
+{
+  "id": "market.bidding.opportunity-discovery",
+  "plugin": "market.bidding",
+  "display_name": "采购机会发现",
+  "entry_nodes": ["search_public_sources"],
+  "output_nodes": ["validate_opportunities"],
+  "nodes": [
+    {"id": "search_public_sources", "type": "tool", "tool": "web.search", "depends_on": [], "permissions": ["web.read"]},
+    {"id": "open_public_sources", "type": "tool", "tool": "web.open", "depends_on": ["search_public_sources"], "permissions": ["web.read"]},
+    {"id": "analyze_opportunities", "type": "agent", "skill": "manage-intelligent-bidding", "depends_on": ["open_public_sources"], "permissions": ["artifact.write"]},
+    {"id": "validate_opportunities", "type": "validator", "check": "official_source_deadline_and_fit", "depends_on": ["analyze_opportunities"], "permissions": []}
+  ]
+}

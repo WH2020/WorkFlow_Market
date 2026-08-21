@@ -16,7 +16,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { assertDeckMatchesEvidenceContext, registerDataAdapters } from "./data-adapters.ts";
+import { assertBidDocumentPayload } from "./document-artifact.ts";
 import { openBusinessStore, resolveBusinessBackend } from "./business-backend.ts";
+import { openBiddingStore } from "./bid-store.ts";
 import {
   TaskStore,
   approveNode,
@@ -122,6 +124,8 @@ const LOGICAL_TOOL_PERMISSIONS = new Map<string, readonly string[]>([
   ["knowledge.write", ["knowledge.write"]],
   ["sales.read", ["sales.read"]],
   ["sales.write", ["sales.write"]],
+  ["bid.read", ["bid.read"]],
+  ["bid.write", ["bid.write"]],
   ["account.search", ["sales.read"]],
   ["account.read_360", ["sales.read"]],
   ["signals.read", ["sales.read"]],
@@ -131,6 +135,7 @@ const LOGICAL_TOOL_PERMISSIONS = new Map<string, readonly string[]>([
   ["presentation.plan.write", ["presentation.plan.write"]],
   ["weekly.snapshot", ["knowledge.read", "sales.read", "task.audit.read", "artifact.read"]],
   ["artifact.deck.write", ["artifact.write"]],
+  ["artifact.document.write", ["artifact.write"]],
 ]);
 const SUBAGENT_TOOL_PERMISSIONS = new Map([
   ["web.search", "web.read"],
@@ -447,7 +452,7 @@ export function validateRuntimeWorkflow(workflow: Workflow, manifest: PluginMani
     throw new Error(`Workflow ${workflow.id} output_nodes do not match the DAG`);
   }
   for (const node of nodeMap.values()) {
-    if (node.type !== "tool" || !new Set(["knowledge.write", "sales.write", "artifact.deck.write"]).has(node.tool ?? "")) continue;
+    if (node.type !== "tool" || !new Set(["knowledge.write", "sales.write", "bid.write", "artifact.deck.write", "artifact.document.write"]).has(node.tool ?? "")) continue;
     const directApprovals = node.depends_on.filter((dependency) => nodeMap.get(dependency)?.type === "approval");
     if (directApprovals.length !== 1 || node.depends_on.length !== 1) {
       throw new Error(`Workflow ${workflow.id}/${node.id} write must have exactly one direct approval dependency`);
@@ -463,7 +468,7 @@ export function validateRuntimeWorkflow(workflow: Workflow, manifest: PluginMani
     const protectedWrites = workflow.nodes.filter(
       (candidate) =>
         candidate.type === "tool" &&
-        new Set(["knowledge.write", "sales.write", "artifact.deck.write"]).has(candidate.tool ?? "") &&
+        new Set(["knowledge.write", "sales.write", "bid.write", "artifact.deck.write", "artifact.document.write"]).has(candidate.tool ?? "") &&
         candidate.depends_on.includes(approvalId),
     );
     if (protectedWrites.length !== 1) {
@@ -678,6 +683,8 @@ const ADAPTER_TO_LOGICAL_TOOL = new Map([
   ["director_knowledge_write", "knowledge.write"],
   ["director_sales_read", "sales.read"],
   ["director_sales_write", "sales.write"],
+  ["director_bid_read", "bid.read"],
+  ["director_bid_write", "bid.write"],
   ["director_account_search", "account.search"],
   ["director_account_read_360", "account.read_360"],
   ["director_signals_read", "signals.read"],
@@ -687,9 +694,15 @@ const ADAPTER_TO_LOGICAL_TOOL = new Map([
   ["director_presentation_plan_write", "presentation.plan.write"],
   ["director_weekly_snapshot", "weekly.snapshot"],
   ["director_artifact_deck_write", "artifact.deck.write"],
+  ["director_artifact_document_write", "artifact.document.write"],
 ]);
 
 function businessWriteStorageBinding(logicalTool: string, projectRoot: string): WriteStorageBinding | undefined {
+  if (logicalTool === "bid.write") {
+    const store = openBiddingStore(projectRoot, false);
+    try { return { backend: "sqlite", binding_id: store.binding_id }; }
+    finally { store.close(); }
+  }
   if (logicalTool !== "knowledge.write" && logicalTool !== "sales.write") return undefined;
   const backend = resolveBusinessBackend(projectRoot);
   if (backend.backend === "sqlite") {
@@ -1093,8 +1106,8 @@ function inputTargetsOnlyOutputs(input: unknown, projectRoot: string): boolean {
   });
 }
 
-function inputTargetsPptx(input: unknown): boolean {
-  return inputPathCandidates(input).some((candidate) => /\.pptx(?:[ .]*|:.*)$/iu.test(candidate));
+function inputTargetsGovernedArtifact(input: unknown): boolean {
+  return inputPathCandidates(input).some((candidate) => /\.(?:pptx|docx)(?:[ .]*|:.*)$/iu.test(candidate));
 }
 
 const MANAGED_READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -1304,8 +1317,11 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       "weekly.snapshot": ["collecting", "正在汇总本周销售记录与任务变化。"],
       "knowledge.write": ["delivering", "正在写入已批准的知识记录。"],
       "sales.write": ["delivering", "正在提交已批准的销售台账变更。"],
+      "bid.read": ["collecting", "正在读取投标项目、资料、要求与应答记录。"],
+      "bid.write": ["delivering", "正在提交已批准的投标项目变更。"],
       "presentation.plan.write": ["drafting", "正在保存演示大纲或逐页方案。"],
       "artifact.deck.write": ["delivering", "正在生成并校验正式 PPT。"],
+      "artifact.document.write": ["delivering", "正在生成并校验正式投标文件。"],
     };
     const [phase, summary] = logicalTool && toolProgress[logicalTool]
       ? toolProgress[logicalTool]!
@@ -1350,7 +1366,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow, recoveryNote = "") => {
     pi.sendUserMessage(
-      `/skill:${service.skill} ${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账或 PPT 写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
+      `/skill:${service.skill} ${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
       { expandPromptTemplates: true },
     );
   };
@@ -1685,7 +1701,10 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     beforeLogicalTool: (logicalTool, params) => {
       const { state, workflow } = requireLogicalTool(logicalTool);
       const authorizedUrls = authorizedUrlsFromRequest(state.request);
-      if (logicalTool === "knowledge.write" || logicalTool === "sales.write" || logicalTool === "artifact.deck.write") {
+      if (
+        logicalTool === "knowledge.write" || logicalTool === "sales.write" || logicalTool === "bid.write" ||
+        logicalTool === "artifact.deck.write" || logicalTool === "artifact.document.write"
+      ) {
         const storageBinding = businessWriteStorageBinding(logicalTool, projectRoot);
         const approvedBinding = state.pending_write?.storage_binding;
         if (
@@ -1730,7 +1749,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     },
     afterLogicalTool: (logicalTool, params, details) => {
       const { state, workflow } = requireLogicalTool(logicalTool);
-      const artifactNote = logicalTool === "artifact.deck.write" && details && typeof details === "object"
+      const artifactNote = (logicalTool === "artifact.deck.write" || logicalTool === "artifact.document.write") && details && typeof details === "object"
         ? JSON.stringify({
             path: (details as Record<string, unknown>).path,
             receipt: (details as Record<string, unknown>).receipt,
@@ -1744,7 +1763,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         state.version,
         artifactNote,
         params,
-        logicalTool === "knowledge.write" || logicalTool === "sales.write"
+        logicalTool === "knowledge.write" || logicalTool === "sales.write" || logicalTool === "bid.write"
           ? state.pending_write?.storage_binding
           : undefined,
       );
@@ -1976,9 +1995,12 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   pi.registerTool({
     name: "director_propose_write_intent",
     label: "Prepare Exact Write for Approval",
-    description: "确定性校验并冻结知识库、销售台账或周报 PPT 的精确载荷，生成审批绑定哈希；此工具本身不写正式文件。",
+    description: "确定性校验并冻结知识库、销售台账、投标项目或正式文件的精确载荷，生成审批绑定哈希；此工具本身不写正式文件。",
     parameters: Type.Object({
-      logical_tool: Type.Union([Type.Literal("knowledge.write"), Type.Literal("sales.write"), Type.Literal("artifact.deck.write")]),
+      logical_tool: Type.Union([
+        Type.Literal("knowledge.write"), Type.Literal("sales.write"), Type.Literal("bid.write"),
+        Type.Literal("artifact.deck.write"), Type.Literal("artifact.document.write"),
+      ]),
       payload: Type.Unknown({ description: "必须与后续对应 director_*_write 工具的完整参数完全一致" }),
     }),
     async execute(_toolCallId, params) {
@@ -1986,6 +2008,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       if (!activeTask || isTerminal(activeTask)) throw new Error("当前会话没有运行中的受管任务");
       if (params.logical_tool === "artifact.deck.write") {
         assertDeckMatchesEvidenceContext(projectRoot, activeTask.task_id, activeTask.profile_id, params.payload as never);
+      }
+      if (params.logical_tool === "artifact.document.write") {
+        assertBidDocumentPayload(projectRoot, activeTask.profile_id, params.payload as never);
       }
       const previous = activeTask;
       const workflow = workflowFor(previous);
@@ -2048,11 +2073,11 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     if ((toolName === "write" || toolName === "edit") && inputTargetsData(input, projectRoot)) {
       return {
         block: true,
-        reason: "data/ 下的结构化数据只能通过 director_knowledge_* 或 director_sales_* 适配器修改。",
+        reason: "data/ 下的结构化数据只能通过受控知识库、销售台账或投标项目适配器修改。",
       };
     }
-    if ((toolName === "write" || toolName === "edit") && inputTargetsPptx(input)) {
-      return { block: true, reason: "受管任务禁止用通用 write/edit 伪造 PPTX；必须走冻结载荷、Approval 和 director_artifact_deck_write。" };
+    if ((toolName === "write" || toolName === "edit") && inputTargetsGovernedArtifact(input)) {
+      return { block: true, reason: "受管任务禁止用通用文件写入伪造正式 PPTX 演示文稿或 DOCX 标书；必须走冻结载荷、人工确认和专用生成工具。" };
     }
     if (toolName === "subagent") {
       if (!activeTask || isTerminal(activeTask)) {
@@ -2166,7 +2191,9 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         toolName === "director_complete_node" ||
         toolName === "director_knowledge_write" ||
         toolName === "director_sales_write" ||
-        toolName === "director_artifact_deck_write")
+        toolName === "director_bid_write" ||
+        toolName === "director_artifact_deck_write" ||
+        toolName === "director_artifact_document_write")
     ) {
       return { block: true, reason: "任务正在等待用户通过 /director-approve 或 /director-reject 作出决定。" };
     }

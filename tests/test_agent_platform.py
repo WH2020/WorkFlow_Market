@@ -17,10 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class PlatformTests(unittest.TestCase):
     def test_repository_bundles_validate(self) -> None:
         report = Platform(ROOT).validate_all()
-        self.assertEqual(12, report.plugins)
-        self.assertEqual(14, report.workflows)
+        self.assertEqual(13, report.plugins)
+        self.assertEqual(22, report.workflows)
         self.assertEqual(3, report.profiles)
-        self.assertEqual(21, report.services)
+        self.assertEqual(29, report.services)
 
     def test_director_profiles_resolve_expected_dependencies(self) -> None:
         platform = Platform(ROOT)
@@ -39,6 +39,7 @@ class PlatformTests(unittest.TestCase):
         self.assertNotIn("market.sales", product["resolved_plugins"])
         self.assertIn("market.sales", sales["resolved_plugins"])
         self.assertIn("market.government", sales["resolved_plugins"])
+        self.assertIn("market.bidding", sales["resolved_plugins"])
         self.assertNotIn("product.discovery", sales["resolved_plugins"])
 
     def test_resolved_profiles_contain_no_chat_import_reference(self) -> None:

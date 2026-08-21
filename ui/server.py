@@ -76,6 +76,20 @@ from agent_platform.business_backend import (  # noqa: E402
     search_accounts,
     search_business_records,
 )
+from agent_platform.bid_store import (  # noqa: E402
+    ALLOWED_BID_SUFFIXES,
+    MAX_BID_FILE_BYTES,
+    BidStoreError,
+    bid_dashboard,
+    create_bid_project,
+    read_bid_project,
+    read_bid_timeline,
+    register_bid_document,
+    run_deterministic_bid_checks,
+    search_bid_projects,
+    transition_bid_project,
+    update_bid_project,
+)
 
 
 UI_ROOT = Path(__file__).resolve().parent
@@ -139,6 +153,13 @@ NODE_DISPLAY_NAMES = {
     "read_pdf": "读取电子文档", "validate_evidence": "校验证据记录", "collect_week": "汇总本周记录",
     "build_plan": "规划周报结构", "save_plan": "保存周报方案", "build_payload": "组织汇报内容",
     "validate_payload": "校验汇报内容", "approve": "确认正式生成",
+    "load_bid": "读取投标项目", "interpret_tender": "解读招标文件",
+    "validate_interpretation": "校验原文定位", "approve_bid_data": "确认写入投标项目",
+    "write_bid_data": "更新投标项目", "assess_bid": "评估是否参投",
+    "build_response_plan": "制定应答计划", "build_fact_baseline": "建立事实基线",
+    "draft_bid_sections": "起草标书章节", "run_compliance_checks": "执行合规检查",
+    "validate_bid_document": "校验正式标书", "approve_bid_document": "确认生成正式标书",
+    "render_bid_document": "生成正式标书", "record_bid_outcome": "记录投标结果与复盘",
 }
 NODE_TYPE_DISPLAY_NAMES = {
     "agent": "智能分析", "tool": "资料处理", "validator": "规则校验", "approval": "人工确认",
@@ -180,6 +201,51 @@ SALES_WRITE_FIELDS = {
 WRITE_STABLE_KEYS = {
     "knowledge.write": "source_id", "customers": "customer_id", "activities": "activity_id",
     "resource_requests": "request_id", "sales_assets": "asset_id",
+    "bid_projects": "bid_id", "bid_milestones": "milestone_id",
+    "bid_requirements": "requirement_id", "bid_response_matrix": "response_id",
+    "bid_facts": "fact_id", "bid_sections": "section_id", "bid_checks": "check_id",
+    "bid_risks": "risk_id", "bid_decisions": "decision_id", "bid_outcomes": "outcome_id",
+}
+BID_WRITE_FIELDS = {
+    "bid_projects": {
+        "account_id", "opportunity_id", "workspace_project_id", "name", "buyer", "tender_number",
+        "lot_name", "owner", "deadline_at", "budget_minor", "currency", "status", "current_stage",
+        "go_no_go", "decision_reason", "summary",
+    },
+    "bid_milestones": {"bid_id", "milestone_type", "title", "due_at", "owner", "status", "evidence_json"},
+    "bid_requirements": {
+        "bid_id", "category", "mandatory", "score_points", "title", "requirement_text",
+        "evidence_locator_json", "verification_status", "response_status", "owner", "due_at",
+    },
+    "bid_response_matrix": {
+        "bid_id", "requirement_id", "section_id", "response_strategy", "material_need",
+        "material_status", "owner", "due_at", "deviation", "status",
+    },
+    "bid_facts": {
+        "bid_id", "category", "field_name", "value_text", "evidence_json", "verification_status",
+        "affected_sections_json",
+    },
+    "bid_sections": {
+        "bid_id", "parent_section_id", "order_index", "level", "title", "objective", "owner",
+        "content_markdown", "evidence_json", "status", "input_sha256",
+    },
+    "bid_checks": {
+        "bid_id", "rule_id", "rule_version", "category", "severity", "status", "finding",
+        "recommendation", "requirement_id", "section_id", "evidence_json", "input_sha256",
+        "resolved_by", "resolved_at",
+    },
+    "bid_risks": {
+        "bid_id", "category", "risk_text", "impact", "likelihood", "status", "owner",
+        "mitigation_action", "evidence_json",
+    },
+    "bid_decisions": {
+        "bid_id", "decision_type", "decision", "rationale", "approved_by", "approval_task_id",
+        "payload_sha256", "decided_at",
+    },
+    "bid_outcomes": {
+        "bid_id", "result", "amount_minor", "currency", "reason", "competitor_notes", "lessons",
+        "evidence_json", "decided_at",
+    },
 }
 
 
@@ -694,9 +760,19 @@ def canonical_plan_json(value: Any) -> str:
 def _validate_write_mutation_changes(
     logical_tool: str, payload: dict[str, Any], mutation: dict[str, Any]
 ) -> None:
-    table = str(payload.get("table", ""))
-    allowed = KNOWLEDGE_WRITE_FIELDS if logical_tool == "knowledge.write" else SALES_WRITE_FIELDS.get(table)
-    stable_key = WRITE_STABLE_KEYS.get(logical_tool if logical_tool == "knowledge.write" else table)
+    table = str(mutation.get("table") if logical_tool == "bid.write" else payload.get("table", ""))
+    if logical_tool == "knowledge.write":
+        allowed = KNOWLEDGE_WRITE_FIELDS
+        stable_key = WRITE_STABLE_KEYS.get("knowledge.write")
+    elif logical_tool == "sales.write":
+        allowed = SALES_WRITE_FIELDS.get(table)
+        stable_key = WRITE_STABLE_KEYS.get(table)
+    elif logical_tool == "bid.write":
+        allowed = BID_WRITE_FIELDS.get(table)
+        stable_key = WRITE_STABLE_KEYS.get(table)
+    else:
+        allowed = None
+        stable_key = None
     if allowed is None or stable_key is None:
         raise ValueError("当前待写入目标不支持卡片编辑")
     record_id = mutation.get("record_id")
@@ -716,6 +792,13 @@ def _validate_write_mutation_changes(
             raise ValueError(f"字段 {field} 含有表格公式前缀，不能保存")
     if stable_key in changes and changes[stable_key] != record_id:
         raise ValueError(f"不能修改稳定编号 {stable_key}")
+    if logical_tool == "bid.write":
+        bid_id = payload.get("bid_id")
+        if table == "bid_projects":
+            if record_id != bid_id:
+                raise ValueError("不能修改投标项目绑定 bid_id")
+        elif changes.get("bid_id") != bid_id:
+            raise ValueError("不能修改投标记录所属的 bid_id")
     if mutation.get("operation") == "update" and not isinstance(mutation.get("expected_version"), str):
         raise ValueError("更新记录缺少原始版本，不能安全修改")
 
@@ -724,10 +807,14 @@ def revised_write_payload(
     logical_tool: str, current_payload: dict[str, Any], operation: str,
     record_id: str, replacement_changes: Any,
 ) -> dict[str, Any] | None:
-    if logical_tool not in {"knowledge.write", "sales.write"}:
-        raise ValueError("演示文稿请使用专用修订流程")
+    if logical_tool not in {"knowledge.write", "sales.write", "bid.write"}:
+        raise ValueError("正式文件请使用专用修订流程")
     if logical_tool == "sales.write" and str(current_payload.get("table", "")) not in SALES_WRITE_FIELDS:
         raise ValueError("销售台账类型无效")
+    if logical_tool == "bid.write":
+        bid_id = current_payload.get("bid_id")
+        if not isinstance(bid_id, str) or not bid_id.strip() or len(bid_id) > 128:
+            raise ValueError("投标项目编号无效")
     mutations = current_payload.get("mutations")
     if not isinstance(mutations, list) or not 1 <= len(mutations) <= 100:
         raise ValueError("当前待写入内容缺少有效卡片")
@@ -1008,6 +1095,29 @@ def _safe_relative_file(relative: str, allowed_prefixes: tuple[str, ...]) -> Pat
     if not resolved.is_relative_to(resolved_root) or not any(relative.startswith(prefix) for prefix in allowed_prefixes):
         raise ValueError("文件不属于受控资料库")
     return candidate
+
+
+def open_bid_file(payload: dict[str, Any], *, artifact: bool = False) -> dict[str, Any]:
+    bid_id = safe_id(str(payload.get("bid_id") or ""))
+    id_field = "artifact_id" if artifact else "document_id"
+    record_id = safe_id(str(payload.get(id_field) or ""))
+    section = "artifacts" if artifact else "documents"
+    snapshot = read_bid_project(ROOT, bid_id, sections=[section])
+    matches = [row for row in snapshot["sections"][section] if row.get(id_field) == record_id]
+    if len(matches) != 1:
+        raise ValueError("投标文件记录不存在或已发生变化")
+    record = matches[0]
+    relative = str(record.get("relative_path") or "")
+    prefix = f"outputs/bids/{bid_id}/" if artifact else f"inputs/bids/{bid_id}/"
+    path = _safe_relative_file(relative, (prefix,))
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    if not secrets.compare_digest(digest.hexdigest(), str(record.get("sha256") or "")):
+        raise RuntimeError("投标文件内容已变化，已停止打开；请重新登记或生成")
+    _open_local_file(path)
+    return {"message": f"已使用系统默认应用打开{'投标产物' if artifact else '投标资料'}。", "path": relative}
 
 
 def _safe_relative_destination(relative: str, allowed_prefixes: tuple[str, ...]) -> Path:
@@ -2127,6 +2237,18 @@ class ControlHandler(SimpleHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
         self.send_json(status, {"error": str(error), "code": code})
 
+    def send_bid_error(self, error: BidStoreError | ValueError) -> None:
+        code = error.code if isinstance(error, BidStoreError) else "INVALID_INPUT"
+        if code == "NOT_FOUND":
+            status = HTTPStatus.NOT_FOUND
+        elif code in {"INVALID_INPUT", "UNSAFE_PATH", "FILE_TOO_LARGE"}:
+            status = HTTPStatus.BAD_REQUEST
+        elif code == "STORE_BUSY":
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+        else:
+            status = HTTPStatus.CONFLICT
+        self.send_json(status, {"error": str(error), "code": code})
+
     def body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
@@ -2192,6 +2314,76 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "size": received, "message": "资料已保存到项目空间；创建任务时可直接引用该路径。",
         })
 
+    def upload_bid_file(self) -> None:
+        bid_id = safe_id(self.headers.get("X-Bid-Id", ""))
+        role = str(self.headers.get("X-Bid-Role", "tender")).strip()
+        if role not in {"tender", "addendum", "template", "reference", "company_material"}:
+            raise ValueError("请选择有效的投标资料类型")
+        read_bid_project(ROOT, bid_id, sections=[])
+        encoded_name = self.headers.get("X-File-Name", "")
+        filename = unquote(encoded_name).strip()
+        if (
+            not filename or len(filename) > 120 or Path(filename).name != filename or
+            filename in {".", ".."} or filename[-1] in {".", " "} or
+            re.search(r'[<>:"/\\|?*]', filename) is not None or
+            any(ord(character) < 32 for character in filename) or
+            Path(filename).suffix.lower() not in ALLOWED_BID_SUFFIXES
+        ):
+            raise ValueError("文件名无效；仅支持常见招标文件、表格、图片、压缩包和电子文档")
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_BID_FILE_BYTES:
+            raise ValueError("上传文件必须为 1 字节至 32 兆字节")
+        inputs_root_path = ROOT / "inputs"
+        bids_root = inputs_root_path / "bids"
+        if inputs_root_path.is_symlink() or bids_root.is_symlink():
+            raise ValueError("投标资料目录不能是符号链接")
+        bid_root = bids_root / bid_id
+        bid_root.mkdir(parents=True, exist_ok=True)
+        inputs_root = inputs_root_path.resolve()
+        actual_root = bid_root.resolve()
+        if not actual_root.is_relative_to(inputs_root) or bid_root.is_symlink():
+            raise ValueError("投标资料目录越出受控 inputs 范围")
+        target = bid_root / filename
+        if target.exists() or target.is_symlink():
+            self.send_json(HTTPStatus.CONFLICT, {"error": "当前投标项目已有同名文件；请改名后上传，工作台不会覆盖原文件"})
+            return
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".bid-upload-", suffix=".tmp", dir=bid_root)
+        temporary = Path(temporary_name)
+        received = 0
+        linked = False
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                while received < length:
+                    block = self.rfile.read(min(1024 * 1024, length - received))
+                    if not block:
+                        raise ValueError("上传连接提前中断")
+                    handle.write(block)
+                    received += len(block)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, target)
+            linked = True
+            document = register_bid_document(
+                ROOT,
+                bid_id,
+                target.relative_to(ROOT).as_posix(),
+                role=role,
+                display_name=filename,
+            )
+        except FileExistsError:
+            self.send_json(HTTPStatus.CONFLICT, {"error": "当前投标项目已有同名文件；请改名后上传，工作台不会覆盖原文件"})
+            return
+        except Exception:
+            if linked:
+                target.unlink(missing_ok=True)
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.send_json(HTTPStatus.CREATED, {
+            **document,
+            "message": "资料已保存到投标项目并完成文件指纹登记。",
+        })
+
     def do_GET(self) -> None:
         if not self.local_host():
             self.send_error(HTTPStatus.FORBIDDEN)
@@ -2222,6 +2414,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                                             "reimbursements": {"batches": batches,
                                                                "trash": trash_summary(),
                                                                "legacy_count": len(legacy_reimbursement_files(files))},
+                                            "bidding": bid_dashboard(ROOT),
                                             "desktop_runtime": desktop_runtime_summary(),
                                             "request_token": SERVER_TOKEN})
             return
@@ -2328,6 +2521,54 @@ class ControlHandler(SimpleHTTPRequestHandler):
             except (BusinessBackendError, ValueError) as error:
                 self.send_business_error(error)
             return
+        if route == "/api/bids":
+            try:
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=20)
+                statuses_text = query.get("statuses", [""])[0]
+                statuses = [item for item in statuses_text.split(",") if item] if statuses_text else None
+                result = search_bid_projects(
+                    ROOT,
+                    query=query.get("query", [""])[0],
+                    statuses=statuses,
+                    account_id=query.get("account_id", [None])[0],
+                    workspace_project_id=query.get("project_id", [None])[0],
+                    limit=int(query.get("limit", ["50"])[0]),
+                )
+                self.send_json(HTTPStatus.OK, result)
+            except (BidStoreError, ValueError) as error:
+                self.send_bid_error(error)
+            return
+        if route == "/api/bids/dashboard":
+            try:
+                self.send_json(HTTPStatus.OK, bid_dashboard(ROOT))
+            except (BidStoreError, ValueError) as error:
+                self.send_bid_error(error)
+            return
+        if route.startswith("/api/bids/") and route.endswith("/timeline"):
+            try:
+                parts = route.split("/")
+                if len(parts) != 5:
+                    raise ValueError("投标时间线地址无效")
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=5)
+                self.send_json(
+                    HTTPStatus.OK,
+                    read_bid_timeline(ROOT, unquote(parts[3]), limit=int(query.get("limit", ["100"])[0])),
+                )
+            except (BidStoreError, ValueError) as error:
+                self.send_bid_error(error)
+            return
+        if route.startswith("/api/bids/") and route.endswith("/360"):
+            try:
+                parts = route.split("/")
+                if len(parts) != 5:
+                    raise ValueError("投标项目地址无效")
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=5)
+                sections_text = query.get("sections", [""])[0]
+                sections = [item for item in sections_text.split(",") if item] if sections_text else None
+                self.send_json(HTTPStatus.OK, read_bid_project(ROOT, unquote(parts[3]), sections=sections))
+            except (BidStoreError, ValueError) as error:
+                self.send_bid_error(error)
+            return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
         elif route not in ("/app.js", "/styles.css"):
@@ -2350,12 +2591,38 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     return
                 self.upload_project_file()
                 return
+            if route == "/api/bid-files":
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+                    self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "投标资料上传只接受二进制文件"})
+                    return
+                self.upload_bid_file()
+                return
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "只接受 JSON 请求"})
                 return
             payload = self.body()
             if route == "/api/task-requests":
                 self.create_request(payload)
+            elif route == "/api/bids":
+                self.send_json(HTTPStatus.CREATED, create_bid_project(ROOT, payload))
+            elif route.startswith("/api/bids/") and route.endswith("/transition"):
+                parts = route.split("/")
+                if len(parts) != 5:
+                    raise ValueError("投标项目阶段地址无效")
+                self.send_json(HTTPStatus.OK, transition_bid_project(
+                    ROOT,
+                    unquote(parts[3]),
+                    status=str(payload.get("status", "")),
+                    current_stage=str(payload.get("current_stage", "")),
+                    expected_version=payload.get("expected_version"),
+                ))
+            elif route.startswith("/api/bids/") and route.endswith("/checks/run"):
+                parts = route.split("/")
+                if len(parts) != 6:
+                    raise ValueError("投标检查地址无效")
+                self.send_json(HTTPStatus.OK, run_deterministic_bid_checks(ROOT, unquote(parts[3])))
+            elif route.startswith("/api/bids/") and len(route.split("/")) == 4:
+                self.send_json(HTTPStatus.OK, update_bid_project(ROOT, unquote(route.split("/")[3]), payload))
             elif route == "/api/projects":
                 self.send_json(HTTPStatus.CREATED, create_project_record(payload))
             elif route.startswith("/api/projects/") and route.endswith("/status"):
@@ -2432,6 +2699,10 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     ROOT, INPUTS, OUTPUTS, payload.get("selected")
                 )
                 self.send_json(HTTPStatus.CREATED, result)
+            elif route == "/api/bid-files/open":
+                self.send_json(HTTPStatus.OK, open_bid_file(payload))
+            elif route == "/api/bid-artifacts/open":
+                self.send_json(HTTPStatus.OK, open_bid_file(payload, artifact=True))
             elif route == "/api/files/open":
                 self.send_json(HTTPStatus.OK, open_managed_file(payload))
             elif route == "/api/files/rename":
@@ -2465,6 +2736,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.revise_write_intent(route.split("/")[3], payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
+        except BidStoreError as error:
+            self.send_bid_error(error)
         except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError, MailProviderError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:

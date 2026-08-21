@@ -36,3 +36,4 @@ library/templates/company/
 /dist/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
+/runtime/

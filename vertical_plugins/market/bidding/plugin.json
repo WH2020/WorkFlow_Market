@@ -1,0 +1,24 @@
+{
+  "api_version": "1.0",
+  "id": "market.bidding",
+  "version": "1.0.0",
+  "display_name": "智能招投标",
+  "description": "覆盖机会发现、招标解读、参投决策、应答策划、章节起草、合规复核、正式交付和结果复盘。",
+  "category": "market",
+  "permissions": ["web.read", "knowledge.read", "sales.read", "bid.read", "bid.write", "artifact.write"],
+  "dependencies": [
+    {"id": "shared.knowledge", "version": ">=1.0.0"},
+    {"id": "shared.documents", "version": ">=1.0.0"}
+  ],
+  "skills": ["manage-intelligent-bidding"],
+  "workflows": [
+    "workflows/opportunity-discovery.json",
+    "workflows/tender-interpretation.json",
+    "workflows/go-no-go.json",
+    "workflows/response-planning.json",
+    "workflows/section-drafting.json",
+    "workflows/compliance-review.json",
+    "workflows/document-delivery.json",
+    "workflows/outcome-retrospective.json"
+  ]
+}

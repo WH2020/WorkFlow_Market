@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "application_version": "0.15.0",
+  "migrations": [
+    {
+      "version": 1,
+      "name": "bidding-core-v1",
+      "file": "001_bidding_core.sql",
+      "sha256": "4c650b49812cc765f1b586160e92dd00f39df83d2a5b1fa6f3ce91b536c4d78e"
+    }
+  ]
+}

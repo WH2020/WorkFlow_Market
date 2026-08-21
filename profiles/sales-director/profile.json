@@ -1,14 +1,15 @@
 {
   "id": "sales-director",
   "display_name": "销售总监智能助手",
-  "description": "面向销售总监的单角色工作台，覆盖客户推进、资源协调、销售方案、复盘、研究、文件和周报演示文稿。",
+  "description": "面向销售总监的单角色工作台，覆盖客户推进、资源协调、政府合作、智能招投标、销售方案、复盘、研究、文件和周报演示文稿。",
   "plugins": [
     "shared.research",
     "shared.documents",
     "shared.presentation-studio",
     "shared.weekly-report",
     "market.government",
-    "market.sales"
+    "market.sales",
+    "market.bidding"
   ],
   "default_service": "sales-review",
   "services": [
@@ -18,6 +19,14 @@
     {"id": "government-proposal", "display_name": "政府合作方案", "description": "结合地方条件、公开政策与项目资源形成政府合作方案。", "workflow": "market.government.proposal", "skill": "draft-government-program"},
     {"id": "office-document", "display_name": "销售文件与方案", "description": "编写销售方案、客户材料和常见办公文件。", "workflow": "shared.documents.create", "skill": "create-director-documents"},
     {"id": "presentation-studio", "display_name": "销售演示文稿工作室", "description": "从需求、客户证据、大纲和逐页策划生成经确认的演示文稿。", "workflow": "shared.presentation.studio", "skill": "plan-director-presentations"},
-    {"id": "weekly-deck", "display_name": "周五销售汇报", "description": "汇总客户进展、资源需求、风险和下周动作，生成经确认的演示文稿。", "workflow": "shared.reporting.weekly-deck-v2", "skill": "build-director-decks"}
+    {"id": "weekly-deck", "display_name": "周五销售汇报", "description": "汇总客户进展、资源需求、风险和下周动作，生成经确认的演示文稿。", "workflow": "shared.reporting.weekly-deck-v2", "skill": "build-director-decks"},
+    {"id": "bid-discovery", "display_name": "采购机会发现", "description": "检索并核验公开采购机会，判断是否值得建立投标项目。", "workflow": "market.bidding.opportunity-discovery", "skill": "manage-intelligent-bidding"},
+    {"id": "bid-interpretation", "display_name": "招标文件解读", "description": "从已上传原件提取时间、强制要求、评分点与递交规则。", "workflow": "market.bidding.tender-interpretation", "skill": "manage-intelligent-bidding"},
+    {"id": "bid-decision", "display_name": "参投决策", "description": "评估资格、交付、资源、商务和竞争风险，形成 Go/No-Go 建议。", "workflow": "market.bidding.go-no-go", "skill": "manage-intelligent-bidding"},
+    {"id": "bid-planning", "display_name": "应答策划与事实基线", "description": "建立逐条应答矩阵、材料清单、负责人和统一事实。", "workflow": "market.bidding.response-planning", "skill": "manage-intelligent-bidding"},
+    {"id": "bid-drafting", "display_name": "标书章节起草", "description": "基于已核验事实、证据和目录分阶段起草标书章节。", "workflow": "market.bidding.section-drafting", "skill": "manage-intelligent-bidding"},
+    {"id": "bid-check", "display_name": "合规与废标风险复核", "description": "执行确定性规则与深度复核，定位强制条款、材料和一致性缺口。", "workflow": "market.bidding.compliance-review", "skill": "manage-intelligent-bidding"},
+    {"id": "bid-delivery", "display_name": "正式标书生成", "description": "按已批准章节生成并渲染校验可编辑文字文档。", "workflow": "market.bidding.document-delivery", "skill": "manage-intelligent-bidding"},
+    {"id": "bid-retrospective", "display_name": "投标结果复盘", "description": "记录结果、原因、复用资产与下一次改进动作。", "workflow": "market.bidding.outcome-retrospective", "skill": "manage-intelligent-bidding"}
   ]
 }

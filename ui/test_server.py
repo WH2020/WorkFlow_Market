@@ -160,8 +160,16 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("function taskRuntimeSelection", javascript)
         self.assertIn('api("/api/model-discovery"', javascript)
         self.assertIn('api("/api/desktop-settings"', javascript)
-        for view in ("home", "projects", "schedules", "search"):
+        for view in ("home", "bids", "projects", "schedules", "search"):
             self.assertIn(f'data-page="{view}"', html)
+        self.assertIn('data-view="bids"', html)
+        self.assertIn('id="bid-create-panel"', html)
+        self.assertIn('id="bid-file-input"', html)
+        self.assertIn("function loadBids", javascript)
+        self.assertIn("function createBidStageTask", javascript)
+        self.assertIn('api("/api/bid-files/open"', javascript)
+        self.assertIn('api("/api/bid-artifacts/open"', javascript)
+        self.assertIn(".bid-workspace-layout", styles)
         self.assertIn("自定义操作", html)
         self.assertIn('search: "自定义操作"', javascript)
         self.assertNotIn("自定义搜索", html)
@@ -357,6 +365,31 @@ class ControlCentreTests(unittest.TestCase):
             server.revised_write_payload(
                 "knowledge.write", payload, "edit", "legacy-a",
                 {"title": "试图编辑", "key_facts": ["仍是旧字段"]},
+            )
+
+    def test_bid_write_cards_can_be_edited_without_changing_project_binding(self):
+        payload = {
+            "bid_id": "bid-project-a",
+            "mutations": [{
+                "operation": "insert", "table": "bid_requirements", "record_id": "requirement-a",
+                "changes": {
+                    "bid_id": "bid-project-a", "category": "technical", "mandatory": "1",
+                    "title": "接口要求", "requirement_text": "支持指定接口",
+                    "evidence_locator_json": "[]", "verification_status": "pending",
+                    "response_status": "unaddressed",
+                },
+            }],
+        }
+        revised = server.revised_write_payload(
+            "bid.write", payload, "edit", "requirement-a",
+            {**payload["mutations"][0]["changes"], "title": "接口与协议要求"},
+        )
+        self.assertEqual(revised["bid_id"], "bid-project-a")
+        self.assertEqual(revised["mutations"][0]["changes"]["title"], "接口与协议要求")
+        with self.assertRaisesRegex(ValueError, "bid_id"):
+            server.revised_write_payload(
+                "bid.write", payload, "edit", "requirement-a",
+                {**payload["mutations"][0]["changes"], "bid_id": "bid-other"},
             )
 
     def test_project_space_is_created_and_task_summaries_default_to_general_project(self):

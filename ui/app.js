@@ -40,6 +40,12 @@
     attention: [], attentionLoaded: false, attentionLoading: false, attentionError: "", attentionGeneration: 0,
     listController: null, detailController: null, timelineController: null, attentionController: null,
   };
+  const bidState = {
+    rows: [], dashboard: null, accounts: [], loading: false, loaded: false, error: "", selectedId: "",
+    detail: null, timeline: [], detailLoading: false, detailError: "", activeTab: "overview",
+    query: "", statuses: "", listController: null, detailController: null, generation: 0,
+    detailGeneration: 0, renderedKey: "", detailRenderedKey: "", editingId: "",
+  };
   let customerRenderedKey = "";
   let customerDetailRenderedKey = "";
   let attentionRenderedKey = "";
@@ -179,7 +185,7 @@
 
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
-    knowledge: "知识库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
+    bids: "智能招投标", knowledge: "知识库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
     schedules: "每日定时任务", search: "自定义操作", tools: "工具栏", settings: "设置",
   };
   if (viewTitles[window.location.hash.slice(1)]) currentView = window.location.hash.slice(1);
@@ -405,6 +411,7 @@
       renderTaskForm();
     }
     if (view === "work") renderServices();
+    if (view === "bids" && !bidState.loaded && !bidState.loading) loadBids();
     updateBackButton();
     if (view !== previousView) requestAnimationFrame(() => window.scrollTo({ top: restoreScroll ? (viewScrollPositions[view] || 0) : 0, behavior: "auto" }));
   }
@@ -439,7 +446,7 @@
 
   function renderServices() {
     const box = $("services");
-    const services = currentProfile()?.services || [];
+    const services = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-"));
     box.replaceChildren(...services.map((service) => {
       const button = choice(service.display_name, service.description, service.id === selectedService);
       button.onclick = () => openService(service.id);
@@ -620,7 +627,7 @@
   }
 
   function publicSearchReady(serviceId, guide = false) {
-    if (!["industry-research", "government-proposal", "presentation-studio"].includes(serviceId)) return true;
+    if (!["industry-research", "government-proposal", "presentation-studio", "bid-discovery"].includes(serviceId)) return true;
     const settings = model?.search || {};
     const gateway = model?.search_gateway || {};
     const gatewayHealthy = !gateway.status || ["disabled", "configured"].includes(gateway.status);
@@ -847,6 +854,22 @@
     decision: "处理决定", decision_reason: "决定说明", asset_type: "资料类型", audience_role: "使用对象",
     sales_stage: "适用销售阶段", use_case: "使用场景", scope: "适用范围", version: "版本",
     authorization_status: "授权状态", deidentification_status: "脱敏状态", usage_feedback: "使用反馈",
+    bid_id: "投标项目编号", workspace_project_id: "项目空间", account_id: "关联客户", opportunity_id: "关联机会",
+    name: "项目名称", buyer: "采购人", tender_number: "招标编号", lot_name: "标段", deadline_at: "截止时间",
+    budget_minor: "预算（分）", currency: "币种", current_stage: "当前阶段", go_no_go: "参投判断",
+    decision_reason: "决策说明", milestone_type: "里程碑类型", due_at: "截止时间", evidence_json: "证据",
+    category: "类别", mandatory: "是否强制", score_points: "分值", requirement_text: "招标要求原文",
+    evidence_locator_json: "原文定位", verification_status: "核验状态", response_status: "响应状态",
+    requirement_id: "招标要求编号", section_id: "章节编号", response_strategy: "应答策略",
+    material_need: "材料需求", material_status: "材料状态", deviation: "偏差说明", field_name: "事实字段",
+    value_text: "事实值", affected_sections_json: "影响章节", parent_section_id: "上级章节",
+    order_index: "目录顺序", level: "标题层级", objective: "章节目标", content_markdown: "章节内容",
+    input_sha256: "输入快照校验码", rule_id: "检查规则", rule_version: "规则版本", severity: "风险等级",
+    finding: "发现的问题", recommendation: "处理建议", resolved_by: "解决人", resolved_at: "解决时间",
+    risk_text: "风险说明", impact: "影响", likelihood: "可能性", mitigation_action: "缓解动作",
+    decision_type: "决策类型", rationale: "决策依据", approved_by: "批准人", approval_task_id: "审批任务",
+    payload_sha256: "审批内容校验码", decided_at: "决定时间", result: "投标结果", amount_minor: "金额（分）",
+    competitor_notes: "竞争情况", lessons: "复盘结论",
   };
 
   const writeValueLabels = {
@@ -889,9 +912,10 @@
     return [inserts ? `新增 ${inserts} 条` : "", updates ? `修改 ${updates} 条` : ""].filter(Boolean).join("、");
   }
 
-  function stableWriteField(task, payload) {
+  function stableWriteField(task, payload, mutation = null) {
     if (task.pending_write?.logical_tool === "knowledge.write") return "source_id";
-    return { customers: "customer_id", activities: "activity_id", resource_requests: "request_id", sales_assets: "asset_id" }[payload?.table] || "";
+    const table = task.pending_write?.logical_tool === "bid.write" ? mutation?.table : payload?.table;
+    return { customers: "customer_id", activities: "activity_id", resource_requests: "request_id", sales_assets: "asset_id", bid_projects: "bid_id", bid_milestones: "milestone_id", bid_requirements: "requirement_id", bid_response_matrix: "response_id", bid_facts: "fact_id", bid_sections: "section_id", bid_checks: "check_id", bid_risks: "risk_id", bid_decisions: "decision_id", bid_outcomes: "outcome_id" }[table] || "";
   }
 
   async function submitWriteCardRevision(task, mutation, operation, changes) {
@@ -914,7 +938,7 @@
   function openWriteCardEditor(task, payload, mutation) {
     document.querySelector(".write-edit-overlay")?.remove();
     const changes = mutation?.changes && typeof mutation.changes === "object" ? mutation.changes : {};
-    const stableField = stableWriteField(task, payload);
+    const stableField = stableWriteField(task, payload, mutation);
     const editable = Object.entries(changes).filter(([field, value]) => field !== stableField && typeof value === "string");
     if (!editable.length) {
       showNotice("这张卡片没有可直接编辑的文字字段", true);
@@ -1039,8 +1063,13 @@
     } else if (task.pending_write.logical_tool === "sales.write") {
       const tableLabels = { customers: "客户台账", activities: "客户活动记录", resource_requests: "资源申请", sales_assets: "销售资料库" };
       intro.textContent = `将更新${tableLabels[parsedPayload?.table] || "销售台账"}：${writeIntentCounts(mutations) || "写入以下内容"}。`;
+    } else if (task.pending_write.logical_tool === "bid.write") {
+      const tables = [...new Set(mutations.map((item) => bidTableLabels[item?.table] || item?.table).filter(Boolean))];
+      intro.textContent = `将更新当前投标项目的${tables.join("、") || "业务记录"}：${writeIntentCounts(mutations) || "写入以下内容"}。每张卡片都可先编辑或删除，不会自动提交标书。`;
     } else if (task.pending_write.logical_tool === "artifact.deck.write") {
       intro.textContent = `将生成演示文稿“${parsedPayload?.output_name || "未命名演示文稿"}”。上方大纲和逐页内容就是本次审批范围。`;
+    } else if (task.pending_write.logical_tool === "artifact.document.write") {
+      intro.textContent = `将为投标项目生成可编辑文字文档“${parsedPayload?.output_name || "未命名标书"}”，包含 ${parsedPayload?.sections?.length || 0} 个章节和 ${parsedPayload?.sources?.length || 0} 个已登记来源；生成后会逐页渲染检查，且不会覆盖同名文件。`;
     } else {
       intro.textContent = presentationRendered ? "上方演示方案就是本次待确认内容。" : "确认后将按下列内容执行受控写入。";
     }
@@ -1056,7 +1085,7 @@
         "publisher", "published_date", "accessed_date", "region", "topic", "source_type", "quality",
         "status", "key_facts", "interpretation", "limitations", "url",
       ];
-      const ignoredFields = new Set(["source_id", "activity_id", "request_id", "asset_id", "updated_at", "created_at", "notes"]);
+        const ignoredFields = new Set(["source_id", "activity_id", "request_id", "asset_id", "bid_id", "milestone_id", "requirement_id", "response_id", "fact_id", "section_id", "check_id", "risk_id", "decision_id", "outcome_id", "updated_at", "created_at", "notes"]);
       mutations.forEach((mutation, index) => {
         const changes = mutation?.changes && typeof mutation.changes === "object" ? mutation.changes : {};
         const card = document.createElement("article");
@@ -1077,6 +1106,17 @@
       queueMicrotask(() => {
         cards.scrollTop = Math.min(Number(saved.reviewTop) || 0, Math.max(0, cards.scrollHeight - cards.clientHeight));
       });
+    }
+    if (task.pending_write.logical_tool === "artifact.document.write" && Array.isArray(parsedPayload?.sections)) {
+      const cards = document.createElement("div"); cards.className = "write-review-cards";
+      parsedPayload.sections.forEach((section, index) => {
+        const card = document.createElement("article"); card.className = "write-review-card";
+        const header = document.createElement("header"); const title = document.createElement("strong"); title.textContent = `${index + 1}. ${section.title || "未命名章节"}`; const meta = document.createElement("span"); meta.className = "write-operation"; meta.textContent = `标题层级 ${section.level || 1}`; header.append(title, meta); card.append(header);
+        const paragraphs = Array.isArray(section.paragraphs) ? section.paragraphs : []; appendWriteField(card, "content_markdown", paragraphs.join("\n\n").slice(0, 5000));
+        if (Array.isArray(section.tables) && section.tables.length) appendWriteField(card, "source_type", `${section.tables.length} 个表格`);
+        cards.append(card);
+      }); review.append(cards);
+      if (Array.isArray(parsedPayload.warnings) && parsedPayload.warnings.length) { const warning = document.createElement("div"); warning.className = "write-review-field warning"; const strong = document.createElement("strong"); strong.textContent = "生成前提醒"; const span = document.createElement("span"); span.textContent = parsedPayload.warnings.join("；"); warning.append(strong, span); review.append(warning); }
     }
     wrapper.append(review);
   }
@@ -1216,7 +1256,8 @@
     title.className = "write-intent-title";
     const toolLabels = {
       "knowledge.write": "写入知识库", "sales.write": "更新销售台账",
-      "presentation.plan.write": "保存演示方案", "artifact.deck.write": "生成演示文稿",
+      "bid.write": "更新投标项目", "presentation.plan.write": "保存演示方案", "artifact.deck.write": "生成演示文稿",
+      "artifact.document.write": "生成正式标书",
     };
     const writeStatusLabels = { prepared: "待确认", committing: "正在提交", committed: "已完成" };
     title.textContent = `待写入内容（${toolLabels[task.pending_write.logical_tool] || "受控写入"} · ${writeStatusLabels[task.pending_write.status] || "等待处理"}）`;
@@ -1251,7 +1292,9 @@
   function approvalActionLabel(task) {
     if (task.pending_write?.logical_tool === "knowledge.write") return "批准写入知识库";
     if (task.pending_write?.logical_tool === "sales.write") return "批准更新销售台账";
+    if (task.pending_write?.logical_tool === "bid.write") return "批准更新投标项目";
     if (task.pending_write?.logical_tool === "artifact.deck.write") return "批准并生成演示文稿";
+    if (task.pending_write?.logical_tool === "artifact.document.write") return "批准并生成正式标书";
     return task.pending_write ? "批准执行" : "确认并继续";
   }
 
@@ -1921,6 +1964,10 @@
     button.onclick = () => {
       if (!customerState.selectedId) return;
       const account = customerContextAccount(); const name = accountName(account);
+      if (serviceId === "bid-create") {
+        bidState.editingId = ""; $("create-bid").textContent = "创建并进入项目"; switchView("bids"); $("bid-create-panel").hidden = false; updateBidSelectors(); $("bid-account").value = customerState.selectedId;
+        $("bid-name").value = `${name} 投标项目`; $("bid-buyer").value = name; $("bid-name").focus(); return;
+      }
       if (serviceId === "sales-review") guidedDrafts[serviceId] = { scope: name, focus: "阶段、风险与下一步动作" };
       if (serviceId === "government-proposal") guidedDrafts[serviceId] = { region: accountField(account, "region", "地区"), direction: `${name} 合作机会` };
       if (serviceId === "industry-research") guidedDrafts[serviceId] = { topic: `${name} 所在行业与合作机会`, purpose: "支持客户沟通与机会判断", period: "近 12 个月，并补充关键历史背景" };
@@ -1942,7 +1989,7 @@
     const sections = customerState.detail?.sections || {}; const primaryOpportunity = sections.opportunities?.[0]; const primaryRisk = (sections.risks || []).find((row) => !["closed", "resolved", "cancelled"].includes(String(row.status || "").toLowerCase())); const primaryAction = (sections.actions || []).find((row) => !["completed", "cancelled"].includes(String(row.status || "").toLowerCase()));
     $("customer-detail-name").textContent = accountName(account); $("customer-detail-meta").textContent = [accountField(primaryOpportunity, "name"), accountField(account, "owner", "owner_name", "负责人"), customerDisplayValue(accountField(primaryOpportunity, "stage") || accountField(account, "lifecycle_stage", "stage", "sales_stage", "阶段")), freshnessText(accountField(account, "updated_at", "last_updated_at"))].filter(Boolean).join(" · ") || "客户信息待补充";
     const status = $("customer-detail-status"); status.textContent = customerState.detailLoading ? "正在更新客户全景…" : customerState.detailError ? `部分信息暂时无法读取：${customerState.detailError}` : customerState.detail?.truncated_sections?.length ? `部分信息已截断：${customerState.detail.truncated_sections.join("、")}` : `主要风险：${accountField(primaryRisk, "risk_text") || "暂无已登记开放风险"} · 首要下一步：${accountField(primaryAction, "action_text") || "暂无已登记开放行动"}`;
-    const actions = $("customer-quick-actions"); actions.replaceChildren(customerQuickAction("sales-review", "客户复盘"), customerQuickAction("government-proposal", "政府合作"), customerQuickAction("industry-research", "行业研究"), customerQuickAction("office-document", "资源协调/文件", "resources"), customerQuickAction("presentation-studio", "制作演示文稿")); detailTabs();
+    const actions = $("customer-quick-actions"); actions.replaceChildren(customerQuickAction("sales-review", "客户复盘"), customerQuickAction("bid-create", "创建投标项目"), customerQuickAction("government-proposal", "政府合作"), customerQuickAction("industry-research", "行业研究"), customerQuickAction("office-document", "资源协调/文件", "resources"), customerQuickAction("presentation-studio", "制作演示文稿")); detailTabs();
   }
   function renderCustomerOperations() {
     const list = $("customer-list"); if (!list) return;
@@ -1960,6 +2007,220 @@
     if (!customerState.attention.length) { box.className = "attention-list empty"; box.textContent = "今天没有已识别的优先客户事项。"; return; }
     const targetLabels = { overview: "客户概览", timeline: "时间线", actions: "行动与承诺", signals: "信号与风险", resources: "资源与资料", evidence: "证据" };
     box.className = "attention-list"; customerState.attention.slice(0, 6).forEach((item) => { const id = accountId(item); const targetTab = customerTabFor(item.target_section); const card = document.createElement("button"); card.type = "button"; card.className = `attention-card ${String(item.severity || "") === "high" ? "high" : ""}`; const title = document.createElement("strong"); title.textContent = String(item.account_name || accountName(item)); const reason = document.createElement("p"); reason.textContent = accountField(item, "reason", "summary", "title") || "需要关注的客户事项"; const due = accountField(item, "due_at"); const meta = document.createElement("small"); meta.textContent = `${due ? `截止 ${formatCustomerTime(due)}` : `记录于 ${formatCustomerTime(accountField(item, "event_at", "updated_at"))}`} · 首要操作：查看${targetLabels[targetTab] || "客户信息"}`; card.append(title, reason, meta); card.onclick = async () => { switchView("sales"); await selectCustomer(id, { tab: targetTab, focus: true }); }; box.append(card); });
+  }
+
+  const bidStatusLabels = {
+    draft: "待解读", interpreting: "解读中", decision_pending: "待参投决策", planning: "应答策划中",
+    drafting: "标书编制中", checking: "复核中", delivery_pending: "待生成终稿", delivered: "已交付",
+    closed: "已结束", no_bid: "不参投", cancelled: "已取消",
+  };
+  const bidStageLabels = {
+    intake: "建档", interpretation: "解读", decision: "决策", planning: "策划",
+    drafting: "编制", checking: "复核", delivery: "交付", retrospective: "复盘",
+  };
+  const bidStageOrder = Object.keys(bidStageLabels);
+  const bidTableLabels = {
+    bid_projects: "项目状态", bid_milestones: "里程碑", bid_requirements: "招标要求",
+    bid_response_matrix: "应答矩阵", bid_facts: "事实基线", bid_sections: "标书章节",
+    bid_checks: "合规检查", bid_risks: "项目风险", bid_decisions: "审批决策", bid_outcomes: "投标结果",
+  };
+  const bidNextActions = {
+    draft: ["bid-interpretation", "解读招标文件", "从已上传原件提取强制要求、评分点、时间和递交规则。"],
+    interpreting: ["bid-interpretation", "继续招标解读", "补齐文件定位和待核验事项，再提交结构化要求。"],
+    decision_pending: ["bid-decision", "形成参投决策", "核对资格、资源、交付和商务风险，形成可审批建议。"],
+    planning: ["bid-planning", "建立应答计划", "生成逐条应答矩阵、材料清单、负责人和统一事实基线。"],
+    drafting: ["bid-drafting", "继续标书编制", "按已确认目录、事实和证据起草或完善章节。"],
+    checking: ["bid-check", "执行合规复核", "先跑确定性规则，再检查一致性、重复和废标风险。"],
+    delivery_pending: ["bid-delivery", "生成正式标书", "使用已批准章节生成可编辑文档，并完成逐页渲染检查。"],
+    delivered: ["bid-retrospective", "记录结果与复盘", "登记投标结果、原因、可复用资产和改进动作。"],
+    closed: ["bid-retrospective", "查看或补充复盘", "补充结果证据与下一次改进动作。"],
+    no_bid: ["bid-retrospective", "复盘不参投原因", "沉淀放弃原因和后续机会判断标准。"],
+    cancelled: ["bid-interpretation", "重新启动解读", "确认恢复后重新读取当前文件与项目状态。"],
+  };
+  const bidServiceActions = [
+    ["bid-interpretation", "文件解读"], ["bid-decision", "参投决策"], ["bid-planning", "应答策划"],
+    ["bid-drafting", "章节编制"], ["bid-check", "合规复核"], ["bid-delivery", "生成终稿"],
+    ["bid-retrospective", "结果复盘"],
+  ];
+
+  function bidProject() { return bidState.detail?.project?.bid_id === bidState.selectedId ? bidState.detail.project : bidState.rows.find((row) => row.bid_id === bidState.selectedId) || null; }
+  function bidDeadline(value) {
+    if (!value) return "截止时间待登记";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+  }
+  function bidDisplay(value) {
+    if (value === null || value === undefined || String(value).trim() === "") return "待补充";
+    const text = String(value).trim();
+    const mapped = { ...bidStatusLabels, ...bidStageLabels, pending: "待处理", verified: "已核验", rejected: "已否定", superseded: "已替代", open: "待处理", resolved: "已解决", approved: "已批准", ready: "已就绪", compliant: "已满足", unaddressed: "未响应", planned: "已计划", drafted: "已起草", deviation: "存在偏差", critical: "严重", high: "高", medium: "中", low: "低", info: "提示", go: "参投", no_go: "不参投", conditional: "有条件参投", qualification: "资格", technical: "技术", commercial: "商务", scoring: "评分", format: "格式", submission: "递交", contract: "合同", other: "其他" };
+    return mapped[text] || text;
+  }
+  function bidReadableJson(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.length ? parsed.map((item) => typeof item === "string" ? item : Object.entries(item || {}).map(([key, child]) => `${key}：${child}`).join("，")).join("；") : "暂无证据";
+      if (parsed && typeof parsed === "object") return Object.entries(parsed).map(([key, child]) => `${key}：${Array.isArray(child) ? child.join("、") : child}`).join("；");
+    } catch { /* Historic text is shown as-is. */ }
+    return text;
+  }
+  function bidFilterStatuses() {
+    const value = bidState.statuses;
+    if (value === "active") return ["draft", "interpreting", "decision_pending", "planning", "drafting", "checking", "delivery_pending"];
+    return value ? [value] : [];
+  }
+  function updateBidSelectors() {
+    const projects = (model?.projects || []).filter((item) => item.status === "active").map((item) => ({ value: item.project_id, label: item.name }));
+    setSelectOptions($("bid-workspace-project"), projects, selectedProject);
+    const options = [{ value: "", label: "暂不关联客户" }, ...bidState.accounts.map((account) => ({ value: accountId(account), label: accountName(account) }))];
+    const selected = $("bid-account").value || customerState.selectedId;
+    setSelectOptions($("bid-account"), options, selected);
+  }
+  async function loadBids({ force = false } = {}) {
+    if (bidState.loading && !force) return;
+    bidState.listController?.abort();
+    const controller = new AbortController(); bidState.listController = controller;
+    const generation = ++bidState.generation;
+    bidState.loading = true; bidState.error = ""; renderBidding();
+    const params = new URLSearchParams({ limit: "100" });
+    if (bidState.query) params.set("query", bidState.query);
+    const statuses = bidFilterStatuses(); if (statuses.length) params.set("statuses", statuses.join(","));
+    try {
+      const requests = [api(`/api/bids?${params}`, { signal: controller.signal }), api("/api/bids/dashboard", { signal: controller.signal })];
+      if (!bidState.accounts.length) requests.push(api("/api/accounts?limit=100", { signal: controller.signal }));
+      const [list, dashboard, accounts] = await Promise.all(requests);
+      if (generation !== bidState.generation) return;
+      bidState.rows = Array.isArray(list.rows) ? list.rows : [];
+      bidState.dashboard = dashboard;
+      if (accounts) bidState.accounts = Array.isArray(accounts.rows) ? accounts.rows : [];
+      bidState.loaded = true;
+      updateBidSelectors();
+      if (!bidState.selectedId && bidState.rows.length) await selectBid(bidState.rows[0].bid_id, { focus: false });
+      else if (bidState.selectedId && !bidState.rows.some((row) => row.bid_id === bidState.selectedId)) {
+        bidState.selectedId = ""; bidState.detail = null; bidState.timeline = [];
+      }
+    } catch (error) {
+      if (error.name !== "AbortError" && generation === bidState.generation) bidState.error = error.message || "投标项目暂时无法读取";
+    } finally {
+      if (generation === bidState.generation) { bidState.loading = false; renderBidding(); }
+    }
+  }
+  async function selectBid(bidId, { focus = true, tab = null } = {}) {
+    if (!bidId) return;
+    const changed = bidState.selectedId !== String(bidId); bidState.selectedId = String(bidId); if (tab) bidState.activeTab = tab;
+    if (changed) { bidState.detail = null; bidState.timeline = []; bidState.detailRenderedKey = ""; }
+    bidState.detailLoading = true; bidState.detailError = ""; renderBidding();
+    bidState.detailController?.abort(); const controller = new AbortController(); bidState.detailController = controller;
+    const generation = ++bidState.detailGeneration;
+    try {
+      const [detail, timeline] = await Promise.all([
+        api(`/api/bids/${encodeURIComponent(bidId)}/360`, { signal: controller.signal }),
+        api(`/api/bids/${encodeURIComponent(bidId)}/timeline?limit=100`, { signal: controller.signal }),
+      ]);
+      if (generation !== bidState.detailGeneration || bidState.selectedId !== bidId) return;
+      bidState.detail = detail; bidState.timeline = Array.isArray(timeline.rows) ? timeline.rows : [];
+      const workspaceId = detail.project?.workspace_project_id;
+      if (workspaceId && projectById(workspaceId)?.status === "active") selectedProject = workspaceId;
+    } catch (error) {
+      if (error.name !== "AbortError" && generation === bidState.detailGeneration) bidState.detailError = error.message || "投标项目详情暂时无法读取";
+    } finally {
+      if (generation === bidState.detailGeneration) {
+        bidState.detailLoading = false; renderBidding(); renderProjectSelectors();
+        if (focus) queueMicrotask(() => $("bid-detail")?.focus?.({ preventScroll: true }));
+      }
+    }
+  }
+  function bidProjectCard(project) {
+    const card = document.createElement("button"); card.type = "button"; card.className = `bid-project-card ${project.bid_id === bidState.selectedId ? "selected" : ""}`;
+    const header = document.createElement("header"); const title = document.createElement("strong"); title.textContent = project.name || "未命名投标项目"; const status = document.createElement("span"); status.className = `status ${["delivered", "closed"].includes(project.status) ? "completed" : ["no_bid", "cancelled"].includes(project.status) ? "cancelled" : "running"}`; status.textContent = bidStatusLabels[project.status] || project.status; header.append(title, status);
+    const meta = document.createElement("small"); meta.textContent = [project.buyer, project.tender_number, bidDeadline(project.deadline_at)].filter(Boolean).join(" · ");
+    const alerts = document.createElement("div"); alerts.className = "bid-card-alerts";
+    [[project.mandatory_gap_count, "强制项缺口", "gap"], [project.material_gap_count, "材料缺口", "gap"], [project.high_risk_check_count, "高风险", "risk"]].forEach(([count, text, tone]) => { if (!Number(count)) return; const badge = document.createElement("span"); badge.className = `bid-mini-badge ${tone}`; badge.textContent = `${count} ${text}`; alerts.append(badge); });
+    card.append(header, meta); if (alerts.children.length) card.append(alerts); card.onclick = () => selectBid(project.bid_id); return card;
+  }
+  function bidDataCard(row, titleFields, fieldMap, tone = "") {
+    const card = document.createElement("article"); card.className = `bid-data-card ${tone}`;
+    const header = document.createElement("header"); const title = document.createElement("strong"); title.textContent = titleFields.map((field) => row?.[field]).find((value) => value !== undefined && value !== null && String(value).trim()) || "未命名记录";
+    const badge = document.createElement("span"); badge.className = "bid-mini-badge"; badge.textContent = bidDisplay(row?.severity || row?.status || row?.verification_status || ""); header.append(title, badge); card.append(header);
+    const description = row?.finding || row?.requirement_text || row?.content_markdown || row?.risk_text || row?.response_strategy || row?.rationale || row?.lessons || row?.objective || "";
+    if (description) { const body = document.createElement("p"); body.textContent = String(description).slice(0, 3000); card.append(body); }
+    const list = document.createElement("dl");
+    fieldMap.forEach(([labelText, field, kind]) => { const value = row?.[field]; if (value === null || value === undefined || String(value).trim() === "") return; const dt = document.createElement("dt"); dt.textContent = labelText; const dd = document.createElement("dd"); dd.textContent = kind === "json" ? bidReadableJson(value) : kind === "date" ? bidDeadline(value) : bidDisplay(value); list.append(dt, dd); });
+    if (list.children.length) card.append(list); return card;
+  }
+  function bidEmpty(text) { const box = document.createElement("div"); box.className = "bid-empty"; box.textContent = text; return box; }
+  function bidSectionList(rows, factory, emptyText) { const box = document.createElement("div"); box.className = "bid-section-list"; if (!rows?.length) box.append(bidEmpty(emptyText)); else rows.forEach((row) => box.append(factory(row))); return box; }
+  function renderBidTab() {
+    const panel = $("bid-tab-panel"); panel.replaceChildren(); const project = bidProject(); const sections = bidState.detail?.sections || {};
+    if (!project) { panel.append(bidEmpty("选择项目后查看详情。")); return; }
+    if (bidState.activeTab === "overview") {
+      const metrics = document.createElement("div"); metrics.className = "bid-summary-grid";
+      [[sections.requirements?.length || 0, "招标要求"], [sections.response_matrix?.length || 0, "应答条目"], [sections.sections?.length || 0, "标书章节"], [sections.documents?.length || 0, "已登记文件"], [sections.checks?.filter((item) => item.status === "open").length || 0, "开放检查"], [sections.risks?.filter((item) => ["open", "mitigating"].includes(item.status)).length || 0, "开放风险"]].forEach(([value, text]) => { const item = document.createElement("article"); const small = document.createElement("small"); small.textContent = text; const strong = document.createElement("strong"); strong.textContent = String(value); item.append(small, strong); metrics.append(item); });
+      panel.append(metrics, bidSectionList([project], (row) => bidDataCard(row, ["name"], [["采购人", "buyer"], ["招标编号", "tender_number"], ["标段", "lot_name"], ["负责人", "owner"], ["截止时间", "deadline_at", "date"], ["参投状态", "go_no_go"], ["项目说明", "summary"]]), "暂无项目信息"));
+    } else if (bidState.activeTab === "requirements") panel.append(bidSectionList(sections.requirements, (row) => bidDataCard(row, ["title", "requirement_id"], [["类别", "category"], ["是否强制", "mandatory"], ["分值", "score_points"], ["原文定位", "evidence_locator_json", "json"], ["核验状态", "verification_status"], ["响应状态", "response_status"], ["负责人", "owner"], ["截止时间", "due_at", "date"]]), "尚未提取招标要求。请先上传招标原件并执行文件解读。"));
+    else if (bidState.activeTab === "matrix") panel.append(bidSectionList(sections.response_matrix, (row) => bidDataCard(row, ["material_need", "requirement_id", "response_id"], [["关联要求", "requirement_id"], ["章节", "section_id"], ["材料需求", "material_need"], ["材料状态", "material_status"], ["负责人", "owner"], ["截止时间", "due_at", "date"], ["偏差", "deviation"], ["状态", "status"]]), "尚未建立逐条应答矩阵。"));
+    else if (bidState.activeTab === "sections") panel.append(bidSectionList(sections.sections, (row) => bidDataCard(row, ["title", "section_id"], [["目录顺序", "order_index"], ["层级", "level"], ["负责人", "owner"], ["状态", "status"], ["引用证据", "evidence_json", "json"]]), "尚未建立标书目录和章节。"));
+    else if (bidState.activeTab === "checks") panel.append(bidSectionList(sections.checks, (row) => bidDataCard(row, ["finding", "rule_id"], [["规则", "rule_id"], ["等级", "severity"], ["状态", "status"], ["建议", "recommendation"], ["证据", "evidence_json", "json"]], `bid-check-${row.severity || "info"}`), "尚未执行合规检查。"));
+    else if (bidState.activeTab === "files") panel.append(bidSectionList(sections.documents, (row) => {
+      const card = bidDataCard(row, ["display_name", "document_id"], [["文件类型", "role"], ["登记状态", "source_status"], ["页数", "page_count"], ["文件指纹", "sha256"]]);
+      const open = document.createElement("button"); open.type = "button"; open.className = "secondary"; open.textContent = "打开文件"; open.onclick = async () => { try { const response = await api("/api/bid-files/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bid_id: project.bid_id, document_id: row.document_id }) }); note(response.message); } catch (error) { note(error.message, true); } }; card.append(open); return card;
+    }, "当前项目还没有文件。请从下方上传招标文件或相关材料。"));
+    else if (bidState.activeTab === "artifacts") panel.append(bidSectionList(sections.artifacts, (row) => {
+      const card = bidDataCard(row, ["relative_path", "artifact_id"], [["产物类型", "artifact_type"], ["状态", "status"], ["文件指纹", "sha256"], ["生成任务", "task_id"]]);
+      const open = document.createElement("button"); open.type = "button"; open.className = "secondary"; open.textContent = "打开产物"; open.onclick = async () => { try { const response = await api("/api/bid-artifacts/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bid_id: project.bid_id, artifact_id: row.artifact_id }) }); note(response.message); } catch (error) { note(error.message, true); } }; card.append(open); return card;
+    }, "尚未生成投标产物。"));
+    else {
+      const timeline = document.createElement("div");
+      if (!bidState.timeline.length) timeline.append(bidEmpty("还没有投标项目事件。")); else bidState.timeline.forEach((row) => { const event = document.createElement("article"); event.className = "bid-event"; const title = document.createElement("strong"); title.textContent = row.title || "项目事件"; const meta = document.createElement("small"); meta.textContent = `${bidDeadline(row.created_at)} · ${row.actor || "系统"}`; const detail = document.createElement("p"); detail.textContent = bidReadableJson(row.detail_json) || "无补充说明"; event.append(title, meta, detail); timeline.append(event); }); panel.append(timeline);
+    }
+  }
+  function renderBidDetail() {
+    const project = bidProject(); const empty = $("bid-detail-empty"); const detail = $("bid-detail");
+    const sectionsKey = Object.entries(bidState.detail?.sections || {}).map(([key, rows]) => `${key}:${Array.isArray(rows) ? rows.length : 0}:${rows?.[0]?.version || ""}`).join("|");
+    const key = `${bidState.selectedId}|${project?.version || ""}|${project?.updated_at || ""}|${bidState.activeTab}|${bidState.detailLoading}|${bidState.detailError}|${sectionsKey}|${bidState.timeline.length}`;
+    if (key === bidState.detailRenderedKey) return; bidState.detailRenderedKey = key;
+    empty.hidden = Boolean(project); detail.hidden = !project;
+    if (!project) { empty.querySelector("p").textContent = bidState.detailLoading ? "正在读取投标项目…" : bidState.detailError || "从左侧选择项目后查看完整流程。"; return; }
+    $("bid-detail-name").textContent = project.name; $("bid-detail-meta").textContent = [project.buyer, project.tender_number, bidStatusLabels[project.status], bidDeadline(project.deadline_at)].filter(Boolean).join(" · ");
+    const actions = $("bid-detail-actions"); const edit = document.createElement("button"); edit.type = "button"; edit.className = "secondary"; edit.textContent = "编辑项目信息"; edit.onclick = () => { bidState.editingId = project.bid_id; $("bid-name").value = project.name || ""; $("bid-workspace-project").value = project.workspace_project_id || selectedProject; $("bid-account").value = project.account_id || ""; $("bid-buyer").value = project.buyer || ""; $("bid-number").value = project.tender_number || ""; $("bid-deadline").value = project.deadline_at ? new Date(project.deadline_at).toLocaleString("sv-SE").slice(0, 16) : ""; $("bid-summary").value = project.summary || ""; $("create-bid").textContent = "保存项目信息"; $("bid-create-panel").hidden = false; $("bid-name").focus(); }; actions.replaceChildren(edit, ...bidServiceActions.map(([serviceId, text]) => { const button = document.createElement("button"); button.type = "button"; button.className = bidNextActions[project.status]?.[0] === serviceId ? "primary" : "secondary"; button.textContent = text; button.onclick = () => createBidStageTask(serviceId); return button; }));
+    const currentStageIndex = Math.max(0, bidStageOrder.indexOf(project.current_stage)); $("bid-stage-steps").replaceChildren(...bidStageOrder.map((stage, index) => { const item = document.createElement("span"); item.className = `bid-stage-step ${index < currentStageIndex ? "done" : index === currentStageIndex ? "current" : ""}`; item.textContent = bidStageLabels[stage]; return item; }));
+    const next = bidNextActions[project.status] || bidNextActions.draft; $("bid-next-title").textContent = next[1]; $("bid-next-help").textContent = next[2]; $("run-bid-next").textContent = next[1]; $("run-bid-next").onclick = () => createBidStageTask(next[0]);
+    const tabs = [["overview", "项目总览"], ["requirements", "招标要求"], ["matrix", "应答矩阵"], ["sections", "标书章节"], ["checks", "合规检查"], ["files", "项目文件"], ["artifacts", "正式产物"], ["timeline", "项目时间线"]];
+    const tabBox = $("bid-tabs"); tabBox.replaceChildren(...tabs.map(([id, text]) => { const button = document.createElement("button"); button.type = "button"; button.id = `bid-tab-${id}`; button.textContent = text; button.className = bidState.activeTab === id ? "active" : ""; button.setAttribute("role", "tab"); button.setAttribute("aria-selected", String(bidState.activeTab === id)); button.onclick = () => { bidState.activeTab = id; bidState.detailRenderedKey = ""; renderBidDetail(); }; return button; }));
+    renderBidTab();
+  }
+  function renderBidding() {
+    if (!$("bid-list")) return;
+    const dashboard = bidState.dashboard || model?.bidding || {};
+    $("bid-active-count").textContent = String(dashboard.active_count || 0); $("bid-decision-count").textContent = String(dashboard.decision_pending_count || 0); $("bid-risk-count").textContent = String(dashboard.high_risk_project_count || 0); $("bid-total-count").textContent = String(dashboard.project_count || 0);
+    updateBidSelectors();
+    const list = $("bid-list"); const scrollTop = list.scrollTop; const key = `${bidState.rows.map((row) => `${row.bid_id}:${row.version}:${row.high_risk_check_count}:${row.mandatory_gap_count}:${row.material_gap_count}`).join("|")}|${bidState.selectedId}|${bidState.loading}|${bidState.error}`;
+    if (key !== bidState.renderedKey) { bidState.renderedKey = key; list.classList.toggle("empty", !bidState.rows.length); if (bidState.error && !bidState.rows.length) list.textContent = `投标项目暂时无法读取：${bidState.error}`; else if (bidState.loading && !bidState.rows.length) list.textContent = "正在读取投标项目…"; else if (!bidState.rows.length) list.textContent = "没有符合筛选条件的投标项目。"; else list.replaceChildren(...bidState.rows.map(bidProjectCard)); queueMicrotask(() => { list.scrollTop = Math.min(scrollTop, Math.max(0, list.scrollHeight - list.clientHeight)); }); }
+    $("bid-list-count").textContent = String(bidState.rows.length); $("bid-list-status").textContent = bidState.loading ? "正在更新项目…" : bidState.error ? `读取未完成：${bidState.error}` : `已显示 ${bidState.rows.length} 个项目`; renderBidDetail();
+  }
+  async function createBidStageTask(serviceId, extra = "") {
+    const project = bidProject(); if (!project) { note("请先选择一个投标项目。", true); return; }
+    const service = serviceById(serviceId); if (!service) { note("当前版本未启用该投标能力。", true); return; }
+    const operation = bidServiceActions.find(([id]) => id === serviceId)?.[1] || service.display_name;
+    if (serviceId === "bid-check") {
+      try {
+        const checks = await api(`/api/bids/${encodeURIComponent(project.bid_id)}/checks/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        extra = `${extra ? `${extra}\n` : ""}本次确定性检查已执行：开放问题 ${checks.open_count} 项，其中严重 ${checks.critical_count} 项、高风险 ${checks.high_count} 项；请读取最新检查记录后继续深度复核。`;
+        await selectBid(project.bid_id, { focus: false, tab: "checks" });
+      } catch (error) { note(`确定性检查未完成：${error.message}`, true); return; }
+    }
+    const request = [
+      "【全流程智能招投标阶段任务】", `投标项目编号：${project.bid_id}`, `项目名称：${project.name}`,
+      `当前状态：${bidStatusLabels[project.status] || project.status}`, `当前阶段：${bidStageLabels[project.current_stage] || project.current_stage}`,
+      `本次操作：${operation}`, "请先使用投标项目读取工具取得完整且最新的项目数据；只基于已登记原件、已核验事实和可定位证据工作。",
+      "需要更新招投标数据库或生成正式文档时，先用自然语言卡片展示精确变更并等待人工审批。不得自动登录、签章、报价、上传、提交或对外发送。",
+      extra,
+    ].filter(Boolean).join("\n");
+    try {
+      const response = await api("/api/task-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_id: selectedProfile, service_id: serviceId, project_id: project.workspace_project_id || selectedProject, request, ...taskRuntimeSelection() }) });
+      note(`${operation}任务已登记（${response.request_id}）。`); await load(); switchView("tasks");
+    } catch (error) { note(error.message, true); }
   }
 
   function renderOutputs() {
@@ -2195,7 +2456,7 @@
   }
 
   function renderSchedules() {
-    const allowed = (currentProfile()?.services || []).filter((service) => !["presentation-studio", "weekly-deck", "pdf-import"].includes(service.id));
+    const allowed = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-") && !["presentation-studio", "weekly-deck", "pdf-import"].includes(service.id));
     setSelectOptions($("schedule-service"), allowed.map((service) => ({ value: service.id, label: service.display_name })), $("schedule-service").value || "sales-review");
     const list = $("schedule-list");
     const schedules = model.schedules || [];
@@ -2266,7 +2527,7 @@
 
   function render() {
     renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
-    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderCustomerOperations(); renderAttention(); switchView(currentView);
+    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderCustomerOperations(); renderAttention(); renderBidding(); switchView(currentView);
   }
 
   async function createTask(request) {
@@ -2410,6 +2671,53 @@
   $("customer-context-open").onclick = () => { if (customerState.selectedId) { switchView("sales"); $("customer-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }); } };
   $("global-customer-open").onclick = () => { if (customerState.selectedId) { switchView("sales"); $("customer-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }); } };
   $("refresh-attention").onclick = () => loadAttention({ force: true });
+  $("show-bid-form").onclick = () => { bidState.editingId = ""; $("create-bid").textContent = "创建并进入项目"; ["bid-name", "bid-buyer", "bid-number", "bid-deadline", "bid-summary"].forEach((id) => { $(id).value = ""; }); updateBidSelectors(); $("bid-create-panel").hidden = false; $("bid-name").focus(); };
+  $("cancel-bid").onclick = () => { bidState.editingId = ""; $("create-bid").textContent = "创建并进入项目"; $("bid-create-panel").hidden = true; };
+  $("create-bid").onclick = async () => {
+    const name = $("bid-name").value.trim();
+    if (!name) { note("请填写投标项目名称。", true); $("bid-name").focus(); return; }
+    const button = $("create-bid"); button.disabled = true;
+    try {
+      const existing = bidState.editingId ? bidProject() : null;
+      const endpoint = existing ? `/api/bids/${encodeURIComponent(existing.bid_id)}` : "/api/bids";
+      const project = await api(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        ...(existing ? { expected_version: existing.version } : { workspace_project_id: $("bid-workspace-project").value || selectedProject }),
+        name, account_id: $("bid-account").value || null, buyer: $("bid-buyer").value.trim() || null,
+        tender_number: $("bid-number").value.trim() || null, deadline_at: $("bid-deadline").value || null,
+        summary: $("bid-summary").value.trim() || null,
+      }) });
+      bidState.selectedId = project.bid_id; ["bid-name", "bid-buyer", "bid-number", "bid-deadline", "bid-summary"].forEach((id) => { $(id).value = ""; }); $("bid-create-panel").hidden = true;
+      const wasEditing = Boolean(existing); bidState.editingId = ""; $("create-bid").textContent = "创建并进入项目";
+      note(`投标项目“${project.name}”已${wasEditing ? "更新" : "创建"}。`); await loadBids({ force: true }); await selectBid(project.bid_id, { focus: true, tab: wasEditing ? bidState.activeTab : "files" });
+      if (!wasEditing && await confirmAction({ title: "现在上传招标文件？", message: "上传原件后，可直接启动文件解读，不需要再次填写项目背景。", confirmText: "选择招标文件" })) { $("bid-file-role").value = "tender"; $("bid-file-input").click(); }
+    } catch (error) { note(error.message, true); } finally { button.disabled = false; }
+  };
+  let bidFilterTimer = null;
+  $("bid-query").addEventListener("input", () => { bidState.query = $("bid-query").value.trim(); clearTimeout(bidFilterTimer); bidFilterTimer = setTimeout(() => loadBids({ force: true }), 260); });
+  $("bid-status-filter").addEventListener("change", () => { bidState.statuses = $("bid-status-filter").value; loadBids({ force: true }); });
+  $("refresh-bids").onclick = () => loadBids({ force: true });
+  $("bid-discover").onclick = async () => {
+    const scope = await confirmAction({ title: "发现采购机会", message: "填写产品方向、地区或采购人。助手会核验公告正文，并把值得跟进的机会列出；不会自动创建投标项目。", inputLabel: "检索范围", inputValue: "例如：具身智能数据采集，江苏省，近 30 天", confirmText: "开始检索" });
+    if (!scope) return;
+    if (!publicSearchReady("bid-discovery", true)) { note("请先恢复公开检索服务，再发起采购机会发现。", true); return; }
+    try {
+      const response = await api("/api/task-requests", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profile_id: selectedProfile, service_id: "bid-discovery", project_id: selectedProject, request: `【采购机会发现】\n检索范围：${scope}\n请检索并打开采购公告正文，核验采购人、预算、报名与截止时间、资格要求和原始链接；区分事实、推断与待验证项。只输出机会清单和建议，不自动创建投标项目。`, ...taskRuntimeSelection() }) });
+      note(`采购机会发现任务已登记（${response.request_id}）。`); await load(); switchView("tasks");
+    } catch (error) { note(error.message, true); }
+  };
+  $("bid-upload").onclick = () => { if (!bidState.selectedId) { note("请先选择投标项目。", true); return; } $("bid-file-input").click(); };
+  $("bid-file-input").onchange = async () => {
+    const file = $("bid-file-input").files?.[0]; const project = bidProject();
+    if (!file || !project) { $("bid-file-input").value = ""; return; }
+    if (file.size <= 0 || file.size > 32 * 1024 * 1024) { note("单个投标资料必须为 1 字节至 32 兆字节。", true); $("bid-file-input").value = ""; return; }
+    const role = $("bid-file-role").value;
+    try {
+      const response = await fetch("/api/bid-files", { method: "POST", headers: { "X-Director-Token": requestToken || "", "Content-Type": "application/octet-stream", "X-Bid-Id": project.bid_id, "X-Bid-Role": role, "X-File-Name": encodeURIComponent(file.name) }, body: file });
+      const result = await response.json(); if (!response.ok) throw new Error(result.error || "投标资料上传失败");
+      note(result.message); await loadBids({ force: true }); await selectBid(project.bid_id, { focus: false, tab: "files" });
+      if (["tender", "addendum"].includes(role) && await confirmAction({ title: "资料已登记，立即开始解读？", message: "助手将只读取当前项目已登记的招标原件，提取要求后先展示待写入卡片，仍由你确认。", confirmText: "开始解读" })) await createBidStageTask("bid-interpretation");
+    } catch (error) { note(error.message, true); } finally { $("bid-file-input").value = ""; }
+  };
   $("open-knowledge-file").onclick = async () => {
     try {
       const reply = await api("/api/knowledge/file/open", {

@@ -1,0 +1,14 @@
+{
+  "id": "market.bidding.compliance-review",
+  "plugin": "market.bidding",
+  "display_name": "合规与废标风险复核",
+  "entry_nodes": ["load_bid"],
+  "output_nodes": ["validate_bid_write"],
+  "nodes": [
+    {"id": "load_bid", "type": "tool", "tool": "bid.read", "depends_on": [], "permissions": ["bid.read"]},
+    {"id": "run_compliance_checks", "type": "validator", "check": "mandatory_duplicate_consistency_material_and_deadline_rules", "depends_on": ["load_bid"], "permissions": []},
+    {"id": "approve_bid_data", "type": "approval", "policy": "owner_confirms_findings_and_risk_actions", "depends_on": ["run_compliance_checks"], "permissions": []},
+    {"id": "write_bid_data", "type": "tool", "tool": "bid.write", "depends_on": ["approve_bid_data"], "permissions": ["bid.write"]},
+    {"id": "validate_bid_write", "type": "validator", "check": "check_receipt_and_open_critical_findings", "depends_on": ["write_bid_data"], "permissions": []}
+  ]
+}

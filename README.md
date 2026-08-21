@@ -2,7 +2,7 @@
 
 一个以 [Pi](https://github.com/earendil-works/pi) 为 Agent 运行时的轻本体插件框架。当前 Windows 桌面发行版只提供一个开箱即用岗位：
 
-- `sales-director`：客户推进、资源协调、客户与行业研究、政府合作方案、销售文件、复盘和周报 PPT。
+- `sales-director`：客户推进、资源协调、客户与行业研究、政府合作方案、全流程智能招投标、销售文件、复盘和周报 PPT。
 
 用户直接选择销售服务，不需要再选择岗位或理解底层插件。仓库仍保留 Profile 插件框架，供开发者维护既有兼容组合，但销售总监发行版会在界面和 Pi 运行时同时锁定 `sales-director`。
 
@@ -45,7 +45,7 @@ flowchart LR
 
 ## Pi 快速开始（Windows / macOS）
 
-正式支持 Windows 10/11 与 macOS 13+ 的本机部署。基础要求为 Python 3.11+、Node.js 24.19.0 或更新的 Node 24 版本、Git；安装器会检查或配置 pnpm 10、Pi 0.84.2+、项目依赖、本地数据和项目级 Pi Package。建议把仓库作为实际工作 Project 使用，以便知识库、台账、模板和输出目录都位于当前工作目录。
+正式支持 Windows 10/11 与 macOS 13+ 的本机部署。基础要求为 Python 3.11+ 和 Git；Node.js 要求 24.19.0 或更新的 Node 24 版本。Windows 若没有合格的系统 Node，安装器会从 Node.js 官方站下载固定版本免安装包，核对 SHA-256 后放入项目私有 `runtime/node/`，不需要管理员权限，也不改变其他软件的 Node。安装器还会检查或配置 pnpm 10、Pi 0.84.2+、项目依赖、本地数据和项目级 Pi Package。建议把仓库作为实际工作 Project 使用，以便知识库、台账、模板和输出目录都位于当前工作目录。
 
 Windows PowerShell：
 
@@ -92,7 +92,15 @@ python -m agent_platform doctor --require-ppt
 
 设置页另有独立的“One Search 搜索聚合网关”卡片。它连接用户自行部署的 One Search，可把 Exa、You、Jina、Tavily、Firecrawl、Serper、Brave 等上游按并行、依次尝试或单提供商方式聚合；Agent4Market 不捆绑或代管该服务。启用后 `web.search` 优先走 `/v1/search`，保留具体上游名称并继续标记为“仅发现”；网关失败时不会把同一查询静默转发给其他服务。配置只接受权限受限的 `osr_` 检索令牌，拒绝 `oak_` 管理凭据；本机/局域网地址必须显式允许，运行时会重新解析并把实际连接固定到核验地址。[One Search 项目与接口](https://github.com/CncCbz/one-search)，[管理员凭据说明](https://github.com/CncCbz/one-search/blob/main/docs/admin-api-key.md)。
 
-桌面发行版只加载销售总监所需 Skills，包含政府合作能力，不加载产品研发 Skills；旧版邮箱与聊天 Skill 也不会加载。
+桌面发行版只加载销售总监所需 Skills，包含政府合作与智能招投标能力，不加载产品研发 Skills；旧版邮箱与聊天 Skill 也不会加载。
+
+### 全流程智能招投标
+
+左侧“智能招投标”提供持久化项目空间。用户首次只需创建项目并上传原件，助手会自动带入当前项目、客户、期限、文件和历史阶段信息，按“机会发现 → 文件解读 → 参投决策 → 应答策划 → 章节编制 → 合规复核 → 正式交付 → 结果复盘”推进。阶段任务是可恢复的短任务，项目状态长期保存在独立的本地 SQLite 中。
+
+要求、事实、响应矩阵、章节、风险和决策均通过中文待写入卡片展示，支持逐条编辑或删除，批准后才写入。正式 DOCX 同样绑定精确内容快照和来源哈希，批准后在私有任务目录构建，并用 LibreOffice 逐页渲染检查后才放入项目产物目录；已有文件永不覆盖。系统不自动登录采购平台、报名、报价、签章、上传或对外提交。完整操作见 [智能招投标使用说明](docs/智能招投标使用说明.md)。
+
+产品流程参考了 BidMaster-Pro 与 OpenBidKit_Yibiao 的公开能力描述。由于两个参考项目当前许可证均涉及 AGPL-3.0，本仓库仅做 clean-room 的功能与流程借鉴，不复制其代码、SQL、提示词、模板、素材或界面文案，仍以 MIT 发布。
 
 进入 Pi 后：
 

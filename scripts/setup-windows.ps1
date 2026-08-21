@@ -31,13 +31,86 @@ function Invoke-ProjectPython {
     Invoke-Checked -FilePath $PythonCommand.Source -Arguments @($PythonPrefix + $Arguments)
 }
 
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw "Node.js 24.19.x was not found. Install the validated Node.js 24.19 runtime and run this script again."
+$NodeMinimum = [Version]"24.19.0"
+$NodeMaximum = [Version]"25.0.0"
+$PortableNodeDirectory = Join-Path $ProjectRoot "runtime\node"
+$PortableNodeExecutable = Join-Path $PortableNodeDirectory "node.exe"
+
+function Get-SupportedNodePath {
+    param([string]$Candidate)
+    if (-not $Candidate -or -not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
+    try {
+        $VersionText = (& $Candidate --version).Trim().TrimStart("v")
+        $Version = $null
+        if ([Version]::TryParse($VersionText, [ref]$Version) -and $Version -ge $NodeMinimum -and $Version -lt $NodeMaximum) {
+            return (Resolve-Path -LiteralPath $Candidate).Path
+        }
+    } catch { return $null }
+    return $null
 }
-$NodeVersionText = (& node --version).Trim().TrimStart("v")
-$NodeVersion = $null
-if (-not [Version]::TryParse($NodeVersionText, [ref]$NodeVersion) -or $NodeVersion -lt [Version]"24.19.0" -or $NodeVersion -ge [Version]"25.0.0") {
-    throw "Unsupported Node.js ${NodeVersionText}. Install Node.js 24.19.0 or newer within the Node 24 line."
+
+$NodePath = Get-SupportedNodePath -Candidate $PortableNodeExecutable
+if (-not $NodePath) {
+    $SystemNode = Get-Command node -ErrorAction SilentlyContinue
+    if ($SystemNode) { $NodePath = Get-SupportedNodePath -Candidate $SystemNode.Source }
+}
+if (-not $NodePath) {
+    $RuntimeRoot = Join-Path $ProjectRoot "runtime"
+    $CanonicalProjectRoot = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $CanonicalRuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
+    if (-not $CanonicalRuntimeRoot.StartsWith($CanonicalProjectRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Portable Node runtime path escaped the project root."
+    }
+    if (Test-Path -LiteralPath $RuntimeRoot) {
+        $RuntimeMetadata = Get-Item -LiteralPath $RuntimeRoot -Force
+        if (-not $RuntimeMetadata.PSIsContainer -or ($RuntimeMetadata.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The runtime directory must be a normal directory, not a link."
+        }
+    } else {
+        New-Item -ItemType Directory -Path $RuntimeRoot | Out-Null
+    }
+    if (Test-Path -LiteralPath $PortableNodeDirectory) {
+        $PortableMetadata = Get-Item -LiteralPath $PortableNodeDirectory -Force
+        if (-not $PortableMetadata.PSIsContainer -or ($PortableMetadata.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The portable Node runtime is invalid or linked."
+        }
+        $BackupNodeDirectory = "$PortableNodeDirectory.previous-$((Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))"
+        Move-Item -LiteralPath $PortableNodeDirectory -Destination $BackupNodeDirectory
+    }
+    $NodeArchiveName = "node-v24.19.0-win-x64.zip"
+    $NodeArchiveSha256 = "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73"
+    $Nonce = [Guid]::NewGuid().ToString("N")
+    $NodeArchive = Join-Path $RuntimeRoot ".$Nonce-$NodeArchiveName"
+    $NodeStage = Join-Path $RuntimeRoot ".$Nonce-node-stage"
+    try {
+        Invoke-WebRequest -Uri "https://nodejs.org/dist/v24.19.0/$NodeArchiveName" -OutFile $NodeArchive -UseBasicParsing
+        $DownloadedSha256 = (Get-FileHash -LiteralPath $NodeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($DownloadedSha256 -ne $NodeArchiveSha256) {
+            throw "Portable Node.js archive hash verification failed."
+        }
+        Expand-Archive -LiteralPath $NodeArchive -DestinationPath $NodeStage
+        $ExtractedNodeDirectory = Join-Path $NodeStage "node-v24.19.0-win-x64"
+        $ExtractedNodeExecutable = Join-Path $ExtractedNodeDirectory "node.exe"
+        if (-not (Get-SupportedNodePath -Candidate $ExtractedNodeExecutable)) {
+            throw "Portable Node.js archive did not contain a supported runtime."
+        }
+        Move-Item -LiteralPath $ExtractedNodeDirectory -Destination $PortableNodeDirectory
+    } finally {
+        if (Test-Path -LiteralPath $NodeArchive -PathType Leaf) { Remove-Item -LiteralPath $NodeArchive -Force }
+        if (Test-Path -LiteralPath $NodeStage -PathType Container) { Remove-Item -LiteralPath $NodeStage -Recurse -Force }
+    }
+    $NodePath = Get-SupportedNodePath -Candidate $PortableNodeExecutable
+    if (-not $NodePath) { throw "Portable Node.js installation did not complete." }
+}
+$NodeDirectory = Split-Path -Parent $NodePath
+$env:Path = $NodeDirectory + [IO.Path]::PathSeparator + $env:Path
+if ($NodeDirectory -eq $PortableNodeDirectory) {
+    $PortableCorepack = Join-Path $PortableNodeDirectory "corepack.cmd"
+    if (-not (Test-Path -LiteralPath $PortableCorepack -PathType Leaf)) {
+        throw "Portable Node.js is missing Corepack. Run setup-windows.ps1 again."
+    }
+    Invoke-Checked -FilePath $PortableCorepack -Arguments @("enable")
+    Invoke-Checked -FilePath $PortableCorepack -Arguments @("prepare", "pnpm@10", "--activate")
 }
 
 $CodexPrivatePathPattern = '(?i)([\\/]codex-runtimes[\\/]|[\\/]\.codex[\\/]|[\\/]OpenAI\.Codex_)'

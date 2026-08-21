@@ -22,6 +22,13 @@ class EnvironmentTests(unittest.TestCase):
         macos = (root / "scripts" / "setup-macos.sh").read_text(encoding="utf-8")
         self.assertIn('[Version]"24.19.0"', windows)
         self.assertIn('[Version]"25.0.0"', windows)
+        self.assertIn("node-v24.19.0-win-x64.zip", windows)
+        self.assertIn("57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73", windows)
+        self.assertIn('"runtime\\node"', windows)
+        self.assertIn('"prepare", "pnpm@10", "--activate"', windows)
+        launcher = (root / "scripts" / "start-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn('"runtime\\node"', launcher)
+        self.assertIn("$env:Path = $PortableNodeDirectory", launcher)
         self.assertIn('major !== 24 || minor < 19', macos)
 
     def test_setup_scripts_do_not_use_codex_pnpm_or_dependency_lifecycle_scripts(self) -> None:

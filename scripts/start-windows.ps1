@@ -8,6 +8,15 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location -LiteralPath $ProjectRoot
+$PortableNodeDirectory = Join-Path $ProjectRoot "runtime\node"
+$PortableNodeExecutable = Join-Path $PortableNodeDirectory "node.exe"
+if (Test-Path -LiteralPath $PortableNodeExecutable -PathType Leaf) {
+    $PortableNodeMetadata = Get-Item -LiteralPath $PortableNodeExecutable -Force
+    if ($PortableNodeMetadata.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Portable Node.js runtime cannot be a symbolic link. Run setup-windows.ps1 again."
+    }
+    $env:Path = $PortableNodeDirectory + [IO.Path]::PathSeparator + $env:Path
+}
 $PythonCommand = Get-Command python -ErrorAction SilentlyContinue
 $PythonPrefix = @()
 if (-not $PythonCommand) {

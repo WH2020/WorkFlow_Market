@@ -1,0 +1,14 @@
+{
+  "id": "market.bidding.response-planning",
+  "plugin": "market.bidding",
+  "display_name": "应答策划与事实基线",
+  "entry_nodes": ["load_bid"],
+  "output_nodes": ["validate_bid_write"],
+  "nodes": [
+    {"id": "load_bid", "type": "tool", "tool": "bid.read", "depends_on": [], "permissions": ["bid.read", "sales.read", "knowledge.read"]},
+    {"id": "build_response_plan", "type": "agent", "skill": "manage-intelligent-bidding", "depends_on": ["load_bid"], "permissions": []},
+    {"id": "approve_bid_data", "type": "approval", "policy": "owner_confirms_response_plan_and_fact_baseline", "depends_on": ["build_response_plan"], "permissions": []},
+    {"id": "write_bid_data", "type": "tool", "tool": "bid.write", "depends_on": ["approve_bid_data"], "permissions": ["bid.write"]},
+    {"id": "validate_bid_write", "type": "validator", "check": "matrix_coverage_fact_sources_and_owners", "depends_on": ["write_bid_data"], "permissions": []}
+  ]
+}

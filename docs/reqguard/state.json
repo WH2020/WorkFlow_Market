@@ -1,0 +1,30 @@
+{
+  "workflow_version": "0.1",
+  "project_profile": "software-app",
+  "active_profiles": ["software-app"],
+  "active_expert_regions": ["EXP-SW-BID-LIFECYCLE"],
+  "phase": "verifying",
+  "requirements_version": "REQ-v1",
+  "modules_version": "MOD-v1",
+  "traceability_version": "TR-v1",
+  "task_context_version": "CTX-v1",
+  "pending_user_confirmation": false,
+  "last_user_confirmed_requirements": {
+    "ids": ["REQ-001"],
+    "evidence": "用户于 2026-08-21 明确要求执行并在当前销售总监 Agent 中增加全流程智能招投标模块，同时指定 BidMaster-Pro 与 OpenBidKit_Yibiao 作为流程参考。"
+  },
+  "managed_fields": {
+    "hook_owned": [
+      "last_reviewed_commit",
+      "last_validation_result",
+      "last_task_context_hash",
+      "last_updated_by"
+    ],
+    "agent_suggested": [
+      "phase",
+      "pending_user_confirmation",
+      "open_change_proposals"
+    ]
+  },
+  "open_change_proposals": []
+}

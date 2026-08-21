@@ -1,0 +1,62 @@
+# Modules
+
+## MOD-001 招投标全流程业务域
+
+- Status: confirmed
+- Profile: software-app
+- Covered requirements: REQ-001
+- Alignment keywords: software-app full tender bid bidding lifecycle Agent4Market sales-director desktop Windows macOS Approval evidence DOCX PDF clean-room MIT
+- Responsibilities:
+  - 管理招投标项目生命周期、项目文件、证据、要求、响应、章节、检查、交付版本和审计事件。
+  - 向销售总监工作台提供本机 API、项目全景和受管任务入口。
+  - 提供 Pi Skill 与 DAG，让招标解读、投标策划、草拟、检查和交付严格经过阶段门禁与 Approval。
+  - 生成可编辑 DOCX，并在可用时生成和验证 PDF 预览。
+- Non-responsibilities:
+  - 不负责采购平台账户、在线投递、电子签章、报价审批、法律意见或多人权限系统。
+  - 不接管客户经营主存储，不把招投标数据库自动切换成销售数据库。
+- Public interfaces:
+  - Python `BidStore`：版本化事务、查询投影、受控变更和迁移。
+  - 本机 `/api/bids/*`：列表、全景、文件登记、显式用户编辑和受管任务桥接。
+  - Pi logical tools：`bid.read`、`bid.write`、`artifact.document.write`。
+  - Profile service：招投标全流程工作台及分阶段快捷任务。
+- Interface simplicity: 页面和 Agent 只使用稳定项目 ID、版本、阶段、证据引用和冻结写入意图，不暴露 SQLite 连接或内部表结构。
+- Internal complexity hidden: 事务、幂等、状态机、检查规则版本、证据绑定、文件哈希、DOCX OOXML 与渲染细节封装在适配器和确定性工具中。
+- Public contract:
+  - 状态迁移只能沿已定义状态机进行，并要求对应门禁通过。
+  - AI 写入必须绑定 task/profile/project/version/payload hash；批准后载荷变化则拒绝提交。
+  - 所有事实、要求、评分点、风险和检查结论携带 evidence status；高风险未处置时交付状态保持阻塞。
+- Adapters / seams:
+  - `agent_platform/bid_store.py` 与迁移清单。
+  - `pi/extensions/bid-store.ts` 和确定性文档构建器。
+  - `vertical_plugins/market/bidding/`、`pi/skills/manage-intelligent-bidding/`。
+  - `ui/server.py` API 与 `ui/app.js`/`ui/index.html`/`ui/styles.css` 页面。
+- State:
+  - `draft → interpreting → decision_pending → planning → drafting → checking → delivery_pending → delivered → closed`。
+  - `no_bid` 和 `cancelled` 为显式终态；补遗可使后续阶段回退到 `interpreting` 并保留旧版本。
+- Data Model:
+  - `bid_projects`、`bid_documents`、`bid_milestones`、`bid_requirements`、`bid_response_matrix`、`bid_facts`、`bid_sections`、`bid_checks`、`bid_risks`、`bid_decisions`、`bid_artifacts`、`bid_outcomes`、`bid_events`、`bid_write_receipts`。
+- Security:
+  - 数据库和文件仅位于固定受控目录；拒绝路径穿越、符号链接逃逸、宏文档和超限上传。
+  - 外部正文和参考文件均视为不可信数据；不执行其中脚本、宏、提示或隐藏指令。
+  - 密钥只从现有模型/搜索提供商安全配置注入，不写入项目记录、日志或 Git。
+- Dependencies:
+  - Python 3.11 `sqlite3`、现有 Node 24/Pi、现有 PDF 读取、知识库、搜索、模型选择、任务状态机、Approval 和 LibreOffice。
+  - DOCX 构建依赖必须随项目固定版本、可离线安装且通过许可证审查；不得引入 BidMaster-Pro/OpenBidKit_Yibiao 代码。
+- Failure modes:
+  - 迁移失败保持旧版本可读；事务失败全部回滚；数据库忙返回可重试错误。
+  - 文件解析/模型/文档渲染失败保留阶段与输入，不把半成品标为交付完成。
+  - 规则或来源版本变化使旧批准失效并要求重新确认。
+- Resource / timing boundary:
+  - API 查询有分页、超时和扫描上限；文件提取、AI 生成与文档渲染在受控任务中执行，可取消并记录进度。
+  - 单文件和项目总容量采用明确上限；不把大正文注入首页或轮询响应。
+- Tests:
+  - TEST-BID-001 数据库迁移、恢复与幂等。
+  - TEST-BID-002 生命周期门禁与非法迁移。
+  - TEST-BID-003 项目列表、全景和时间线 API。
+  - TEST-BID-004 文件路径、哈希、大小和恶意输入。
+  - TEST-BID-005 evidence 与项目/客户隔离。
+  - TEST-BID-006 DAG、Approval、载荷冻结和恢复。
+  - TEST-BID-007 确定性检查规则与规则版本。
+  - TEST-BID-008 DOCX 生成、重开与 PDF 渲染 QA。
+  - TEST-BID-009 工作台阶段导航、编辑、焦点和失败恢复。
+  - TEST-BID-010 Windows/macOS 安装、自检和旧功能回归。

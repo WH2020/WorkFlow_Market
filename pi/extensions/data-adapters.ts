@@ -26,6 +26,14 @@ import { normalizePublicUrl, openWebSource, readLocalPdf } from "./source-reader
 import { searchPublicWeb } from "./web-search.ts";
 import { openBusinessStore, resolveBusinessBackend } from "./business-backend.ts";
 import type { BusinessMutation, BusinessTable, SalesBusinessStore } from "./business-store.ts";
+import { bidDocumentSnapshotSha256, bidSnapshotSha256, openBiddingStore } from "./bid-store.ts";
+import type { BidMutation } from "./bid-store.ts";
+import {
+  assertBidDocumentPayload,
+  buildBidDocument,
+  DocumentNotCommittedError,
+} from "./document-artifact.ts";
+import type { BidDocumentPayload, DocumentCommitContext } from "./document-artifact.ts";
 
 export type AdapterHooks = {
   projectRoot: () => string;
@@ -41,7 +49,7 @@ export type AdapterHooks = {
   } | void;
   afterLogicalTool: (logicalTool: string, params: unknown, details: unknown) => void;
   onLogicalToolError: (
-    logicalTool: "knowledge.write" | "sales.write" | "artifact.deck.write",
+    logicalTool: "knowledge.write" | "sales.write" | "bid.write" | "artifact.deck.write" | "artifact.document.write",
     params: unknown,
     outcome: "not_committed" | "ambiguous",
     error: unknown,
@@ -1550,6 +1558,19 @@ const sqliteMutationSchema = Type.Object({
   expected_version: Type.Optional(Type.Integer({ minimum: 1 })),
 });
 
+const bidMutationSchema = Type.Object({
+  operation: Type.Union([Type.Literal("insert"), Type.Literal("update")]),
+  table: Type.Union([
+    Type.Literal("bid_projects"), Type.Literal("bid_milestones"), Type.Literal("bid_requirements"),
+    Type.Literal("bid_response_matrix"), Type.Literal("bid_facts"), Type.Literal("bid_sections"),
+    Type.Literal("bid_checks"), Type.Literal("bid_risks"), Type.Literal("bid_decisions"),
+    Type.Literal("bid_outcomes"),
+  ]),
+  record_id: Type.String({ minLength: 1, maxLength: 128 }),
+  changes: Type.Record(Type.String(), Type.String()),
+  expected_version: Type.Optional(Type.String({ pattern: "^sqlite:[1-9]\\d*$" })),
+});
+
 const LEGACY_TO_SQLITE = {
   customers: "accounts", activities: "activities", resource_requests: "resource_requests", sales_assets: "sales_assets",
 } as const satisfies Record<SalesTableName, BusinessTable>;
@@ -2813,6 +2834,91 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
   });
 
   pi.registerTool({
+    name: "director_artifact_document_write",
+    label: "生成受控正式标书",
+    description: "基于已批准的投标项目快照生成可编辑文字文档，使用 LibreOffice 渲染逐页检查，输出到对应投标项目目录且不覆盖已有文件。",
+    parameters: Type.Object({
+      schema_version: Type.Literal("1.0"),
+      profile_id: Type.Literal("sales-director"),
+      bid_id: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" }),
+      snapshot_sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+      output_name: Type.String({ minLength: 6, maxLength: 125, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.docx$" }),
+      title: Type.String({ minLength: 1, maxLength: 300 }),
+      subtitle: Type.Optional(Type.String({ maxLength: 500 })),
+      buyer: Type.Optional(Type.String({ maxLength: 500 })),
+      tender_number: Type.Optional(Type.String({ maxLength: 200 })),
+      bidder: Type.Optional(Type.String({ maxLength: 500 })),
+      generated_date: Type.Optional(Type.String({ maxLength: 40 })),
+      confidentiality: Type.Optional(Type.String({ maxLength: 100 })),
+      sections: Type.Array(Type.Object({
+        section_id: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" }),
+        title: Type.String({ minLength: 1, maxLength: 300 }),
+        level: Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3), Type.Literal(4)]),
+        paragraphs: Type.Array(Type.String({ minLength: 1, maxLength: 20_000 }), { maxItems: 200 }),
+        tables: Type.Optional(Type.Array(Type.Object({
+          title: Type.Optional(Type.String({ maxLength: 300 })),
+          columns: Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { minItems: 1, maxItems: 6 }),
+          rows: Type.Array(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { minItems: 1, maxItems: 6 }), { maxItems: 100 }),
+        }), { maxItems: 20 })),
+      }), { minItems: 1, maxItems: 80 }),
+      sources: Type.Array(Type.Object({
+        source_id: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" }),
+        title: Type.String({ minLength: 1, maxLength: 500 }),
+        path: Type.String({ minLength: 1, maxLength: 1024 }),
+        sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+        page: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })),
+        locator: Type.Optional(Type.String({ maxLength: 500 })),
+      }), { minItems: 1, maxItems: 200 }),
+      warnings: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), { maxItems: 100 })),
+    }),
+    async execute(_toolCallId, params) {
+      const commit = hooks.beforeLogicalTool("artifact.document.write", params);
+      let buildStarted = false;
+      try {
+        if (!commit?.intent_id || !commit.payload_sha256 || !commit.task_id || !commit.profile_id) {
+          throw new Error("正式标书写入缺少批准后的任务、意图、载荷或角色上下文");
+        }
+        assertBidDocumentPayload(hooks.projectRoot(), commit.profile_id, params as BidDocumentPayload);
+        buildStarted = true;
+        const result = await buildBidDocument(
+          hooks.projectRoot(),
+          params as BidDocumentPayload,
+          commit as DocumentCommitContext,
+        );
+        const store = openBiddingStore(hooks.projectRoot(), false);
+        try {
+          const artifact = store.recordArtifact({
+            bid_id: params.bid_id,
+            task_id: commit.task_id,
+            intent_id: commit.intent_id,
+            relative_path: String(result.path),
+            sha256: String(result.sha256),
+            byte_size: Number(result.bytes),
+            qa: result.qa as Record<string, unknown>,
+          });
+          const details = { ...result, artifact };
+          assertResultSize(details);
+          hooks.afterLogicalTool("artifact.document.write", params, details);
+          return { content: content(details), details };
+        } finally { store.close(); }
+      } catch (error) {
+        const output = typeof params.output_name === "string" && typeof params.bid_id === "string"
+          ? resolve(hooks.projectRoot(), "outputs", "bids", params.bid_id, params.output_name)
+          : "";
+        hooks.onLogicalToolError(
+          "artifact.document.write",
+          params,
+          error instanceof DocumentNotCommittedError
+            ? "not_committed"
+            : buildStarted && Boolean(output && existsSync(output)) ? "ambiguous" : "not_committed",
+          error,
+        );
+        throw error;
+      }
+    },
+  });
+
+  pi.registerTool({
     name: "director_knowledge_search",
     label: "检索本地知识库",
     description: "检索当前选定的本地知识存储，返回来源记录、存储绑定与记录版本，不读取个人聊天。",
@@ -3179,6 +3285,96 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
           error,
         );
         throw error;
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "director_bid_read",
+    label: "读取投标项目",
+    description: "读取一个投标项目的受控资料、要求、应答矩阵、事实基线、章节、检查与时间线；或按关键词列出项目。",
+    parameters: Type.Object({
+      bid_id: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+      query: Type.Optional(Type.String({ maxLength: 500 })),
+      sections: Type.Optional(Type.Array(Type.Union([
+        Type.Literal("documents"), Type.Literal("milestones"), Type.Literal("requirements"),
+        Type.Literal("response_matrix"), Type.Literal("facts"), Type.Literal("sections"),
+        Type.Literal("checks"), Type.Literal("risks"), Type.Literal("decisions"),
+        Type.Literal("artifacts"), Type.Literal("outcomes"),
+      ]), { maxItems: 11, uniqueItems: true })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+    }),
+    async execute(_toolCallId, params) {
+      hooks.beforeLogicalTool("bid.read", params);
+      const bootstrap = openBiddingStore(hooks.projectRoot(), false);
+      bootstrap.close();
+      const store = openBiddingStore(hooks.projectRoot(), true);
+      try {
+        const selected = params.bid_id
+          ? store.readProject(params.bid_id, params.sections)
+          : { rows: store.searchProjects(params.query ?? "", params.limit ?? 50) };
+        if (!selected) throw new Error("投标项目不存在");
+        const result = params.bid_id
+          ? {
+              ...selected,
+              snapshot_sha256: bidSnapshotSha256(selected),
+              document_snapshot_sha256: bidDocumentSnapshotSha256(selected),
+            }
+          : selected;
+        assertResultSize(result);
+        hooks.afterLogicalTool("bid.read", params, result);
+        return { content: content(result), details: result };
+      } finally { store.close(); }
+    },
+  });
+
+  pi.registerTool({
+    name: "director_bid_write",
+    label: "更新投标项目",
+    description: "经 DAG 审批后新增或带版本更新投标要求、应答矩阵、事实、章节、风险和决策；不删除资料，不提交或外发标书。",
+    parameters: Type.Object({
+      bid_id: Type.String({ minLength: 1, maxLength: 128 }),
+      mutations: Type.Array(bidMutationSchema, { minItems: 1, maxItems: 100 }),
+    }),
+    async execute(_toolCallId, params) {
+      const commit = hooks.beforeLogicalTool("bid.write", params);
+      if (!commit?.intent_id || !commit.payload_sha256 || !commit.task_id || !commit.session_id || !commit.storage_binding) {
+        throw new Error("投标写入缺少受管提交上下文");
+      }
+      let store = openBiddingStore(hooks.projectRoot(), false);
+      try {
+        if (commit.storage_binding.backend !== "sqlite" || commit.storage_binding.binding_id !== store.binding_id) {
+          throw new Error("招投标存储在审批后发生变化；本次未写入，请重新生成并确认");
+        }
+        const receipt = store.commit({
+          intent_id: commit.intent_id,
+          task_id: commit.task_id,
+          session_id: commit.session_id,
+          logical_tool: "bid.write",
+          approved_payload_sha256: commit.payload_sha256,
+          bid_id: params.bid_id,
+          mutations: params.mutations as BidMutation[],
+        });
+        const project = store.readProject(params.bid_id);
+        const result = { operations: receipt.mutations, receipt, project };
+        assertResultSize(result);
+        hooks.afterLogicalTool("bid.write", params, result);
+        return { content: content(result), details: result };
+      } catch (error) {
+        try {
+          const receipt = store.readReceipt(commit.intent_id);
+          if (receipt && receipt.payload_sha256 === commit.payload_sha256 && receipt.bid_id === params.bid_id) {
+            const result = { operations: receipt.mutations, receipt, project: store.readProject(params.bid_id) };
+            hooks.afterLogicalTool("bid.write", params, result);
+            return { content: content(result), details: result };
+          }
+          hooks.onLogicalToolError("bid.write", params, "not_committed", error);
+        } catch (inspectionError) {
+          hooks.onLogicalToolError("bid.write", params, "ambiguous", inspectionError);
+        }
+        throw error;
+      } finally {
+        store.close();
       }
     },
   });

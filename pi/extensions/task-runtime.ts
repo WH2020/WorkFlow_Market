@@ -106,12 +106,19 @@ export type WriteStorageBinding = {
   binding_id: string;
 };
 
-export type StructuredWriteTool = "knowledge.write" | "sales.write" | "artifact.deck.write";
+export type StructuredWriteTool =
+  | "knowledge.write"
+  | "sales.write"
+  | "bid.write"
+  | "artifact.deck.write"
+  | "artifact.document.write";
 
 const STRUCTURED_WRITE_TOOLS = new Set<StructuredWriteTool>([
   "knowledge.write",
   "sales.write",
+  "bid.write",
   "artifact.deck.write",
+  "artifact.document.write",
 ]);
 
 export type CompletionActor = "model" | "adapter" | "user";
@@ -529,8 +536,8 @@ export function revisePreparedWriteIntent(
   if (!currentIntent || currentIntent.status !== "prepared") {
     throw new TaskTransitionError("Task has no prepared write intent to revise");
   }
-  if (currentIntent.logical_tool === "artifact.deck.write") {
-    throw new TaskTransitionError("Deck payload revisions must use the presentation revision workflow");
+  if (currentIntent.logical_tool === "artifact.deck.write" || currentIntent.logical_tool === "artifact.document.write") {
+    throw new TaskTransitionError("Artifact payload revisions must use the dedicated document or presentation revision workflow");
   }
   const currentPayload = JSON.parse(currentIntent.canonical_payload) as Record<string, unknown>;
   if (!revisedPayload || typeof revisedPayload !== "object" || Array.isArray(revisedPayload)) {
@@ -716,7 +723,7 @@ export function completeLogicalTool(
     state.pending_write!.status = "committed";
     state.pending_write!.committed_at = now();
   }
-  if (logicalTool === "artifact.deck.write" && note) {
+  if ((logicalTool === "artifact.deck.write" || logicalTool === "artifact.document.write") && note) {
     try {
       const details = JSON.parse(note) as { path?: unknown; receipt?: unknown };
       for (const candidate of [details.path, details.receipt]) {

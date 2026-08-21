@@ -1,0 +1,120 @@
+{
+  "workflow_version": "0.1",
+  "generated_by": "match_task_context.py",
+  "managed_by": "hook-or-script",
+  "generated_at": "2026-08-21T17:19:21+08:00",
+  "raw_user_task": "software-app full tender bid bidding lifecycle Agent4Market sales-director desktop Windows macOS Approval evidence DOCX PDF clean-room MIT",
+  "task_summary": "software-app full tender bid bidding lifecycle Agent4Market sales-director desktop Windows macOS Approval evidence DOCX PDF clean-room MIT",
+  "profile_matches": [
+    {
+      "profile": "software-app",
+      "score": 0.6667,
+      "match_reasons": [
+        "matched profile keyword: desktop",
+        "matched profile keyword: windows"
+      ]
+    }
+  ],
+  "expert_region_matches": [
+    {
+      "id": "EXP-SW-BID-LIFECYCLE",
+      "title": "招投标全流程与交付安全",
+      "profile": "software-app",
+      "status": "confirmed",
+      "score": 0.8275,
+      "semantic_similarity": 0.65,
+      "keyword_overlap": 1.0,
+      "file_or_module_path_match": 0.0,
+      "profile_match": 0.6667,
+      "current_state_weight": 1.0,
+      "match_reasons": [
+        "profile=software-app",
+        "semantic_similarity=0.65",
+        "keyword_overlap=1.0"
+      ]
+    }
+  ],
+  "requirement_matches": [
+    {
+      "id": "REQ-001",
+      "title": "本地全流程智能招投标",
+      "profile": "software-app",
+      "status": "confirmed",
+      "score": 0.763,
+      "semantic_similarity": 0.4657,
+      "keyword_overlap": 1.0,
+      "file_or_module_path_match": 0.0,
+      "profile_match": 0.6667,
+      "current_state_weight": 1.0,
+      "match_reasons": [
+        "profile=software-app",
+        "semantic_similarity=0.4657",
+        "keyword_overlap=1.0"
+      ]
+    }
+  ],
+  "module_matches": [
+    {
+      "id": "MOD-001",
+      "title": "招投标全流程业务域",
+      "profile": "software-app",
+      "status": "confirmed",
+      "score": 0.7724,
+      "semantic_similarity": 0.4926,
+      "keyword_overlap": 1.0,
+      "file_or_module_path_match": 0.0,
+      "profile_match": 0.6667,
+      "current_state_weight": 1.0,
+      "match_reasons": [
+        "profile=software-app",
+        "semantic_similarity=0.4926",
+        "keyword_overlap=1.0"
+      ]
+    }
+  ],
+  "required_process": "implementation",
+  "invocation": {
+    "tier": "model-invoked",
+    "user_confirmation_required": false,
+    "never_auto_decide": [
+      "confirm_requirement",
+      "approve_change_proposal",
+      "accept_risk",
+      "waive_tests"
+    ]
+  },
+  "required_verification": [
+    "workflow validation",
+    "traceability evidence",
+    "project tests",
+    "build or workflow evidence"
+  ],
+  "grill_gate": {
+    "required": false,
+    "reasons": [],
+    "mode": "one_question_at_a_time",
+    "next_question": "",
+    "recommended_answer": ""
+  },
+  "confidence": {
+    "overall": 0.7574,
+    "profile_confidence": 0.6667,
+    "expert_region_confidence": 0.8275,
+    "requirement_confidence": 0.763,
+    "module_confidence": 0.7724,
+    "evidence_quality": "medium"
+  },
+  "risk_flags": [],
+  "decision_hint": "proceed",
+  "required_agent_action": "state_task_summary_and_boundary",
+  "blocking": false,
+  "reason": "Task matches a confirmed requirement and compatible module.",
+  "completion_gate": {
+    "task_alignment": true,
+    "workflow_validation": false,
+    "project_tests": false,
+    "traceability_updated": false,
+    "evidence_recorded": false
+  },
+  "content_hash": "def42004edbd5a188700c5a67c7f2d136c59e10c235a0e6cc9a00ff51cdff8e1"
+}
