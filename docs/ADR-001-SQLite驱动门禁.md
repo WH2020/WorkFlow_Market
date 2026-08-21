@@ -1,16 +1,18 @@
 # ADR-001：阶段 A SQLite 驱动门禁
 
-- 状态：**有条件通过——Windows x64 已通过，macOS arm64/x64 等待 CI**
+- 状态：**通过——Windows x64、macOS arm64、macOS x64 门禁与完整产品回归均通过**
 - 日期：2026-08-21
 - 范围：STORE-A0-01 / STORE-A0-02 / STORE-A0-03
 - 关联设计：[SQLite 数据模型与迁移](ARCH-P0-SQLite数据模型与迁移.md)
 
 ## 1. 决策
 
-阶段 A 选择“固定 Node 24 LTS 补丁版本 + 内置 `node:sqlite`”作为首选候选，不引入第三方 SQLite 原生二进制。正式切换仍需满足两个条件：
+阶段 A 选择“固定 Node 24 LTS 补丁版本 + 内置 `node:sqlite`”作为正式存储驱动方案，不引入第三方 SQLite 原生二进制。STORE-A0-01～03 已通过，可以进入 A1 存储内核与迁移开发；这不代表正式业务数据已经切换到 SQLite。
 
-1. Windows x64、macOS arm64、macOS x64 的同一门禁全部通过。
-2. 正式安装器固定到已验证的 Node 24.x 版本后，再把业务存储从 CSV 切换到 SQLite。
+正式切换仍需满足两个条件：
+
+1. 正式安装器固定到已验证的 Node 24.19.0，并显示运行时/数据库版本。
+2. 正式 schema、CSV dry-run、对账、备份恢复和用户 Approval 全部通过。
 
 在这两个条件满足前：
 
@@ -69,11 +71,11 @@
 
 | 运行器 | 目标架构 | 状态 |
 |---|---|---|
-| `windows-latest` | x64 | 本地已通过；等待 CI 重复确认 |
-| `macos-15` | arm64 | 等待 CI |
-| `macos-15-intel` | x64 | 等待 CI |
+| `windows-latest` | x64 | 通过 |
+| `macos-15` | arm64 | 通过 |
+| `macos-15-intel` | x64 | 通过 |
 
-每个平台都会上传单独的 JSON 报告。现有 Node 22.19 的产品回归 job 暂不改变，避免在 A0 结论前扩大兼容性变更。
+三平台结果来自同一次 [GitHub Actions 运行](https://github.com/WH2020/WorkFlow_Market/actions/runs/32445975653)，提交为 `aad2441`；每个平台均上传单独 JSON 报告。该运行的 Windows/macOS 完整安装器、TypeScript、Python、平台和工作台回归也全部通过。现有 Node 22.19 的产品回归 job 暂不改变，正式安装器固定 Node 24.19.0 由后续工作包完成。
 
 ## 4. Windows 本地结果
 
@@ -101,18 +103,16 @@
 
 本机现有 Node 24.14.0 的拒绝结果也已验证：门禁在任何数据库场景执行前停止，提示最低版本 24.15.0。
 
-## 5. 尚未证实的事项
+## 5. A0 之外尚未证实的事项
 
-- macOS Apple Silicon 与 Intel 的真实故障注入结果。
-- GitHub Actions 上 Node 24.19.0 与两种 macOS 文件系统/锁行为。
 - 正式 Tauri 安装包如何携带或发现固定 Node 24 运行时。
 - 正式业务 schema、CSV 迁移和客户 360 查询性能；这些属于 A1–A3，不在 A0 原型中。
 
-因此当前结论是“候选可继续”，不是“SQLite 已可替换正式数据”。
+因此当前结论是“A0 驱动方案通过，可以继续 A1”，不是“SQLite 已可替换正式数据”。
 
-## 6. 最终通过规则
+## 6. 通过判定与下一步
 
-只有三份 CI 报告全部为 `status=ok`，且现有 TypeScript、Python、平台校验和桌面回归均通过，ADR 才可改为“通过”。之后再执行：
+三份 CI 报告均为 `status=ok`，且现有 TypeScript、Python、平台校验、工作台和双平台桌面回归均已通过，本 ADR 判定为“通过”。下一步按顺序执行：
 
 1. 固定安装器 Node 版本和升级提示。
 2. 实现正式 schema v1 与迁移 manifest。
