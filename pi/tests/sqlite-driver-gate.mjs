@@ -278,6 +278,54 @@ try {
     return { successful_writers: 1, version_conflicts: 1 };
   });
 
+  await runCheck("concurrent_intent_idempotency", async () => {
+    const databasePath = join(gateRoot, "same-intent.db");
+    const initialized = new LocalBusinessStore(databasePath);
+    initialized.close();
+    const identical = mutation("intent-concurrent-same", "insert", "record-concurrent-same", "same value");
+    const [first, second] = await Promise.all([
+      runWorker({ database_path: databasePath, mutation: identical }),
+      runWorker({ database_path: databasePath, mutation: identical }),
+    ]);
+    assert.equal(first.code, 0, first.stderr || first.stdout);
+    assert.equal(second.code, 0, second.stderr || second.stdout);
+    assert.deepEqual(first.json?.result, second.json?.result);
+    const store = new LocalBusinessStore(databasePath);
+    try {
+      assert.deepEqual(store.counts(), { records: 1, receipts: 1 });
+    } finally {
+      store.close();
+    }
+
+    const conflictPath = join(gateRoot, "same-intent-conflict.db");
+    const initializedConflict = new LocalBusinessStore(conflictPath);
+    initializedConflict.close();
+    const leftMutation = mutation("intent-concurrent-conflict", "insert", "record-conflict-left", "left");
+    const rightMutation = mutation("intent-concurrent-conflict", "insert", "record-conflict-right", "right");
+    const outcomes = await Promise.all([
+      runWorker({ database_path: conflictPath, mutation: leftMutation }),
+      runWorker({ database_path: conflictPath, mutation: rightMutation }),
+    ]);
+    const outcomeSummary = outcomes.map((outcome) => ({ code: outcome.code, json: outcome.json, stderr: outcome.stderr }));
+    assert.equal(
+      outcomes.filter((outcome) => outcome.code === 0).length,
+      1,
+      JSON.stringify(outcomeSummary),
+    );
+    assert.equal(
+      outcomes.filter((outcome) => outcome.code === 2 && outcome.json?.code === "INTENT_PAYLOAD_CONFLICT").length,
+      1,
+      JSON.stringify(outcomeSummary),
+    );
+    const conflictStore = new LocalBusinessStore(conflictPath);
+    try {
+      assert.deepEqual(conflictStore.counts(), { records: 1, receipts: 1 });
+    } finally {
+      conflictStore.close();
+    }
+    return { identical_callers: 2, committed_mutations: 1, conflicting_payloads_rejected: 1 };
+  });
+
   await runCheck("bounded_lock_wait", async () => {
     const databasePath = join(gateRoot, "locked.db");
     const seed = new LocalBusinessStore(databasePath);
