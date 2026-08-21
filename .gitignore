@@ -19,6 +19,12 @@ data/weekly/*
 !data/weekly/*.example.*
 data/inbox/*
 !data/inbox/.gitkeep
+data/*.db
+data/*.db-*
+data/imports/
+data/exports/
+data/storage-backend.json
+backups/
 inputs/*
 !inputs/.gitkeep
 data/weflow/

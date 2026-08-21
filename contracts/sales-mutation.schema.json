@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent4market.local/contracts/sales-mutation.schema.json",
+  "title": "Agent4Market schema v1 business commit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["intent_id", "task_id", "session_id", "logical_tool", "payload_sha256", "mutations"],
+  "properties": {
+    "intent_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "logical_tool": {"type": "string", "minLength": 1, "maxLength": 128},
+    "payload_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "mutations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation", "table", "record_id", "values"],
+        "properties": {
+          "operation": {"enum": ["insert", "update"]},
+          "table": {
+            "enum": [
+              "accounts", "contacts", "account_contacts", "opportunities", "sources", "activities",
+              "commitments", "risks", "signals", "actions", "resource_requests", "sales_assets",
+              "evidence_refs", "action_suggestions", "plays", "play_versions", "play_runs",
+              "task_links", "artifacts"
+            ]
+          },
+          "record_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "values": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"type": ["string", "integer", "null"]}
+          },
+          "expected_version": {"type": "integer", "minimum": 1}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"operation": {"const": "update"}}},
+            "then": {"required": ["expected_version"]},
+            "else": {"not": {"required": ["expected_version"]}}
+          }
+        ]
+      }
+    }
+  }
+}

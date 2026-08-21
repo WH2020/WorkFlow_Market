@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,10 @@ import {
   SQLITE_GATE_MINIMUM_NODE,
   gatePayloadSha256,
 } from "../extensions/local-business-store.ts";
+import {
+  SalesBusinessStore,
+  businessPayloadSha256,
+} from "../extensions/business-store.ts";
 
 const projectRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const workerPath = fileURLToPath(new URL("./sqlite-driver-gate-worker.mjs", import.meta.url));
@@ -172,6 +176,97 @@ try {
       assert.equal(configuration.busy_timeout, 5_000);
       assert.equal(configuration.integrity_check, "ok");
       return configuration;
+    } finally {
+      store.close();
+    }
+  });
+
+  await runCheck("business_schema_and_transaction", async () => {
+    const databasePath = join(gateRoot, "business-v1.db");
+    assertStoreError(() => new SalesBusinessStore(join(gateRoot, "implicit-create.db")), "STORE_MISSING");
+    const invalidSchema = join(gateRoot, "invalid-schema.sql");
+    const invalidDatabase = join(gateRoot, "invalid-schema.db");
+    writeFileSync(invalidSchema, "CREATE TABLE unsafe(value TEXT);\n", "utf8");
+    assertStoreError(
+      () => new SalesBusinessStore(invalidDatabase, { create_if_missing: true, schema_path: invalidSchema }),
+      "SCHEMA_HASH_MISMATCH",
+    );
+    assert.equal(existsSync(invalidDatabase), false, "a failed schema initialization must remove only its owned new database");
+    const store = new SalesBusinessStore(databasePath, { create_if_missing: true });
+    try {
+      const configuration = store.configuration();
+      assert.equal(configuration.schema_version, 1);
+      assert.equal(configuration.journal_mode.toLowerCase(), "wal");
+      assert.equal(configuration.synchronous, 2);
+      assert.equal(configuration.foreign_keys, 1);
+      const input = {
+        intent_id: "business-intent-insert",
+        task_id: "business-task",
+        session_id: "business-session",
+        logical_tool: "sales.write",
+        mutations: [
+          {
+            operation: "insert",
+            table: "accounts",
+            record_id: "business-account",
+            values: { name: "跨平台客户", normalized_name: "跨平台客户", region: "华东" },
+          },
+          {
+            operation: "insert",
+            table: "activities",
+            record_id: "business-activity",
+            values: {
+              account_id: "business-account",
+              occurred_at: "2026-08-21T00:00:00.000Z",
+              summary: "同一事务创建客户与互动",
+              evidence_status: "pending",
+            },
+          },
+        ],
+      };
+      const request = { ...input, payload_sha256: businessPayloadSha256(input) };
+      const first = store.commit(request);
+      for (let index = 0; index < 50; index += 1) assert.deepEqual(store.commit(request), first);
+      assert.equal(store.tableCount("accounts"), 1);
+      assert.equal(store.tableCount("activities"), 1);
+      assert.deepEqual(store.foreignKeyViolations(), []);
+
+      const rollbackInput = {
+        intent_id: "business-intent-rollback",
+        task_id: "business-task",
+        session_id: "business-session",
+        logical_tool: "sales.write",
+        mutations: [
+          {
+            operation: "update",
+            table: "accounts",
+            record_id: "business-account",
+            expected_version: 1,
+            values: { health: "healthy" },
+          },
+          {
+            operation: "insert",
+            table: "activities",
+            record_id: "orphan-activity",
+            values: {
+              account_id: "missing-account",
+              occurred_at: "2026-08-21T00:00:00.000Z",
+              summary: "必须整体回滚",
+              evidence_status: "pending",
+            },
+          },
+        ],
+      };
+      const rollbackRequest = { ...rollbackInput, payload_sha256: businessPayloadSha256(rollbackInput) };
+      assertStoreError(() => store.commit(rollbackRequest), "CONSTRAINT");
+      assert.equal(store.readAccount("business-account")?.version, 1);
+      assert.equal(store.readReceipt("business-intent-rollback"), undefined);
+      return {
+        configuration,
+        committed_mutations: first.mutations.length,
+        idempotent_retries: 50,
+        rollback_preserved_version: store.readAccount("business-account")?.version,
+      };
     } finally {
       store.close();
     }
@@ -414,7 +509,7 @@ try {
 } finally {
   const report = {
     schema_version: 1,
-    gate: "STORE-A0",
+    gate: "STORE-A0-A1",
     status: finalStatus,
     started_at: startedAt,
     finished_at: new Date().toISOString(),

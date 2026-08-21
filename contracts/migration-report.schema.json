@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent4market.local/contracts/migration-report.schema.json",
+  "title": "Agent4Market sales store migration report",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version", "store_schema_version", "mode", "batch_id", "source_fingerprint",
+    "source_files", "total_rows", "counts", "issues", "staging_eligible", "cutover_ready",
+    "entity_counts", "report_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "store_schema_version": {"const": 1},
+    "mode": {"enum": ["preflight", "staging"]},
+    "batch_id": {"type": "string", "pattern": "^migration-[a-f0-9]{20}$"},
+    "source_fingerprint": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source_files": {"type": "array", "minItems": 6},
+    "total_rows": {"type": "integer", "minimum": 0},
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["imported", "skipped_duplicate", "quarantined", "failed"],
+      "properties": {
+        "imported": {"type": "integer", "minimum": 0},
+        "skipped_duplicate": {"type": "integer", "minimum": 0},
+        "quarantined": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0}
+      }
+    },
+    "issues": {"type": "array"},
+    "staging_eligible": {"type": "boolean"},
+    "cutover_ready": {"type": "boolean"},
+    "entity_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "database_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "logical_state_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "report_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

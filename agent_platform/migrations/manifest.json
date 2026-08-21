@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "application_version": "0.13.6",
+  "migrations": [
+    {
+      "version": 1,
+      "name": "sales-core-v1",
+      "file": "001_sales_core.sql",
+      "sha256": "e0c695260d101928e0b7d4e0ddc4bde68a0553e880775712a7b43bb1d4d14cd4"
+    }
+  ]
+}

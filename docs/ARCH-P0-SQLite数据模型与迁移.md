@@ -1,6 +1,6 @@
 # Agent4Market 阶段 A：SQLite 数据模型与迁移设计
 
-- 状态：设计待评审；A0 驱动门禁已通过 Windows x64、macOS arm64、macOS x64 CI
+- 状态：schema v1 与 A1 迁移底座已实现并通过本地回归；A2 在线适配和真实数据迁移未开始
 - 适用范围：销售总监本地版
 - 关联需求：[客户经营核心 PRD](PRD-P0-客户经营核心.md)
 - 关联计划：[实施与验收计划](PLAN-P0-实施与验收.md)
