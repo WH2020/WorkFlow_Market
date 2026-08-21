@@ -10,4 +10,5 @@
 - 已完成 Python、TypeScript、工作台、文档结构与渲染回归，并补充操作说明和 clean-room 许可证边界。
 - 已完成 Windows 0.15.0 Release 构建，并以非破坏方式同步到 `E:\PersonalWorkSpace\Agent4Market`；保留原有业务数据、配置、输入、输出、备份和历史可执行文件。
 - 已完成安装目录自检与真实启动冒烟：销售总监单角色、政府合作、智能招投标、独立 SQLite、默认隐藏的嵌入式智能核心及项目私有 Node 24.19.0 均正常。
-- 待完成：提交推送，以及远端 Windows/macOS CI 结果确认；本机不宣称完成 macOS 真机产物验证。
+- 已提交并推送 `f0cf55ff96bf0f423b8806aaad959cbeb55a22a0`；GitHub Actions 运行 `32476316749` 完整通过 Windows、macOS、三架构 SQLite 门禁及桌面安装/测试。
+- 已由远端 macOS 构建机生成并上传通用版 DMG、应用压缩包、独立运行时压缩包和 SHA-256 清单；产物保留至 2026-09-04。本机未冒充 macOS 真机运行环境，macOS 证据来自该远端运行。

@@ -3,7 +3,7 @@
   "project_profile": "software-app",
   "active_profiles": ["software-app"],
   "active_expert_regions": ["EXP-SW-BID-LIFECYCLE"],
-  "phase": "verifying",
+  "phase": "done",
   "requirements_version": "REQ-v1",
   "modules_version": "MOD-v1",
   "traceability_version": "TR-v1",
