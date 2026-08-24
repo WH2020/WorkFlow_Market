@@ -187,6 +187,8 @@ type TaskMessage = {
   task_id: string;
   profile_id: string;
   mode: "supplement" | "redirect";
+  operation?: "supplement" | "redirect" | "insert_after" | "pause_after" | "cancel_step" | "replan";
+  step_id?: string;
   content: string;
   status: "queued" | "dispatching" | "delivered";
   created_at: string;
@@ -258,6 +260,7 @@ export function writeTaskProgressEvent(
 export function validateTaskMessage(value: unknown, expectedMessageId?: string): TaskMessage {
   if (!value || typeof value !== "object") throw new Error("任务消息必须为对象");
   const message = value as Partial<TaskMessage>;
+  const operation = message.operation ?? message.mode;
   if (
     message.schema_version !== "1.0" ||
     typeof message.message_id !== "string" ||
@@ -267,6 +270,13 @@ export function validateTaskMessage(value: unknown, expectedMessageId?: string):
     !/^[A-Za-z0-9_-]{1,128}$/u.test(message.task_id) ||
     !/^[A-Za-z0-9_-]{1,128}$/u.test(message.profile_id) ||
     !["supplement", "redirect"].includes(message.mode ?? "") ||
+    (message.operation !== undefined && ![
+      "supplement", "redirect", "insert_after", "pause_after", "cancel_step", "replan",
+    ].includes(message.operation)) ||
+    (operation === "supplement" ? message.mode !== "supplement" : message.mode !== "redirect") ||
+    (message.step_id !== undefined && !/^[A-Za-z0-9_-]{1,128}$/u.test(message.step_id)) ||
+    (["insert_after", "pause_after", "cancel_step"].includes(operation ?? "") && message.step_id === undefined) ||
+    (operation === "replan" && message.step_id !== undefined) ||
     !["queued", "dispatching", "delivered"].includes(message.status ?? "") ||
     typeof message.content !== "string" ||
     !message.content.trim() ||
@@ -1396,11 +1406,19 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           dispatch_started_at: new Date().toISOString(),
         };
         atomicRuntimeJson(path, message);
-        const directive = message.mode === "redirect"
-          ? "用户正在调整当前任务方向。完成当前工具调用后，先重新评估尚未执行的步骤，并按新方向继续；已冻结写入、已完成节点、权限边界和人工审批不得被绕过。"
-          : "用户补充了当前任务信息。完成当前工具调用后，将补充内容纳入尚未执行的分析和输出；已冻结写入如受影响，必须重新走审批。";
+        const operation = message.operation ?? message.mode;
+        const directives: Record<string, string> = {
+          supplement: "用户补充了当前任务信息。完成当前工具调用后，将补充内容纳入尚未执行的分析和输出；已冻结写入如受影响，必须重新走审批。",
+          redirect: "用户正在调整当前任务方向。完成当前工具调用后，先重新评估尚未执行的步骤，并按新方向继续；已冻结写入、已完成节点、权限边界和人工审批不得被绕过。",
+          insert_after: "用户要求在目标步骤后增加工作。完成当前工具调用后，将新增工作纳入剩余计划并向用户说明调整结果；不得改写已完成节点或绕过人工审批。",
+          pause_after: "用户要求在目标步骤完成后暂停。到达该安全边界后停止推进后续节点，向用户报告当前结果并等待新指令；暂停绝不能被视为审批。",
+          cancel_step: "用户申请取消目标步骤。先判断该步骤是否属于工作流必要节点；必要节点必须保留并说明原因，只有不破坏依赖、权限和审批边界时才能调整剩余做法。",
+          replan: "用户要求重新规划剩余步骤。保留已完成节点、已冻结写入的校验关系、权限边界和人工审批，只重排或细化尚未执行的工作并向用户说明。",
+        };
+        const directive = directives[operation] ?? directives.redirect!;
+        const target = message.step_id ? `\n目标步骤：${message.step_id}` : "";
         pi.sendUserMessage(
-          `[TASK_MESSAGE ${message.message_id}]\n${directive}\n任务：${message.task_id}\n用户消息：${message.content.trim()}\n[/TASK_MESSAGE]`,
+          `[TASK_MESSAGE ${message.message_id}]\n${directive}\n任务：${message.task_id}${target}\n用户消息：${message.content.trim()}\n[/TASK_MESSAGE]`,
           { deliverAs: "steer" },
         );
         atomicRuntimeJson(path, {

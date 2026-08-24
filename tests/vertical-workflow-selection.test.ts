@@ -887,7 +887,8 @@ test("task-bound workbench messages are delivered through Pi steering queue", as
     const messageId = "message-1234567890abcdef";
     const message = validateTaskMessage({
       schema_version: "1.0", message_id: messageId, task_id: task.task_id,
-      profile_id: "sales-director", mode: "redirect", content: "先检查预算风险",
+      profile_id: "sales-director", mode: "redirect", operation: "pause_after", step_id: "analyze",
+      content: "先检查预算风险，完成分析后暂停",
       status: "queued", created_at: new Date().toISOString(),
     }, messageId);
     writeFileSync(join(messageDirectory, `${messageId}.json`), JSON.stringify(message), "utf8");
@@ -897,7 +898,10 @@ test("task-bound workbench messages are delivered through Pi steering queue", as
     await new Promise((resolve) => setTimeout(resolve, 60));
     const delivered = JSON.parse(readFileSync(join(messageDirectory, `${messageId}.json`), "utf8")) as { status: string };
     assert.equal(delivered.status, "delivered");
-    assert.ok(runtime.deliveries.some((entry) => entry.deliverAs === "steer" && entry.content.includes("先检查预算风险")));
+    assert.ok(runtime.deliveries.some((entry) =>
+      entry.deliverAs === "steer" && entry.content.includes("先检查预算风险") &&
+      entry.content.includes("目标步骤：analyze") && entry.content.includes("安全边界后停止推进"),
+    ));
     await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
   } finally {
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
@@ -906,6 +910,19 @@ test("task-bound workbench messages are delivered through Pi steering queue", as
     else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("structured task-plan messages reject mode mismatches and unsafe step IDs", () => {
+  const base = {
+    schema_version: "1.0", message_id: "message-safe", task_id: "task-safe",
+    profile_id: "sales-director", mode: "redirect", operation: "replan",
+    content: "先调整剩余步骤", status: "queued", created_at: new Date().toISOString(),
+  };
+  assert.doesNotThrow(() => validateTaskMessage(base));
+  assert.throws(() => validateTaskMessage({ ...base, mode: "supplement" }), /字段无效/);
+  assert.throws(() => validateTaskMessage({ ...base, step_id: "../approval" }), /字段无效/);
+  assert.throws(() => validateTaskMessage({ ...base, operation: "pause_after" }), /字段无效/);
+  assert.throws(() => validateTaskMessage({ ...base, operation: "replan", step_id: "analyze" }), /字段无效/);
 });
 
 test("the progress tool writes a bounded user-visible event", async () => {

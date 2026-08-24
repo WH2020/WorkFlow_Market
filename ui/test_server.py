@@ -91,6 +91,11 @@ class ControlCentreTests(unittest.TestCase):
         workflow_ids = set(server.workflows())
         self.assertIn("market.government.proposal", workflow_ids)
         self.assertFalse(any(workflow_id.startswith("product.") for workflow_id in workflow_ids))
+        self.assertFalse(any(
+            node["display_name"] == "处理下一阶段"
+            for workflow in server.workflows().values()
+            for node in workflow["nodes"]
+        ), "销售总监工作流的每个步骤都必须提供中文名称")
         government_nodes = server.workflows()["market.government.proposal"]["nodes"]
         policy_search = next(node for node in government_nodes if node["id"] == "policy_search")
         self.assertEqual(policy_search["display_name"], "检索政策来源")
@@ -251,7 +256,15 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('addRestartAction(actions, task, "重新开始")', javascript)
         self.assertIn('addAction(actions, task, "resume", "继续任务")', javascript)
         self.assertIn("function renderTaskProgress", javascript)
+        self.assertIn("function renderExecutionPlan", javascript)
+        self.assertIn("function queueTaskPlanOperation", javascript)
+        self.assertIn('title.textContent = "任务执行步骤"', javascript)
+        self.assertIn('replan.textContent = "重新规划剩余步骤"', javascript)
+        self.assertIn('["cancel_step", "申请取消"]', javascript)
+        self.assertIn("task.execution_plan", javascript)
+        self.assertNotIn("rpiv-todo", javascript)
         self.assertIn("const taskProgressScroll = {}", javascript)
+        self.assertIn("const taskPlanScroll = {}", javascript)
         self.assertIn("const taskWriteIntentState = {}", javascript)
         self.assertIn("function captureTaskComposerFocus", javascript)
         self.assertIn("function restoreTaskComposerFocus", javascript)
@@ -272,6 +285,8 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn(".write-edit-overlay", styles)
         self.assertIn("function confirmAction", javascript)
         self.assertIn(".app-confirm-overlay", styles)
+        self.assertIn(".task-execution-plan", styles)
+        self.assertIn(".execution-step-list", styles)
         self.assertIn('approval_pending: "正在执行审批"', javascript)
         self.assertIn('task.status === "waiting_approval" && !task.approval_request', javascript)
         self.assertNotIn("window.confirm(", javascript)
@@ -587,6 +602,104 @@ class ControlCentreTests(unittest.TestCase):
         self.assertEqual(summary["current_node_display_name"], "分析客户进展")
         self.assertTrue(any(item["title"] == "你调整了任务方向" and item["status"] == "queued" for item in summary["progress"]))
         self.assertTrue(any(item.get("basis") == "客户记录尚未确认预算负责人。" for item in summary["progress"]))
+
+    def test_task_summary_builds_one_governed_execution_checklist_from_the_dag(self):
+        timestamp = datetime.now(timezone.utc).isoformat()
+        task = {
+            "schema_version": "1.0", "task_id": "task-plan", "profile_id": "sales-director",
+            "service_id": "sales-review", "workflow_id": "market.sales.pipeline-review",
+            "request": "复盘客户 A", "status": "running", "session_key": "session-plan", "version": 3,
+            "current_stage": 1, "current_node": "analyze", "waiting_node": None, "waiting_nodes": [],
+            "completed_nodes": ["load_accounts"], "artifacts": [], "created_at": timestamp,
+            "updated_at": timestamp,
+            "audit": [
+                {"at": timestamp, "action": "task_started", "actor": "user"},
+                {"at": timestamp, "action": "tool_completed", "actor": "adapter", "node_id": "load_accounts"},
+            ],
+        }
+        server.atomic_json(server.TASKS / "task-plan.json", task)
+        server.atomic_json(server.AGENT_LEASES / "4321.json", {
+            "schema_version": "1.0", "pid": 4321, "nonce": "c" * 36,
+            "profile_id": "sales-director", "session_key": "session-plan",
+            "task_id": "task-plan", "task_status": "running", "heartbeat_at": timestamp,
+        })
+
+        plan = server.task_summaries()[0]["execution_plan"]
+        self.assertEqual(plan["source"], "governed_dag")
+        self.assertEqual((plan["completed"], plan["total"]), (1, 5))
+        self.assertEqual(plan["current_step_title"], "分析客户进展")
+        self.assertEqual(plan["next_step_title"], "确认销售更新")
+        steps = {step["step_id"]: step for step in plan["steps"]}
+        self.assertEqual(steps["load_accounts"]["status"], "completed")
+        self.assertEqual(steps["analyze"]["status"], "in_progress")
+        self.assertEqual(steps["confirm"]["status"], "pending")
+        self.assertEqual(steps["confirm"]["blocked_by"], ["analyze"])
+        self.assertIn("分析客户进展", steps["confirm"]["blocked_reason"])
+
+    def test_execution_checklist_marks_a_live_step_that_has_not_reported_for_ten_minutes(self):
+        reference = datetime(2026, 8, 24, 10, 20, tzinfo=timezone.utc)
+        timestamp = (reference - timedelta(minutes=11)).isoformat()
+        task = {
+            "task_id": "task-stale", "workflow_id": "market.sales.pipeline-review",
+            "status": "running", "current_stage": 1, "current_node": "analyze",
+            "waiting_nodes": [], "completed_nodes": ["load_accounts"],
+            "created_at": timestamp, "updated_at": timestamp, "audit": [],
+        }
+        plan = server.task_execution_plan(
+            task, server.workflows()["market.sales.pipeline-review"], [], [], "running", reference,
+        )
+        current = next(step for step in plan["steps"] if step["step_id"] == "analyze")
+        self.assertTrue(plan["stalled"])
+        self.assertTrue(current["stalled"])
+        self.assertIn("10 分钟", current["blocked_reason"])
+
+    def test_step_adjustment_is_queued_without_mutating_the_governed_task(self):
+        timestamp = server.now()
+        task = {
+            "schema_version": "1.0", "task_id": "task-step-change", "profile_id": "sales-director",
+            "service_id": "sales-review", "workflow_id": "market.sales.pipeline-review",
+            "request": "复盘客户 A", "status": "running", "session_key": "session-a", "version": 2,
+            "current_stage": 1, "current_node": "analyze", "waiting_node": None, "waiting_nodes": [],
+            "completed_nodes": ["load_accounts"], "artifacts": [], "created_at": timestamp,
+            "updated_at": timestamp, "audit": [],
+        }
+        task_path = server.TASKS / "task-step-change.json"
+        server.atomic_json(task_path, task)
+        before = server.load_json(task_path)
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+
+        handler.create_task_message("task-step-change", {
+            "mode": "redirect", "operation": "pause_after", "step_id": "analyze",
+            "content": "完成风险判断后暂停，等我补充预算信息。",
+        })
+
+        self.assertEqual(replies[-1][0], HTTPStatus.ACCEPTED)
+        self.assertEqual(server.load_json(task_path), before, "步骤调整请求不得直接改写 DAG 任务状态")
+        message = server.load_json(next(server.TASK_MESSAGES.glob("message-*.json")))
+        self.assertEqual((message["operation"], message["step_id"]), ("pause_after", "analyze"))
+        plan = server.task_summaries()[0]["execution_plan"]
+        analyze = next(step for step in plan["steps"] if step["step_id"] == "analyze")
+        self.assertEqual(analyze["pending_request_count"], 1)
+
+    def test_artificial_approval_step_cannot_be_cancelled_through_plan_adjustment(self):
+        timestamp = server.now()
+        server.atomic_json(server.TASKS / "task-approval-step.json", {
+            "task_id": "task-approval-step", "profile_id": "sales-director",
+            "workflow_id": "market.sales.pipeline-review", "status": "waiting_approval",
+            "current_stage": 2, "current_node": "confirm", "waiting_node": "confirm",
+            "waiting_nodes": ["confirm"], "completed_nodes": ["load_accounts", "analyze"],
+            "created_at": timestamp, "updated_at": timestamp, "audit": [],
+        })
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        handler.send_json = lambda *_args: None
+        with self.assertRaisesRegex(ValueError, "人工确认步骤不能单独取消"):
+            handler.create_task_message("task-approval-step", {
+                "mode": "redirect", "operation": "cancel_step", "step_id": "confirm",
+                "content": "跳过确认。",
+            })
+        self.assertFalse(server.TASK_MESSAGES.exists())
 
     def test_terminal_task_rejects_new_messages(self):
         server.atomic_json(server.TASKS / "task-done.json", {

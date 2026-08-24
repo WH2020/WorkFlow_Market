@@ -27,6 +27,8 @@
   const guidedNotes = {};
   const taskMessageDrafts = {};
   const taskProgressScroll = {};
+  const taskPlanScroll = {};
+  const taskExecutionPlanExpansion = new Map();
   const taskWriteIntentState = {};
   const taskCardExpansion = new Map();
   const knowledgeCardExpansion = new Map();
@@ -82,6 +84,9 @@
     detail = "",
     inputValue = null,
     inputLabel = "",
+    inputMultiline = false,
+    inputMaxLength = 120,
+    inputPlaceholder = "",
   }) {
     return new Promise((resolve) => {
       activeConfirmDismiss?.(false, true);
@@ -123,7 +128,10 @@
         const label = document.createElement("label");
         label.className = "app-confirm-input";
         const caption = document.createElement("strong"); caption.textContent = inputLabel || "填写内容";
-        editor = document.createElement("input"); editor.value = String(inputValue); editor.maxLength = 120;
+        editor = document.createElement(inputMultiline ? "textarea" : "input");
+        editor.value = String(inputValue);
+        editor.maxLength = inputMaxLength;
+        editor.placeholder = inputPlaceholder;
         label.append(caption, editor); body.append(label);
       }
       if (detail) {
@@ -172,7 +180,7 @@
       overlay.addEventListener("keydown", (event) => {
         if (event.key === "Escape") { event.preventDefault(); dismiss(false); return; }
         if (event.key !== "Tab") return;
-        const focusable = [close, cancel, confirm];
+        const focusable = [close, ...(editor ? [editor] : []), cancel, confirm];
         const index = focusable.indexOf(document.activeElement);
         const next = event.shiftKey ? (index <= 0 ? focusable.length - 1 : index - 1) : (index + 1) % focusable.length;
         event.preventDefault();
@@ -1303,6 +1311,205 @@
     return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
   }
 
+  function stepUpdatedTime(value) {
+    const date = new Date(value || "");
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString("zh-CN", {
+      month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+  }
+
+  async function queueTaskPlanOperation(task, step, operation) {
+    const operationCopy = {
+      redirect: {
+        title: "调整这个步骤",
+        message: "请说明希望怎么调整。智能核心会重新评估尚未执行的工作，但不会改写已完成步骤或绕过人工审批。",
+        confirm: "排队调整",
+        placeholder: "例如：先对比三种合作模式，再给出推荐顺序和选择依据。",
+      },
+      insert_after: {
+        title: "在这个步骤后增加工作",
+        message: "请描述要增加的工作。智能核心会检查依赖关系，并把它纳入剩余计划。",
+        confirm: "排队追加",
+        placeholder: "例如：增加竞品对比，并列出信息缺口。",
+      },
+      pause_after: {
+        title: "设置暂停点",
+        message: "到达这个步骤的安全边界后暂停并等待你的新指令。暂停不会被视为批准。",
+        confirm: "排队暂停",
+        placeholder: "可补充暂停前必须交付的内容。",
+      },
+      cancel_step: {
+        title: "申请取消这个步骤",
+        message: "这不会立即删除工作流节点。智能核心会先判断它是否是必要步骤；必要步骤会保留并说明原因。",
+        confirm: "提交申请",
+        placeholder: "请说明取消原因和希望保留的结果。",
+      },
+      replan: {
+        title: "重新规划剩余步骤",
+        message: "请说明新的目标、优先级或限制。已完成步骤、已冻结内容、权限边界和人工审批保持不变。",
+        confirm: "排队重排",
+        placeholder: "例如：先给管理层结论，证据核验和附件整理随后完成。",
+      },
+    };
+    const copy = operationCopy[operation];
+    const target = step ? `\n目标步骤：${step.title}` : "";
+    const content = await confirmAction({
+      title: copy.title,
+      message: `${copy.message}${target}`,
+      confirmText: copy.confirm,
+      inputValue: "",
+      inputLabel: "调整说明",
+      inputMultiline: true,
+      inputMaxLength: 1200,
+      inputPlaceholder: copy.placeholder,
+      tone: operation === "cancel_step" ? "danger" : "primary",
+    });
+    if (content === null) return;
+    if (!content) { note("请先填写调整说明。", true); return; }
+    try {
+      const response = await api(`/api/tasks/${encodeURIComponent(task.task_id)}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: operation === "supplement" ? "supplement" : "redirect",
+          operation,
+          ...(step ? { step_id: step.step_id } : {}),
+          content,
+        }),
+      });
+      note(response.message);
+      await load();
+    } catch (error) { note(error.message, true); }
+  }
+
+  function renderExecutionPlan(section, task, historical, effectiveStatus) {
+    const plan = task.execution_plan;
+    const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+    if (!steps.length) return;
+    const details = document.createElement("details");
+    details.className = "task-execution-plan";
+    details.open = taskExecutionPlanExpansion.has(task.task_id)
+      ? taskExecutionPlanExpansion.get(task.task_id)
+      : true;
+    details.addEventListener("toggle", () => taskExecutionPlanExpansion.set(task.task_id, details.open));
+    const summary = document.createElement("summary");
+    const summaryCopy = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = "任务执行步骤";
+    const count = document.createElement("small");
+    count.textContent = `已完成 ${plan.completed || 0} / ${plan.total || steps.length}`;
+    summaryCopy.append(title, count);
+    const summaryStatus = document.createElement("span");
+    summaryStatus.className = `execution-plan-summary-status ${plan.stalled ? "stalled" : ""}`;
+    summaryStatus.textContent = plan.stalled ? "较长时间未更新" : (plan.current_step_title ? `当前：${plan.current_step_title}` : "步骤已收口");
+    summary.append(summaryCopy, summaryStatus);
+    details.append(summary);
+
+    const body = document.createElement("div");
+    body.className = "task-execution-plan-body";
+    const overview = document.createElement("div");
+    overview.className = "execution-plan-overview";
+    const track = document.createElement("div");
+    track.className = "execution-plan-track";
+    const fill = document.createElement("i");
+    fill.style.width = `${Math.max(0, Math.min(100, Number(plan.percent) || 0))}%`;
+    track.append(fill);
+    const next = document.createElement("p");
+    next.textContent = plan.next_step_title ? `下一步：${plan.next_step_title}` : "没有待处理的后续步骤。";
+    overview.append(track, next);
+    const canAdjust = !historical && !["interrupted", "resuming", "cancelling", "restarting"].includes(effectiveStatus);
+    if (canAdjust) {
+      const replan = document.createElement("button");
+      replan.type = "button";
+      replan.className = "execution-plan-replan";
+      replan.textContent = "重新规划剩余步骤";
+      replan.onclick = (event) => { event.stopPropagation(); queueTaskPlanOperation(task, null, "replan"); };
+      overview.append(replan);
+    }
+    body.append(overview);
+
+    const list = document.createElement("ol");
+    list.className = "execution-step-list";
+    const savedTop = Number(taskPlanScroll[task.task_id]) || 0;
+    list.addEventListener("scroll", () => { taskPlanScroll[task.task_id] = list.scrollTop; }, { passive: true });
+    const statusLabels = {
+      pending: "待处理", in_progress: "正在处理", waiting_approval: "等待确认",
+      completed: "已完成", interrupted: "已中断", skipped: "未执行", failed: "未完成",
+    };
+    steps.forEach((step) => {
+      const item = document.createElement("li");
+      item.className = `execution-step ${step.status || "pending"} ${step.stalled ? "stalled" : ""}`;
+      item.dataset.stepId = step.step_id;
+      const marker = document.createElement("span");
+      marker.className = "execution-step-marker";
+      marker.textContent = step.status === "completed" ? "✓" : String(step.position || "•");
+      const copy = document.createElement("div");
+      copy.className = "execution-step-copy";
+      const heading = document.createElement("div");
+      const name = document.createElement("strong");
+      name.textContent = step.title || "处理步骤";
+      const status = document.createElement("span");
+      status.className = `execution-step-status ${step.status || "pending"}`;
+      status.textContent = step.stalled ? "较长时间未更新" : (statusLabels[step.status] || "待处理");
+      heading.append(name, status);
+      const meta = document.createElement("small");
+      const dependency = Array.isArray(step.dependency_titles) && step.dependency_titles.length
+        ? ` · 前置：${step.dependency_titles.join("、")}`
+        : "";
+      meta.textContent = `${step.type_display_name || "处理阶段"} · 更新于 ${stepUpdatedTime(step.updated_at)}${dependency}`;
+      copy.append(heading, meta);
+      if (step.blocked_reason) {
+        const blocked = document.createElement("p");
+        blocked.className = "execution-step-reason";
+        blocked.textContent = step.blocked_reason;
+        copy.append(blocked);
+      }
+      if (step.pending_request_count) {
+        const queued = document.createElement("small");
+        queued.className = "execution-step-request";
+        queued.textContent = `${step.pending_request_count} 项调整等待处理`;
+        copy.append(queued);
+      }
+      item.append(marker, copy);
+
+      const stepCanAdjust = canAdjust && !["skipped", "failed"].includes(step.status);
+      if (stepCanAdjust) {
+        const menu = document.createElement("details");
+        menu.className = "execution-step-menu";
+        const menuSummary = document.createElement("summary");
+        menuSummary.textContent = "调整";
+        const menuBody = document.createElement("div");
+        const operations = [];
+        if (!["completed"].includes(step.status)) operations.push(["redirect", "调整此步骤"]);
+        operations.push(["insert_after", "在后面增加"]);
+        if (["pending", "in_progress"].includes(step.status)) operations.push(["pause_after", "完成后暂停"]);
+        if (["pending", "in_progress"].includes(step.status) && step.type !== "approval") operations.push(["cancel_step", "申请取消"]);
+        operations.forEach(([operation, label]) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.dataset.operation = operation;
+          button.textContent = label;
+          button.onclick = (event) => {
+            event.stopPropagation();
+            menu.open = false;
+            queueTaskPlanOperation(task, step, operation);
+          };
+          menuBody.append(button);
+        });
+        menu.append(menuSummary, menuBody);
+        item.append(menu);
+      }
+      list.append(item);
+    });
+    body.append(list);
+    details.append(body);
+    section.append(details);
+    queueMicrotask(() => {
+      list.scrollTop = Math.min(savedTop, Math.max(0, list.scrollHeight - list.clientHeight));
+    });
+  }
+
   function renderTaskProgress(article, task, historical) {
     const section = document.createElement("section");
     section.className = "task-progress-panel";
@@ -1319,6 +1526,8 @@
     queue.textContent = task.queued_message_count ? `${task.queued_message_count} 条消息排队中` : "消息队列空闲";
     header.append(heading, queue);
     section.append(header);
+    const effectiveStatus = displayStatus(task);
+    renderExecutionPlan(section, task, historical, effectiveStatus);
 
     const timeline = document.createElement("div");
     timeline.className = "task-progress-timeline";
@@ -1376,7 +1585,6 @@
     });
     section.append(timeline);
 
-    const effectiveStatus = displayStatus(task);
     if (!historical && !["interrupted", "resuming", "cancelling", "restarting"].includes(effectiveStatus)) {
       const composer = document.createElement("div");
       composer.className = "task-message-composer";

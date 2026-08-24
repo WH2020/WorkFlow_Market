@@ -122,7 +122,11 @@ ALLOWED_UPLOAD_SUFFIXES = {
 }
 AGENT_LEASE_FRESH_SECONDS = 15
 APPROVAL_REQUEST_STALE_SECONDS = 15
+TASK_STEP_STALE_SECONDS = 10 * 60
 TASK_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+TASK_MESSAGE_OPERATIONS = {
+    "supplement", "redirect", "insert_after", "pause_after", "cancel_step", "replan",
+}
 PUBLIC_SEARCH_SERVICES = {"industry-research", "government-proposal", "presentation-studio"}
 BRAVE_DASHBOARD_URL = "https://api-dashboard.search.brave.com/app/keys"
 NODE_DISPLAY_NAMES = {
@@ -160,6 +164,9 @@ NODE_DISPLAY_NAMES = {
     "draft_bid_sections": "起草标书章节", "run_compliance_checks": "执行合规检查",
     "validate_bid_document": "校验正式标书", "approve_bid_document": "确认生成正式标书",
     "render_bid_document": "生成正式标书", "record_bid_outcome": "记录投标结果与复盘",
+    "analyze_opportunities": "分析投标机会", "validate_opportunities": "核验投标机会",
+    "prepare_bid_document": "组织正式标书", "freeze_bid_document": "冻结正式标书内容",
+    "validate_bid_write": "校验投标数据更新",
 }
 NODE_TYPE_DISPLAY_NAMES = {
     "agent": "智能分析", "tool": "资料处理", "validator": "规则校验", "approval": "人工确认",
@@ -570,12 +577,19 @@ def task_message_records() -> dict[str, list[dict[str, Any]]]:
             task_id = message.get("task_id")
             profile_id = message.get("profile_id")
             content = message.get("content")
+            operation = message.get("operation", message.get("mode"))
+            step_id = message.get("step_id")
             if (
                 message.get("schema_version") != "1.0" or message_id != path.stem or
                 not isinstance(message_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", message_id) is None or
                 not isinstance(task_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id) is None or
                 not isinstance(profile_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", profile_id) is None or
                 message.get("mode") not in {"supplement", "redirect"} or
+                operation not in TASK_MESSAGE_OPERATIONS or
+                ((operation == "supplement") != (message.get("mode") == "supplement")) or
+                (step_id is not None and (
+                    not isinstance(step_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", step_id) is None
+                )) or
                 message.get("status") not in {"queued", "dispatching", "delivered"} or
                 not isinstance(content, str) or not content.strip() or len(content) > 1200 or
                 not isinstance(message.get("created_at"), str)
@@ -626,6 +640,220 @@ def readable_node(node_id: Any) -> str:
     return NODE_DISPLAY_NAMES.get(value, "处理下一阶段" if value else "准备下一步")
 
 
+def _workflow_stage_indexes(nodes: list[dict[str, Any]]) -> dict[str, int]:
+    """Mirror the governed runtime's deterministic DAG stage planning."""
+    by_id = {
+        str(node.get("id")): node for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    if len(by_id) != len(nodes):
+        return {}
+    remaining = set(by_id)
+    completed: set[str] = set()
+    result: dict[str, int] = {}
+    stage = 0
+    while remaining:
+        ready = sorted(
+            node_id for node_id in remaining
+            if isinstance(by_id[node_id].get("depends_on"), list)
+            and all(dependency in completed for dependency in by_id[node_id]["depends_on"])
+        )
+        if not ready:
+            return {}
+        for node_id in ready:
+            result[node_id] = stage
+            remaining.remove(node_id)
+            completed.add(node_id)
+        stage += 1
+    return result
+
+
+def _latest_iso(values: list[Any], fallback: str) -> str:
+    candidates: list[tuple[datetime, str]] = []
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                continue
+            candidates.append((parsed.astimezone(timezone.utc), value))
+        except ValueError:
+            continue
+    return max(candidates, key=lambda item: item[0])[1] if candidates else fallback
+
+
+def _iso_age_seconds(value: Any, reference: datetime | None = None) -> float | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return None
+        current = (reference or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        return (current - parsed.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def task_execution_plan(
+    task: dict[str, Any], workflow: dict[str, Any] | None,
+    events: list[dict[str, Any]], messages: list[dict[str, Any]], display_status: str,
+    reference: datetime | None = None,
+) -> dict[str, Any]:
+    """Build one user-facing checklist from the persisted governed DAG state."""
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list):
+        nodes = []
+    nodes = [node for node in nodes if isinstance(node, dict) and isinstance(node.get("id"), str)]
+    stage_by_id = _workflow_stage_indexes(nodes)
+    by_id = {str(node["id"]): node for node in nodes}
+    visible_ids = {
+        node_id for node_id, node in by_id.items()
+        if node.get("type") not in {"parallel", "join"}
+    }
+
+    def visible_dependencies(node_id: str) -> list[str]:
+        result: list[str] = []
+        visiting: set[str] = set()
+
+        def visit(candidate_id: str) -> None:
+            if candidate_id in visiting:
+                return
+            visiting.add(candidate_id)
+            candidate = by_id.get(candidate_id)
+            if candidate is None:
+                return
+            if candidate_id in visible_ids:
+                if candidate_id not in result:
+                    result.append(candidate_id)
+                return
+            for dependency in candidate.get("depends_on") if isinstance(candidate.get("depends_on"), list) else []:
+                if isinstance(dependency, str):
+                    visit(dependency)
+
+        for dependency in by_id.get(node_id, {}).get("depends_on", []):
+            if isinstance(dependency, str):
+                visit(dependency)
+        return result
+
+    completed_nodes = {
+        node_id for node_id in (task.get("completed_nodes") if isinstance(task.get("completed_nodes"), list) else [])
+        if isinstance(node_id, str)
+    }
+    current_stage = task.get("current_stage") if isinstance(task.get("current_stage"), int) else None
+    waiting_nodes = {
+        node_id for node_id in (task.get("waiting_nodes") if isinstance(task.get("waiting_nodes"), list) else [])
+        if isinstance(node_id, str)
+    }
+    if isinstance(task.get("waiting_node"), str):
+        waiting_nodes.add(task["waiting_node"])
+    current_node = task.get("current_node") if isinstance(task.get("current_node"), str) else None
+    terminal_status = str(task.get("status") or "")
+    fallback_time = str(task.get("created_at") or task.get("updated_at") or now())
+    task_updated_at = str(task.get("updated_at") or fallback_time)
+
+    latest_node_times: dict[str, list[Any]] = {}
+    audits = task.get("audit") if isinstance(task.get("audit"), list) else []
+    for audit in audits:
+        if isinstance(audit, dict) and isinstance(audit.get("node_id"), str):
+            latest_node_times.setdefault(audit["node_id"], []).append(audit.get("at"))
+    for event in events:
+        if isinstance(event, dict) and isinstance(event.get("node_id"), str):
+            latest_node_times.setdefault(event["node_id"], []).append(event.get("created_at"))
+    pending_request_counts: dict[str, int] = {}
+    for message in messages:
+        if message.get("status") not in {"queued", "dispatching"} or not isinstance(message.get("step_id"), str):
+            continue
+        pending_request_counts[message["step_id"]] = pending_request_counts.get(message["step_id"], 0) + 1
+        latest_node_times.setdefault(message["step_id"], []).append(message.get("created_at"))
+
+    failed_node: str | None = None
+    if terminal_status == "failed":
+        failed_candidates = [
+            str(audit.get("node_id")) for audit in reversed(audits)
+            if isinstance(audit, dict) and isinstance(audit.get("node_id"), str)
+            and audit.get("node_id") not in completed_nodes
+        ]
+        failed_node = failed_candidates[0] if failed_candidates else current_node
+
+    ordered_nodes = sorted(
+        (node for node in nodes if str(node["id"]) in visible_ids),
+        key=lambda node: (stage_by_id.get(str(node["id"]), 1_000_000), nodes.index(node)),
+    )
+    steps: list[dict[str, Any]] = []
+    for position, node in enumerate(ordered_nodes, start=1):
+        node_id = str(node["id"])
+        node_type = str(node.get("type") or "")
+        stage = stage_by_id.get(node_id)
+        if terminal_status == "completed" or node_id in completed_nodes:
+            status = "completed"
+        elif terminal_status in {"cancelled", "rejected"}:
+            status = "skipped"
+        elif terminal_status == "failed":
+            status = "failed" if node_id == failed_node else "skipped"
+        elif node_id in waiting_nodes or (current_stage == stage and node_type == "approval"):
+            status = "waiting_approval"
+        elif node_id == current_node or (current_stage is not None and current_stage == stage):
+            status = "interrupted" if display_status == "interrupted" else "in_progress"
+        else:
+            status = "pending"
+
+        dependencies = visible_dependencies(node_id)
+        blocked_by = [dependency for dependency in dependencies if dependency not in completed_nodes]
+        node_times = latest_node_times.get(node_id, [])
+        if status in {"in_progress", "interrupted", "waiting_approval"}:
+            node_times.append(task_updated_at)
+        updated_at = _latest_iso(node_times, fallback_time)
+        age = _iso_age_seconds(updated_at, reference)
+        stalled = bool(status == "in_progress" and display_status == "running" and age is not None and age > TASK_STEP_STALE_SECONDS)
+        if stalled:
+            blocked_reason = "超过 10 分钟没有收到新的阶段进度，可先调整方向或检查智能核心状态。"
+        elif status == "waiting_approval":
+            blocked_reason = "等待你确认；步骤调整不能代替批准或驳回。"
+        elif status == "interrupted":
+            blocked_reason = "智能核心已中断，请先继续任务或重新开始。"
+        elif status == "pending" and blocked_by:
+            blocked_reason = "需先完成：" + "、".join(readable_node(dependency) for dependency in blocked_by)
+        elif status == "skipped":
+            blocked_reason = "任务已经结束，此步骤未执行。"
+        elif status == "failed":
+            blocked_reason = "此步骤未完成，请查看处理过程中的错误信息。"
+        else:
+            blocked_reason = ""
+        steps.append({
+            "step_id": node_id,
+            "position": position,
+            "stage": stage,
+            "title": readable_node(node_id),
+            "type": node_type,
+            "type_display_name": NODE_TYPE_DISPLAY_NAMES.get(node_type, "处理阶段"),
+            "status": status,
+            "depends_on": dependencies,
+            "dependency_titles": [readable_node(dependency) for dependency in dependencies],
+            "blocked_by": blocked_by,
+            "blocked_reason": blocked_reason,
+            "updated_at": updated_at,
+            "stalled": stalled,
+            "pending_request_count": pending_request_counts.get(node_id, 0),
+        })
+
+    completed_count = sum(step["status"] == "completed" for step in steps)
+    active = next((step for step in steps if step["status"] in {"in_progress", "waiting_approval", "interrupted", "failed"}), None)
+    next_step = next((step for step in steps if step["status"] == "pending"), None)
+    return {
+        "schema_version": "1.0",
+        "source": "governed_dag",
+        "total": len(steps),
+        "completed": completed_count,
+        "percent": round(completed_count * 100 / len(steps)) if steps else 0,
+        "current_step_id": active.get("step_id") if active else None,
+        "current_step_title": active.get("title") if active else None,
+        "next_step_id": next_step.get("step_id") if next_step else None,
+        "next_step_title": next_step.get("title") if next_step else None,
+        "stalled": any(step["stalled"] for step in steps),
+        "steps": steps,
+    }
+
+
 def task_progress_timeline(
     task: dict[str, Any], events: list[dict[str, Any]], messages: list[dict[str, Any]], display_status: str
 ) -> list[dict[str, Any]]:
@@ -666,10 +894,21 @@ def task_progress_timeline(
         if message.get("profile_id") != task.get("profile_id"):
             continue
         message_status = str(message.get("status"))
+        operation = str(message.get("operation") or message.get("mode") or "supplement")
+        message_titles = {
+            "supplement": "你补充了信息",
+            "redirect": "你调整了任务方向",
+            "insert_after": "你要求增加后续工作",
+            "pause_after": "你安排了暂停点",
+            "cancel_step": "你申请取消一个步骤",
+            "replan": "你要求重新规划剩余步骤",
+        }
+        step_title = readable_node(message.get("step_id")) if message.get("step_id") else ""
         timeline.append({
             "event_id": message["message_id"], "at": message["created_at"], "kind": "user",
-            "title": "你调整了任务方向" if message.get("mode") == "redirect" else "你补充了信息",
+            "title": message_titles.get(operation, "你调整了任务"),
             "summary": str(message.get("content") or "")[:1200],
+            "basis": f"目标步骤：{step_title}" if step_title else "",
             "status": "queued" if message_status in {"queued", "dispatching"} else "done",
         })
     if display_status not in {"completed", "cancelled", "rejected", "failed", "superseded"}:
@@ -1894,6 +2133,7 @@ def task_summaries() -> list[dict[str, Any]]:
     leases = live_agent_task_leases()
     messages_by_task = task_message_records()
     events_by_task = task_progress_records()
+    workflow_catalog = workflows()
     candidates = list(TASKS.glob("*.json"))[:500]
     for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True):
         try:
@@ -1915,8 +2155,13 @@ def task_summaries() -> list[dict[str, Any]]:
             summary["waiting_node_display_name"] = readable_node(task.get("waiting_node")) if task.get("waiting_node") else None
             task_id = str(task.get("task_id") or "")
             task_messages = messages_by_task.get(task_id, [])
+            task_events = events_by_task.get(task_id, [])
+            summary["execution_plan"] = task_execution_plan(
+                task, workflow_catalog.get(str(task.get("workflow_id") or "")),
+                task_events, task_messages, summary["display_status"],
+            )
             summary["progress"] = task_progress_timeline(
-                task, events_by_task.get(task_id, []), task_messages, summary["display_status"]
+                task, task_events, task_messages, summary["display_status"]
             )
             summary["queued_message_count"] = sum(
                 message.get("status") in {"queued", "dispatching"} for message in task_messages
@@ -2873,12 +3118,22 @@ class ControlHandler(SimpleHTTPRequestHandler):
 
     def create_task_message(self, task_id: str, payload: dict[str, Any]) -> None:
         task_id = safe_id(task_id)
-        mode = str(payload.get("mode", ""))
+        operation = str(payload.get("operation") or payload.get("mode") or "")
+        if operation not in TASK_MESSAGE_OPERATIONS:
+            raise ValueError("任务调整类型无效")
+        expected_mode = "supplement" if operation == "supplement" else "redirect"
+        mode = str(payload.get("mode") or expected_mode)
         content = str(payload.get("content", "")).strip()
-        if mode not in {"supplement", "redirect"}:
+        if mode not in {"supplement", "redirect"} or mode != expected_mode:
             raise ValueError("请选择补充信息或调整方向")
         if not content or len(content) > 1200:
             raise ValueError("任务消息必须为 1–1200 字")
+        raw_step_id = payload.get("step_id")
+        step_id = safe_id(raw_step_id) if isinstance(raw_step_id, str) and raw_step_id else None
+        if operation in {"insert_after", "pause_after", "cancel_step"} and step_id is None:
+            raise ValueError("请选择要调整的执行步骤")
+        if operation == "replan" and step_id is not None:
+            raise ValueError("重新规划应面向全部剩余步骤")
         task_path = TASKS / f"{task_id}.json"
         if task_path.is_symlink() or not task_path.is_file():
             self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在"})
@@ -2893,6 +3148,26 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if task.get("status") in {"completed", "rejected", "cancelled", "failed"}:
             self.send_json(HTTPStatus.CONFLICT, {"error": "任务已经结束；请使用“再次创建”发起新任务"})
             return
+        workflow = workflows().get(str(task.get("workflow_id") or ""))
+        workflow_nodes = workflow.get("nodes") if isinstance(workflow, dict) else []
+        target_node = next(
+            (node for node in workflow_nodes if isinstance(node, dict) and node.get("id") == step_id),
+            None,
+        ) if step_id else None
+        if step_id and (target_node is None or target_node.get("type") in {"parallel", "join"}):
+            raise ValueError("目标步骤不存在或不是可调整的业务步骤")
+        if operation == "cancel_step" and target_node and target_node.get("type") == "approval":
+            raise ValueError("人工确认步骤不能单独取消；请批准、驳回或结束整个任务")
+        if target_node is not None:
+            current_plan = task_execution_plan(task, workflow, [], [], str(task.get("status") or ""))
+            target_step = next(
+                (step for step in current_plan["steps"] if step.get("step_id") == step_id), None,
+            )
+            if target_step is None or (
+                target_step.get("status") in {"completed", "skipped", "failed"}
+                and operation != "insert_after"
+            ):
+                raise ValueError("该步骤已经结束，不能再执行这项调整")
         existing = task_message_records().get(task_id, [])
         if len(existing) >= 100:
             self.send_json(HTTPStatus.CONFLICT, {"error": "当前任务消息已达到 100 条上限，请完成后新建任务"})
@@ -2903,15 +3178,24 @@ class ControlHandler(SimpleHTTPRequestHandler):
         record = {
             "schema_version": "1.0", "message_id": message_id, "task_id": task_id,
             "profile_id": safe_id(str(task.get("profile_id", ""))), "mode": mode,
+            "operation": operation, **({"step_id": step_id} if step_id else {}),
             "content": content, "status": "queued", "created_at": now(),
         }
         target = TASK_MESSAGES / f"{message_id}.json"
         if target.exists() or target.is_symlink():
             raise RuntimeError("任务消息 ID 冲突，请重试")
         atomic_json(target, record)
+        response_messages = {
+            "supplement": "补充信息已排队，将在下一处理步骤前加入任务。",
+            "redirect": "步骤调整已排队，智能核心会先核对流程边界再执行。",
+            "insert_after": "追加工作已排队，智能核心会在目标步骤后重新规划剩余工作。",
+            "pause_after": "暂停请求已排队；到达目标步骤后会在安全边界停下，不会自动批准后续操作。",
+            "cancel_step": "取消步骤申请已排队；若该步骤属于必要流程，智能核心会保留并说明原因。",
+            "replan": "重新规划请求已排队；已完成步骤、权限边界和人工审批不会被改写。",
+        }
         self.send_json(HTTPStatus.ACCEPTED, {
             **record,
-            "message": "方向调整已排队，将在当前工具调用结束后优先生效。" if mode == "redirect" else "补充信息已排队，将在下一处理步骤前加入任务。",
+            "message": response_messages[operation],
         })
 
     def delete_task(self, task_id: str, payload: dict[str, Any]) -> None:

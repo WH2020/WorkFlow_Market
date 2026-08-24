@@ -10,6 +10,21 @@ from agent_platform.environment import MIN_NODE, discover_ppt_runtime, launch_pi
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_project_has_no_reqguard_gate_or_external_rpiv_todo_runtime(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse((root / "docs" / "reqguard").exists())
+        package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        serialized_package = json.dumps(package, ensure_ascii=False).lower()
+        self.assertNotIn("rpiv-todo", serialized_package)
+        self.assertNotIn("reqguard", serialized_package)
+        for relative in (
+            "README.md", "docs/PI使用说明.md", "ui/server.py", "ui/app.js",
+            "pi/extensions/vertical-workflow.ts",
+        ):
+            source = (root / relative).read_text(encoding="utf-8").lower()
+            self.assertNotIn("reqguard", source, relative)
+            self.assertNotIn("requirements-guard", source, relative)
+
     def test_product_runtime_is_pinned_to_validated_node_24_line(self) -> None:
         root = Path(__file__).resolve().parents[1]
         package = json.loads((root / "package.json").read_text(encoding="utf-8"))
