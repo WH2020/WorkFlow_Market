@@ -2448,7 +2448,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
   pi.registerTool({
     name: "director_weekly_snapshot",
     label: "读取本周事实快照",
-    description: "按明确周期只读聚合任务审计、销售台账、outputs 元数据和知识库新增来源；每项保留来源版本与 SHA-256。",
+    description: "按明确周期只读聚合任务审计、销售台账、outputs 元数据和资料库新增来源；每项保留来源版本与 SHA-256。",
     parameters: Type.Object({
       period: Type.Object({
         start: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
@@ -2920,8 +2920,8 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
 
   pi.registerTool({
     name: "director_knowledge_search",
-    label: "检索本地知识库",
-    description: "检索当前选定的本地知识存储，返回来源记录、存储绑定与记录版本，不读取个人聊天。",
+    label: "检索本地资料库",
+    description: "检索当前选定的本地资料存储，返回来源记录、存储绑定与记录版本，不读取个人聊天。",
     parameters: Type.Object({
       queries: Type.Array(Type.String({ minLength: 1, maxLength: 400, description: "在所有字段中进行不区分大小写的包含检索" }), { minItems: 1, maxItems: 10, uniqueItems: true }),
       filters: filtersSchema,
@@ -2968,7 +2968,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
         searches,
       };
       if (result.searches.reduce((total, search) => total + search.returned, 0) > 200) {
-        throw new Error("本次知识库检索总返回行数超过 200，请缩小范围或 limit");
+        throw new Error("本次资料库检索总返回行数超过 200，请缩小范围或 limit");
       }
       const loaded = loadEvidence(context);
       for (const rawRow of result.searches.flatMap((search) => search.rows)) {

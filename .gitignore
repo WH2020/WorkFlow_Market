@@ -17,6 +17,10 @@ data/sales/*
 !data/sales/*.example.*
 data/weekly/*
 !data/weekly/*.example.*
+data/library/*
+!data/library/*.example.*
+data/bids/*
+!data/bids/*.example.*
 data/inbox/*
 !data/inbox/.gitkeep
 data/*.db

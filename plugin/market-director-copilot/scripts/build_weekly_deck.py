@@ -130,7 +130,7 @@ def build(input_path: Path, output_path: Path, template_id: str = "ceo-weekly") 
     add_panel(slide, 9.0, 1.7, 3.6, 4.95, theme.pale)
     add_text(slide, "复盘机制", 9.3, 2.1, 2.7, 0.35, size=15, color=theme.ink, bold=True)
     add_lines(slide, ["周一：确认优先级", "周三：检查承诺", "周五：沉淀证据"], 9.3, 2.8, 2.85, 2.5, size=12, color=theme.ink, bullet_color=theme.secondary)
-    add_footer(slide, "来源：周报输入、知识库、客户台账和已确认沟通记录", theme)
+    add_footer(slide, "来源：周报输入、资料库、客户台账和已确认沟通记录", theme)
 
     prs.core_properties.title = f"市场工作周报 - {text(payload.get('reporting_period'))}"
     prs.core_properties.subject = "CEO 市场周报"

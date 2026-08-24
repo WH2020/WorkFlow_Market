@@ -17,11 +17,12 @@
   let noticeTimer = null;
   let activeConfirmDismiss = null;
   let schedulePanelInitialized = false;
-  let knowledgeEntries = [];
-  let knowledgeVersion = "";
-  let knowledgeLoadError = "";
-  let knowledgeTruncated = false;
-  let knowledgeRenderedKey = "";
+  const libraryState = {
+    entries: [], trash: [], stats: {}, version: "", expectedRevision: "", error: "", warning: "",
+    selectedId: "", category: "", query: "", status: "", projectId: "", accountId: "",
+    renderedKey: "", previewKey: "", loading: false, versionTargetId: "", editingId: "",
+    specialFilter: "", accounts: [], bids: [],
+  };
   let reimbursementMailMessages = [];
   const guidedDrafts = {};
   const guidedNotes = {};
@@ -31,7 +32,6 @@
   const taskExecutionPlanExpansion = new Map();
   const taskWriteIntentState = {};
   const taskCardExpansion = new Map();
-  const knowledgeCardExpansion = new Map();
   const reimbursementBatchExpansion = new Map();
   const customerState = {
     filters: { query: "", owner: "", region: "", industry: "", stage: "", health: "", updated: "" },
@@ -193,7 +193,7 @@
 
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
-    bids: "智能招投标", knowledge: "知识库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
+    bids: "智能招投标", knowledge: "资料库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
     schedules: "每日定时任务", search: "自定义操作", tools: "工具栏", settings: "设置",
   };
   if (viewTitles[window.location.hash.slice(1)]) currentView = window.location.hash.slice(1);
@@ -206,7 +206,7 @@
     ["TASK CENTRE", "任务中心"],
     ["CUSTOMERS & SALES", "客户与销售"],
     ["CUSTOMER OPERATIONS", "客户经营"],
-    ["KNOWLEDGE BASE", "知识库"],
+    ["KNOWLEDGE BASE", "资料库"],
     ["WEEKLY REPORT", "每周汇报"],
     ["OUTPUT CENTRE", "输出中心"],
     ["PROJECT SPACE", "项目空间"],
@@ -269,7 +269,7 @@
     },
     "industry-research": {
       title: "客户与行业研究",
-      intro: "告诉助手研究对象和用途，它会自动检索公开资料、核验证据并联系当前知识库形成结论。",
+      intro: "告诉助手研究对象和用途，它会自动检索公开资料、核验证据并联系当前资料库形成结论。",
       instruction: "先检索和核验来源，再结合销售场景形成结论、机会、风险和建议动作；不确定信息明确标注待验证。",
       fields: [
         { id: "topic", label: "研究谁或什么方向？", type: "text", required: true, placeholder: "例如：某客户所在行业、脑机接口、具身智能或数据采集" },
@@ -288,11 +288,11 @@
       instruction: "只读取指定的受控目录电子文档；保留页码与文件指纹，提取失败时停止，不把摘要当作已证实事实。",
       fields: [
         { id: "path", label: "电子文档相对路径", type: "text", required: true, placeholder: "例如：inputs/customer-report.pdf" },
-        { id: "goal", label: "入库后主要怎么用？", type: "select", default: "提取可引用证据并写入知识库", options: ["提取可引用证据并写入知识库", "分析客户材料并提炼销售机会", "提取政策要点和政府合作依据", "形成文档摘要与待验证问题"] },
+        { id: "goal", label: "入库后主要怎么用？", type: "select", default: "提取可引用证据并写入资料库", options: ["提取可引用证据并写入资料库", "分析客户材料并提炼销售机会", "提取政策要点和政府合作依据", "形成文档摘要与待验证问题"] },
         { id: "focus", label: "重点关注（可选）", type: "text", placeholder: "例如：客户业务、预算、试点条件、政策支持或关键数据" },
       ],
       presets: [
-        { label: "证据入库", values: { goal: "提取可引用证据并写入知识库" } },
+        { label: "证据入库", values: { goal: "提取可引用证据并写入资料库" } },
         { label: "分析客户材料", values: { goal: "分析客户材料并提炼销售机会", focus: "客户需求、关键人、预算、时间表与下一步动作" } },
         { label: "提取政策依据", values: { goal: "提取政策要点和政府合作依据", focus: "支持方向、申报条件、主管部门与有效期" } },
       ],
@@ -319,7 +319,7 @@
       fields: [
         { id: "document", label: "要制作什么文件？", type: "select", default: "客户销售方案", options: ["客户销售方案", "内部资源协调单", "会议纪要与行动清单", "客户沟通邮件或函件", "项目阶段汇报"] },
         { id: "audience", label: "给谁使用或阅读？", type: "text", required: true, placeholder: "例如：客户技术负责人、公司技术团队、总经理办公会" },
-        { id: "materials", label: "依据哪些现有信息？", type: "textarea", required: true, placeholder: "粘贴关键事实，或写明要结合的客户、任务、知识库资料和已有文件。" },
+        { id: "materials", label: "依据哪些现有信息？", type: "textarea", required: true, placeholder: "粘贴关键事实，或写明要结合的客户、任务、资料库资料和已有文件。" },
       ],
       presets: [
         { label: "客户方案", values: { document: "客户销售方案", audience: "客户业务负责人、技术负责人和决策人" } },
@@ -1067,7 +1067,7 @@
     const intro = document.createElement("p");
     const mutations = Array.isArray(parsedPayload?.mutations) ? parsedPayload.mutations : [];
     if (task.pending_write.logical_tool === "knowledge.write") {
-      intro.textContent = `将向知识库${writeIntentCounts(mutations) || "写入以下内容"}。正式写入前，你可以逐条核对来源、事实和限制。`;
+      intro.textContent = `将向资料库${writeIntentCounts(mutations) || "写入以下内容"}。正式写入前，你可以逐条核对来源、事实和限制。`;
     } else if (task.pending_write.logical_tool === "sales.write") {
       const tableLabels = { customers: "客户台账", activities: "客户活动记录", resource_requests: "资源申请", sales_assets: "销售资料库" };
       intro.textContent = `将更新${tableLabels[parsedPayload?.table] || "销售台账"}：${writeIntentCounts(mutations) || "写入以下内容"}。`;
@@ -1263,7 +1263,7 @@
     const title = document.createElement("p");
     title.className = "write-intent-title";
     const toolLabels = {
-      "knowledge.write": "写入知识库", "sales.write": "更新销售台账",
+      "knowledge.write": "写入资料库", "sales.write": "更新销售台账",
       "bid.write": "更新投标项目", "presentation.plan.write": "保存演示方案", "artifact.deck.write": "生成演示文稿",
       "artifact.document.write": "生成正式标书",
     };
@@ -1298,7 +1298,7 @@
   }
 
   function approvalActionLabel(task) {
-    if (task.pending_write?.logical_tool === "knowledge.write") return "批准写入知识库";
+    if (task.pending_write?.logical_tool === "knowledge.write") return "批准写入资料库";
     if (task.pending_write?.logical_tool === "sales.write") return "批准更新销售台账";
     if (task.pending_write?.logical_tool === "bid.write") return "批准更新投标项目";
     if (task.pending_write?.logical_tool === "artifact.deck.write") return "批准并生成演示文稿";
@@ -1764,7 +1764,7 @@
     button.title = "永久删除这条历史任务记录";
     button.onclick = async (event) => {
       event.stopPropagation();
-      const warning = "彻底删除后，任务卡、处理过程、排队消息和演示方案无法恢复。已生成文件、知识库和销售台账不会被删除。";
+      const warning = "彻底删除后，任务卡、处理过程、排队消息和演示方案无法恢复。已生成文件、资料库和销售台账不会被删除。";
       if (!await confirmAction({
         title: "永久删除这条历史任务？",
         message: warning,
@@ -1794,166 +1794,346 @@
     return row;
   }
 
-  const knowledgeStatusLabels = {
-    verified: "已核验", pending: "待核验", superseded: "已替代", rejected: "已拒绝",
+  const libraryCategoryLabels = {
+    inbox: "待整理", customer: "客户与关键人", opportunity: "商机与方案", government: "政府与区域政策",
+    bidding: "招投标", industry: "行业与竞争", sales_asset: "销售资产", company: "公司能力与资质",
+    internal: "内部资源与负责人",
   };
+  const libraryStatusLabels = {
+    verified: "已核验", pending: "待核验", superseded: "已替代", rejected: "已拒绝", archived: "已归档",
+  };
+  const libraryKindLabels = {
+    source: "来源记录", project_file: "项目文件", library_file: "资料库文件", artifact: "生成产物", url: "网页资料",
+  };
+  const libraryConfidentialityLabels = { internal: "内部使用", restricted: "限制传播", public: "可公开" };
 
-  function knowledgeTextSection(className, title, text) {
-    const section = document.createElement("section");
-    section.className = `knowledge-content ${className}`;
-    const heading = document.createElement("strong");
-    heading.textContent = title;
-    const copy = document.createElement("p");
-    copy.textContent = text;
-    section.append(heading, copy);
+  function libraryAccountName(identity) {
+    const row = libraryState.accounts.find((item) => accountId(item) === identity);
+    return row ? accountName(row) : identity;
+  }
+
+  function libraryBidName(bidId) {
+    return libraryState.bids.find((item) => item.bid_id === bidId)?.name || bidId;
+  }
+
+  function libraryEntryTime(entry) {
+    return entry.updated_at || entry.modified_at || entry.accessed_date || entry.published_date || entry.created_at || "";
+  }
+
+  function libraryTimestamp(value) {
+    const text = String(value || "").trim();
+    if (!text) return "时间未登记";
+    const date = new Date(text);
+    return Number.isNaN(date.getTime()) ? text : date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
+  }
+
+  function libraryCurrentPool() {
+    return libraryState.category === "trash" ? libraryState.trash : libraryState.entries;
+  }
+
+  function librarySpecialMatch(entry) {
+    if (!libraryState.specialFilter) return true;
+    if (libraryState.specialFilter === "pending") return entry.status === "pending" || entry.category === "inbox";
+    const now = Date.now();
+    const moment = new Date(libraryState.specialFilter === "review" ? entry.review_at : (entry.created_at || entry.modified_at || entry.accessed_date)).getTime();
+    if (!Number.isFinite(moment)) return false;
+    if (libraryState.specialFilter === "review") return moment <= now + 30 * 86400000;
+    if (libraryState.specialFilter === "week") return moment >= now - 7 * 86400000;
+    return true;
+  }
+
+  function libraryFilteredEntries() {
+    const query = libraryState.query.toLocaleLowerCase("zh-CN");
+    const fields = ["title", "publisher", "topic", "region", "key_facts", "interpretation", "limitations", "important_quotes", "notes", "source_type"];
+    return libraryCurrentPool().filter((entry) => {
+      if (libraryState.category && libraryState.category !== "trash" && entry.category !== libraryState.category) return false;
+      if (libraryState.status && entry.status !== libraryState.status) return false;
+      if (libraryState.projectId && entry.project_id !== libraryState.projectId) return false;
+      if (libraryState.accountId && entry.account_id !== libraryState.accountId) return false;
+      if (!librarySpecialMatch(entry)) return false;
+      if (!query) return true;
+      const tags = Array.isArray(entry.tags) ? entry.tags.join(" ") : "";
+      return fields.some((field) => String(entry[field] || "").toLocaleLowerCase("zh-CN").includes(query)) || tags.toLocaleLowerCase("zh-CN").includes(query);
+    });
+  }
+
+  function libraryRow(entry) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `library-row ${entry.library_id === libraryState.selectedId ? "selected" : ""}`;
+    const icon = document.createElement("span");
+    icon.className = "library-row-icon";
+    icon.textContent = entry.kind === "url" || entry.url ? "⌁" : entry.kind === "artifact" ? "⇩" : "▤";
+    const copy = document.createElement("span");
+    copy.className = "library-row-copy";
+    const title = document.createElement("strong"); title.textContent = entry.title || "未命名资料";
+    const meta = document.createElement("small");
+    meta.textContent = [entry.publisher, entry.region, libraryTimestamp(libraryEntryTime(entry))].filter(Boolean).join(" · ");
+    const relations = document.createElement("small");
+    relations.className = "library-row-relations";
+    relations.textContent = [entry.project_id && projectById(entry.project_id)?.name, entry.account_id && libraryAccountName(entry.account_id), entry.bid_id && libraryBidName(entry.bid_id)].filter(Boolean).join(" · ") || "尚未关联业务对象";
+    copy.append(title, meta, relations);
+    const badges = document.createElement("span"); badges.className = "library-row-badges";
+    const category = document.createElement("b"); category.textContent = libraryCategoryLabels[entry.category] || "待整理";
+    const status = document.createElement("b"); status.className = entry.status || "pending"; status.textContent = libraryStatusLabels[entry.status] || "待核验";
+    badges.append(category, status);
+    button.append(icon, copy, badges);
+    button.onclick = () => { libraryState.selectedId = entry.library_id; libraryState.editingId = ""; libraryState.renderedKey = ""; renderLibrary(); };
+    return button;
+  }
+
+  function libraryMetaLine(list, labelText, value) {
+    if (value === undefined || value === null || String(value).trim() === "") return;
+    const term = document.createElement("dt"); term.textContent = labelText;
+    const description = document.createElement("dd"); description.textContent = String(value);
+    list.append(term, description);
+  }
+
+  function libraryTextBlock(title, value, tone = "") {
+    const section = document.createElement("section"); section.className = `library-text-block ${tone}`;
+    const heading = document.createElement("strong"); heading.textContent = title;
+    const body = document.createElement("p"); body.textContent = value;
+    section.append(heading, body);
     return section;
   }
 
-  function knowledgeCard(entry) {
-    const card = document.createElement("details");
-    card.className = "knowledge-card";
-    const cardId = entry.source_id || entry.url || entry.title;
-    card.open = Boolean(knowledgeCardExpansion.get(cardId));
-    card.addEventListener("toggle", () => knowledgeCardExpansion.set(cardId, card.open));
-
-    const summary = document.createElement("summary");
-    const summaryCopy = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = entry.title || "未命名知识条目";
-    const meta = document.createElement("small");
-    meta.textContent = [entry.publisher, entry.published_date || entry.accessed_date, entry.topic].filter(Boolean).join(" · ") || "暂无来源说明";
-    summaryCopy.append(title, meta);
-    const badges = document.createElement("div");
-    badges.className = "knowledge-badges";
-    const status = document.createElement("span");
-    status.className = `knowledge-badge ${entry.status || "unknown"}`;
-    status.textContent = knowledgeStatusLabels[entry.status] || entry.status || "未标注状态";
-    badges.append(status);
-    if (entry.quality) {
-      const quality = document.createElement("span");
-      quality.className = "knowledge-badge quality";
-      quality.textContent = entry.quality;
-      badges.append(quality);
+  function librarySelect(options, value) {
+    const select = document.createElement("select");
+    options.forEach(([optionValue, label]) => {
+      const option = document.createElement("option"); option.value = optionValue; option.textContent = label; select.append(option);
+    });
+    if (value && !options.some(([optionValue]) => optionValue === value)) {
+      const option = document.createElement("option"); option.value = value; option.textContent = `当前关联：${value}`; select.append(option);
     }
-    summary.append(summaryCopy, badges);
-
-    const body = document.createElement("div");
-    body.className = "knowledge-card-body";
-    if (entry.key_facts) body.append(knowledgeTextSection("facts", "主要事实", entry.key_facts));
-    if (entry.interpretation) body.append(knowledgeTextSection("analysis", "分析说明", entry.interpretation));
-    if (entry.limitations) body.append(knowledgeTextSection("warning", "限制与提醒", entry.limitations));
-    if (entry.important_quotes) body.append(knowledgeTextSection("quotes", "重要原文", entry.important_quotes));
-
-    const metadata = document.createElement("dl");
-    metadata.className = "knowledge-metadata";
-    const appendMeta = (labelText, value) => {
-      if (!value) return;
-      const term = document.createElement("dt"); term.textContent = labelText;
-      const description = document.createElement("dd"); description.textContent = value;
-      metadata.append(term, description);
-    };
-    appendMeta("发布机构", entry.publisher);
-    appendMeta("发布日期", entry.published_date);
-    appendMeta("访问日期", entry.accessed_date);
-    appendMeta("地区", entry.region);
-    appendMeta("资料类型", entry.source_type);
-    appendMeta("知识编号", entry.source_id);
-    if (metadata.children.length) body.append(metadata);
-
-    if (entry.notes) {
-      const notes = document.createElement("details");
-      notes.className = "knowledge-notes";
-      const notesSummary = document.createElement("summary"); notesSummary.textContent = "查看补充记录";
-      const notesText = document.createElement("p"); notesText.textContent = entry.notes;
-      notes.append(notesSummary, notesText);
-      body.append(notes);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "knowledge-actions";
-    if (entry.url) {
-      const open = document.createElement("button");
-      open.className = "primary";
-      open.type = "button";
-      open.textContent = "打开来源";
-      open.addEventListener("click", async () => {
-        open.disabled = true;
-        try {
-          const reply = await api("/api/knowledge/source/open", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: entry.url }),
-          });
-          note(reply.message);
-        } catch (error) { note(error.message, true); }
-        finally { open.disabled = false; }
-      });
-      const copy = document.createElement("button");
-      copy.className = "secondary";
-      copy.type = "button";
-      copy.textContent = "复制链接";
-      copy.addEventListener("click", async () => {
-        try { await navigator.clipboard.writeText(entry.url); note("来源链接已复制。"); }
-        catch { note("无法自动复制，请展开补充记录查看链接。", true); }
-      });
-      actions.append(open, copy);
-    } else {
-      const noUrl = document.createElement("span");
-      noUrl.className = "hint";
-      noUrl.textContent = "这条记录没有登记公开来源链接。";
-      actions.append(noUrl);
-    }
-    body.append(actions);
-    card.append(summary, body);
-    return card;
+    select.value = value || "";
+    return select;
   }
 
-  function renderKnowledge() {
-    const box = $("knowledge-records");
-    const query = $("knowledge-query").value.trim().toLocaleLowerCase("zh-CN");
-    const status = $("knowledge-status-filter").value;
-    const renderedKey = `${knowledgeVersion}|${query}|${status}|${knowledgeLoadError}`;
-    if (renderedKey === knowledgeRenderedKey) return;
-    knowledgeRenderedKey = renderedKey;
-    const scrollTop = box.scrollTop;
-    const fields = ["title", "publisher", "topic", "region", "key_facts", "interpretation", "limitations", "important_quotes", "notes"];
-    const filtered = knowledgeEntries.filter((entry) => {
-      if (status && entry.status !== status) return false;
-      if (!query) return true;
-      return fields.some((field) => String(entry[field] || "").toLocaleLowerCase("zh-CN").includes(query));
-    });
-    $("knowledge-count").textContent = String(filtered.length);
-    box.classList.toggle("empty", filtered.length === 0);
-    if (knowledgeLoadError) {
-      box.replaceChildren();
-      box.textContent = `知识条目暂时无法读取：${knowledgeLoadError}`;
-    } else if (!filtered.length) {
-      box.replaceChildren();
-      box.textContent = query || status ? "没有符合筛选条件的知识条目。" : "知识库中还没有可显示的条目。";
-    } else {
-      box.replaceChildren(...filtered.map(knowledgeCard));
-      if (knowledgeTruncated) {
-        const warning = document.createElement("p");
-        warning.className = "knowledge-truncated";
-        warning.textContent = model?.data?.backend === "sqlite"
-          ? "当前只显示最近 500 条；请使用上方搜索缩小范围。SQLite 主库不会直接交给外部软件编辑。"
-          : "当前只显示最近 500 条；可使用搜索缩小范围，或打开知识库文件查看全部记录。";
-        box.append(warning);
+  function libraryEditor(entry) {
+    const form = document.createElement("form"); form.className = "library-editor";
+    const field = (labelText, control, className = "") => {
+      const label = document.createElement("label"); if (className) label.className = className;
+      const caption = document.createElement("span"); caption.textContent = labelText;
+      label.append(caption, control); form.append(label); return control;
+    };
+    const title = document.createElement("input"); title.maxLength = 500; title.value = entry.title || ""; field("资料名称", title, "span-2");
+    const category = field("资料分类", librarySelect([["inbox", "待整理"], ...Object.entries(libraryCategoryLabels).filter(([key]) => key !== "inbox")], entry.category));
+    const status = field("核验状态", librarySelect(Object.entries(libraryStatusLabels), entry.status));
+    const confidentiality = field("保密级别", librarySelect(Object.entries(libraryConfidentialityLabels), entry.confidentiality));
+    const project = field("关联项目", librarySelect([["", "暂不关联"], ...(model.projects || []).filter((item) => item.status === "active").map((item) => [item.project_id, item.name])], entry.project_id));
+    const account = field("关联客户", librarySelect([["", "暂不关联"], ...libraryState.accounts.map((item) => [accountId(item), accountName(item)])], entry.account_id));
+    const bid = field("关联投标项目", librarySelect([["", "暂不关联"], ...libraryState.bids.map((item) => [item.bid_id, item.name])], entry.bid_id));
+    const opportunity = document.createElement("input"); opportunity.maxLength = 128; opportunity.value = entry.opportunity_id || ""; opportunity.placeholder = "可选：商机编号"; field("商机编号", opportunity);
+    const region = document.createElement("input"); region.maxLength = 200; region.value = entry.region || ""; field("地区", region);
+    const topic = document.createElement("input"); topic.maxLength = 500; topic.value = entry.topic || ""; field("主题", topic);
+    const publisher = document.createElement("input"); publisher.maxLength = 500; publisher.value = entry.publisher || ""; field("发布机构", publisher);
+    const publishedDate = document.createElement("input"); publishedDate.maxLength = 40; publishedDate.value = entry.published_date || ""; publishedDate.placeholder = "YYYY-MM-DD"; field("发布日期", publishedDate);
+    const reviewAt = document.createElement("input"); reviewAt.type = "date"; reviewAt.value = String(entry.review_at || "").slice(0, 10); field("下次复核日期", reviewAt);
+    const tags = document.createElement("input"); tags.maxLength = 500; tags.value = (entry.tags || []).join("，"); tags.placeholder = "多个标签用逗号分隔"; field("标签", tags, "span-2");
+    const notes = document.createElement("textarea"); notes.maxLength = 4000; notes.value = entry.notes || ""; notes.placeholder = "适用范围、使用限制或补充说明"; field("补充说明", notes, "span-2");
+    const actions = document.createElement("div"); actions.className = "library-editor-actions span-2";
+    const save = document.createElement("button"); save.type = "submit"; save.className = "primary"; save.textContent = "保存资料信息";
+    const cancel = document.createElement("button"); cancel.type = "button"; cancel.className = "secondary"; cancel.textContent = "取消";
+    cancel.onclick = () => { libraryState.editingId = ""; libraryState.previewKey = ""; renderLibraryPreview(); };
+    actions.append(save, cancel); form.append(actions);
+    form.onsubmit = async (event) => {
+      event.preventDefault(); save.disabled = true;
+      try {
+        const payload = {
+          library_id: entry.library_id, expected_version: entry.catalog_version || 0, title: title.value.trim(),
+          category: category.value, status: status.value, confidentiality: confidentiality.value,
+          project_id: project.value, account_id: account.value, bid_id: bid.value, opportunity_id: opportunity.value.trim(),
+          region: region.value.trim(), topic: topic.value.trim(), publisher: publisher.value.trim(),
+          published_date: publishedDate.value.trim(), review_at: reviewAt.value,
+          tags: tags.value.split(/[，,]/u).map((item) => item.trim()).filter(Boolean), notes: notes.value.trim(),
+        };
+        const response = await api("/api/library/metadata", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        note(response.message); libraryState.editingId = ""; await loadLibrary(true);
+      } catch (error) { note(error.message, true); save.disabled = false; }
+    };
+    return form;
+  }
+
+  async function startLibraryTask(entry, serviceId, purpose) {
+    const service = serviceById(serviceId);
+    if (!service) { note("当前版本没有启用该业务服务。", true); return; }
+    const linkedProject = entry.project_id && projectById(entry.project_id);
+    if (linkedProject?.status === "active") selectedProject = linkedProject.project_id;
+    selectedService = serviceId;
+    const reference = entry.path || entry.url || entry.source_id || entry.library_id;
+    const request = [
+      `【资料库直接任务：${purpose}】`, `资料名称：${entry.title}`, `资料编号：${entry.library_id}`,
+      `原件或来源：${reference}`, entry.account_id ? `关联客户：${libraryAccountName(entry.account_id)}（${entry.account_id}）` : "",
+      entry.bid_id ? `关联投标项目：${libraryBidName(entry.bid_id)}（${entry.bid_id}）` : "",
+      "请优先使用这份资料及其已登记业务关系；引用重要结论时回到原件或来源。资料不足时明确说明，不得把未核验内容写成事实。涉及台账写入或正式文件时继续等待人工确认。",
+    ].filter(Boolean).join("\n");
+    try {
+      const response = await createTask(request); note(`任务已登记（${response.request_id}）。`); await load(); switchView("tasks");
+    } catch (error) { note(error.message, true); }
+  }
+
+  function libraryTaskOptions(entry) {
+    const options = [];
+    if (["customer", "opportunity"].includes(entry.category)) options.push(["sales-review", "客户复盘"]);
+    if (entry.category === "government") options.push(["government-proposal", "形成政府方案"]);
+    if (entry.category === "bidding" && entry.bid_id) options.push(["bid-interpretation", "解读招标文件"]);
+    if (entry.category === "industry") options.push(["industry-research", "继续行业调研"]);
+    if (["sales_asset", "company", "internal", "inbox"].includes(entry.category)) options.push(["office-document", "整理与改写"]);
+    if (["project_file", "library_file"].includes(entry.kind) && String(entry.path || "").toLocaleLowerCase("zh-CN").endsWith(".pdf") && entry.status !== "verified") options.push(["pdf-import", "提取页码证据"]);
+    if (entry.category !== "inbox") options.push(["presentation-studio", "制作销售演示文稿"]);
+    return options.filter(([serviceId], index) => options.findIndex(([candidate]) => candidate === serviceId) === index).slice(0, 3);
+  }
+
+  async function archiveLibraryEntry(entry) {
+    if (!await confirmAction({
+      title: "移入资料库回收站？",
+      message: `“${entry.title}”将从日常检索中隐藏。原始文件或来源记录不会被永久删除，可随时恢复。`,
+      confirmText: "移入回收站",
+      tone: "danger",
+    })) return;
+    try {
+      let response = await api("/api/library/archive", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ library_id: entry.library_id, expected_version: entry.catalog_version || 0 }) });
+      if (response.requires_confirmation) {
+        if (!await confirmAction({ title: "该资料已有引用", message: response.message, detail: (response.references || []).join("\n"), confirmText: "仍然移入回收站", tone: "danger" })) return;
+        response = await api("/api/library/archive", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ library_id: entry.library_id, expected_version: entry.catalog_version || 0, acknowledge_references: true }) });
       }
+      note(response.message); libraryState.selectedId = ""; await loadLibrary(true);
+    } catch (error) { note(error.message, true); }
+  }
+
+  function renderLibraryPreview() {
+    const pool = [...libraryState.entries, ...libraryState.trash];
+    const entry = pool.find((item) => item.library_id === libraryState.selectedId);
+    const preview = $("library-preview");
+    const empty = $("library-preview-empty");
+    if (!entry) { preview.hidden = true; empty.hidden = false; preview.replaceChildren(); return; }
+    empty.hidden = true; preview.hidden = false;
+    const key = `${libraryState.version}|${entry.library_id}|${entry.catalog_version}|${libraryState.editingId}`;
+    if (key === libraryState.previewKey) return;
+    libraryState.previewKey = key;
+    const header = document.createElement("header"); header.className = "library-preview-header";
+    const heading = document.createElement("div");
+    const kicker = document.createElement("small"); kicker.textContent = libraryKindLabels[entry.kind] || "资料";
+    const title = document.createElement("h2"); title.textContent = entry.title || "未命名资料";
+    const badges = document.createElement("div"); badges.className = "knowledge-badges";
+    [[libraryCategoryLabels[entry.category] || "待整理", "quality"], [libraryStatusLabels[entry.status] || "待核验", entry.status || "pending"]].forEach(([label, className]) => { const badge = document.createElement("span"); badge.className = `knowledge-badge ${className}`; badge.textContent = label; badges.append(badge); });
+    heading.append(kicker, title, badges); header.append(heading); preview.replaceChildren(header);
+    if (libraryState.editingId === entry.library_id) { preview.append(libraryEditor(entry)); return; }
+
+    const relation = document.createElement("section"); relation.className = "library-relation-card";
+    const relationTitle = document.createElement("strong"); relationTitle.textContent = "业务关联";
+    const relationCopy = document.createElement("p");
+    relationCopy.textContent = [entry.project_id && `项目：${projectById(entry.project_id)?.name || entry.project_id}`, entry.account_id && `客户：${libraryAccountName(entry.account_id)}`, entry.opportunity_id && `商机：${entry.opportunity_id}`, entry.bid_id && `投标：${libraryBidName(entry.bid_id)}`].filter(Boolean).join("\n") || "尚未关联客户、项目、商机或投标项目。";
+    relation.append(relationTitle, relationCopy); preview.append(relation);
+    if (entry.key_facts) preview.append(libraryTextBlock("主要事实", entry.key_facts));
+    if (entry.interpretation) preview.append(libraryTextBlock("分析说明", entry.interpretation, "analysis"));
+    if (entry.limitations) preview.append(libraryTextBlock("限制与提醒", entry.limitations, "warning"));
+    if (entry.important_quotes) preview.append(libraryTextBlock("重要原文", entry.important_quotes, "quotes"));
+    const metadata = document.createElement("dl"); metadata.className = "library-metadata";
+    libraryMetaLine(metadata, "发布机构", entry.publisher); libraryMetaLine(metadata, "发布日期", entry.published_date);
+    libraryMetaLine(metadata, "访问/更新时间", libraryTimestamp(libraryEntryTime(entry))); libraryMetaLine(metadata, "地区", entry.region);
+    libraryMetaLine(metadata, "主题", entry.topic); libraryMetaLine(metadata, "资料类型", entry.source_type || libraryKindLabels[entry.kind]);
+    libraryMetaLine(metadata, "保密级别", libraryConfidentialityLabels[entry.confidentiality] || entry.confidentiality);
+    libraryMetaLine(metadata, "下次复核", entry.review_at); libraryMetaLine(metadata, "标签", (entry.tags || []).join("、"));
+    libraryMetaLine(metadata, "资料编号", entry.library_id); if (metadata.children.length) preview.append(metadata);
+    if (entry.notes) preview.append(libraryTextBlock("补充说明", entry.notes));
+    if ((entry.versions || []).length) {
+      const versions = document.createElement("section"); versions.className = "library-version-list";
+      const headingText = document.createElement("strong"); headingText.textContent = `历史版本（${entry.versions.length}）`; versions.append(headingText);
+      [...entry.versions].reverse().forEach((version, index) => {
+        const row = document.createElement("div"); const name = document.createElement("span"); name.textContent = version.filename || version.version_id;
+        const meta = document.createElement("small"); meta.textContent = `${index === 0 ? "当前版本 · " : ""}${fileSize(version.size || 0)} · ${libraryTimestamp(version.created_at)}`;
+        row.append(name, meta); versions.append(row);
+      }); preview.append(versions);
     }
-    queueMicrotask(() => { box.scrollTop = Math.min(scrollTop, Math.max(0, box.scrollHeight - box.clientHeight)); });
+    const primaryActions = document.createElement("div"); primaryActions.className = "library-preview-actions";
+    if (entry.url || entry.path) {
+      const open = document.createElement("button"); open.type = "button"; open.className = "primary"; open.textContent = entry.url ? "打开来源" : "打开原件";
+      open.onclick = async () => { open.disabled = true; try { const response = await api("/api/library/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ library_id: entry.library_id }) }); note(response.message); } catch (error) { note(error.message, true); } finally { open.disabled = false; } };
+      primaryActions.append(open);
+    }
+    if (!entry.deleted_at) {
+      const edit = document.createElement("button"); edit.type = "button"; edit.className = "secondary"; edit.textContent = "编辑资料信息"; edit.onclick = () => { libraryState.editingId = entry.library_id; libraryState.previewKey = ""; renderLibraryPreview(); }; primaryActions.append(edit);
+      if (entry.kind === "library_file") { const version = document.createElement("button"); version.type = "button"; version.className = "secondary"; version.textContent = "上传新版本"; version.onclick = () => { libraryState.versionTargetId = entry.library_id; $("library-version-input").click(); }; primaryActions.append(version); }
+    }
+    preview.append(primaryActions);
+    if (!entry.deleted_at) {
+      const taskActions = document.createElement("section"); taskActions.className = "library-task-actions";
+      const taskTitle = document.createElement("strong"); taskTitle.textContent = "直接用于工作"; taskActions.append(taskTitle);
+      const options = libraryTaskOptions(entry);
+      options.forEach(([serviceId, label]) => { const button = document.createElement("button"); button.type = "button"; button.className = "secondary"; button.textContent = label; button.onclick = () => startLibraryTask(entry, serviceId, label); taskActions.append(button); });
+      if (entry.category === "bidding" && !entry.bid_id) {
+        const hint = document.createElement("small"); hint.textContent = "先编辑资料信息并关联投标项目，即可直接开始招标解读。"; taskActions.append(hint);
+      }
+      preview.append(taskActions);
+      const danger = document.createElement("button"); danger.type = "button"; danger.className = "danger-outline library-archive"; danger.textContent = "移入资料库回收站"; danger.onclick = () => archiveLibraryEntry(entry); preview.append(danger);
+    } else {
+      const restore = document.createElement("button"); restore.type = "button"; restore.className = "primary library-restore"; restore.textContent = "恢复到资料库";
+      restore.onclick = async () => { restore.disabled = true; try { const response = await api("/api/library/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ library_id: entry.library_id, expected_version: entry.catalog_version }) }); note(response.message); await loadLibrary(true); } catch (error) { note(error.message, true); restore.disabled = false; } };
+      preview.append(restore);
+    }
+  }
+
+  function renderLibraryFilters() {
+    const project = $("library-project-filter"); const currentProject = project.value || libraryState.projectId;
+    project.replaceChildren(...[["", "全部项目"], ...(model.projects || []).map((item) => [item.project_id, item.name])].map(([value, label]) => { const option = document.createElement("option"); option.value = value; option.textContent = label; return option; }));
+    project.value = currentProject;
+    const account = $("library-account-filter"); const currentAccount = account.value || libraryState.accountId;
+    account.replaceChildren(...[["", "全部客户"], ...libraryState.accounts.map((item) => [accountId(item), accountName(item)])].map(([value, label]) => { const option = document.createElement("option"); option.value = value; option.textContent = label; return option; }));
+    account.value = currentAccount;
+  }
+
+  function renderLibrary() {
+    if (!model) return;
+    renderLibraryFilters();
+    const stats = libraryState.stats || {};
+    $("library-stat-pending").textContent = String(stats.pending || 0); $("library-stat-verified").textContent = String(stats.verified || 0);
+    $("library-stat-review").textContent = String(stats.review_due || 0); $("library-stat-week").textContent = String(stats.this_week || 0);
+    $("library-category-all").textContent = String(stats.total || 0); $("library-category-trash").textContent = String(stats.trash || 0);
+    Object.keys(libraryCategoryLabels).forEach((category) => { const target = $(`library-category-${category}`); if (target) target.textContent = String(stats.categories?.[category] || 0); });
+    document.querySelectorAll("[data-library-category]").forEach((button) => button.classList.toggle("active", button.dataset.libraryCategory === libraryState.category));
+    const title = libraryState.category === "trash" ? "资料库回收站" : libraryState.category ? libraryCategoryLabels[libraryState.category] : "全部资料";
+    $("library-list-title").textContent = title;
+    const box = $("library-records"); const filtered = libraryFilteredEntries();
+    const renderedKey = `${libraryState.version}|${libraryState.category}|${libraryState.query}|${libraryState.status}|${libraryState.projectId}|${libraryState.accountId}|${libraryState.specialFilter}|${libraryState.selectedId}|${libraryState.error}`;
+    if (renderedKey !== libraryState.renderedKey) {
+      libraryState.renderedKey = renderedKey; const scrollTop = box.scrollTop;
+      $("library-count").textContent = String(filtered.length);
+      $("library-list-status").textContent = libraryState.error ? `资料库暂时不可用：${libraryState.error}` : libraryState.warning || `显示 ${filtered.length} 条，共 ${libraryCurrentPool().length} 条`;
+      box.classList.toggle("empty", !filtered.length);
+      if (libraryState.error) { box.replaceChildren(); box.textContent = `资料库暂时无法读取：${libraryState.error}`; }
+      else if (!filtered.length) { box.replaceChildren(); box.textContent = libraryState.category === "trash" ? "回收站为空。" : "没有符合当前条件的资料。可以上传文件或登记网页。"; }
+      else box.replaceChildren(...filtered.map(libraryRow));
+      queueMicrotask(() => { box.scrollTop = Math.min(scrollTop, Math.max(0, box.scrollHeight - box.clientHeight)); });
+    }
+    renderLibraryPreview();
+  }
+
+  async function loadLibrary(force = false) {
+    if (libraryState.loading || (!force && libraryState.expectedRevision && libraryState.expectedRevision === model?.library_revision && libraryState.version)) return;
+    libraryState.loading = true;
+    try {
+      const [snapshot, accounts, bids] = await Promise.all([
+        api("/api/library"),
+        api("/api/accounts?limit=100").catch(() => ({ rows: libraryState.accounts })),
+        api("/api/bids?limit=100").catch(() => ({ rows: libraryState.bids })),
+      ]);
+      libraryState.entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
+      libraryState.trash = Array.isArray(snapshot.trash) ? snapshot.trash : [];
+      libraryState.stats = snapshot.stats || {}; libraryState.version = snapshot.version || String(Date.now());
+      libraryState.warning = snapshot.warning || ""; libraryState.error = "";
+      libraryState.accounts = Array.isArray(accounts.rows) ? accounts.rows : [];
+      libraryState.bids = Array.isArray(bids.rows) ? bids.rows : [];
+      libraryState.expectedRevision = model?.library_revision || "";
+      if (libraryState.selectedId && ![...libraryState.entries, ...libraryState.trash].some((item) => item.library_id === libraryState.selectedId)) libraryState.selectedId = "";
+    } catch (error) { libraryState.error = error.message; }
+    finally { libraryState.loading = false; libraryState.renderedKey = ""; libraryState.previewKey = ""; renderLibrary(); }
   }
 
   function renderData() {
-    $("open-knowledge-file").textContent = model.data?.backend === "sqlite" ? "打开知识库所在目录" : "打开知识库文件";
-    const renderGroup = (box, items) => {
-      box.replaceChildren(...items.map((item) => summaryRow("summary-row", item.path.split("/").pop(), item.exists ? `${item.records ?? "?"} 条 · ${item.updated_at || "未知时间"}` : "尚未创建")));
-    };
-    renderGroup($("knowledge-summary"), model.data.knowledge || []);
+    const renderGroup = (box, items) => box.replaceChildren(...items.map((item) => summaryRow("summary-row", item.path.split("/").pop(), item.exists ? `${item.records ?? "?"} 条 · ${item.updated_at || "未知时间"}` : "尚未创建")));
     renderGroup($("sales-summary"), model.data.sales || []);
-    renderKnowledge();
-    const recentFiles = (model.project_files || []).slice(0, 8);
-    const filesBox = $("knowledge-files");
-    filesBox.classList.toggle("empty", recentFiles.length === 0);
-    filesBox.replaceChildren(...recentFiles.map((item) => fileRow(item)));
+    renderLibrary();
   }
 
   function accountId(account) { return String(account?.account_id || account?.customer_id || account?.id || ""); }
@@ -2479,7 +2659,7 @@
     use.onclick = () => {
       selectedProject = item.project_id;
       if (item.name.toLowerCase().endsWith(".pdf")) {
-        guidedDrafts["pdf-import"] = { path: item.path, goal: "提取可引用证据并写入知识库", focus: "" };
+        guidedDrafts["pdf-import"] = { path: item.path, goal: "提取可引用证据并写入资料库", focus: "" };
         openService("pdf-import");
       } else {
         guidedDrafts["office-document"] ||= {};
@@ -2824,20 +3004,7 @@
     if (!selectedProfile || !model.profiles.some((item) => item.id === selectedProfile)) { selectedProfile = model.profiles.find((item) => item.id === "sales-director")?.id || model.profiles[0]?.id; selectedService = currentProfile()?.default_service; }
     if (!currentProfile()?.services.some((item) => item.id === selectedService)) selectedService = currentProfile()?.default_service;
     if (!projectById(selectedProject) || projectById(selectedProject)?.status !== "active") selectedProject = model.projects?.find((item) => item.status === "active")?.project_id || "project-default";
-    const sourceVersion = model.data?.knowledge?.[0]?.version || "missing";
-    if (sourceVersion !== knowledgeVersion || knowledgeLoadError) {
-      try {
-        const library = await api("/api/knowledge");
-        knowledgeEntries = Array.isArray(library.entries) ? library.entries : [];
-        knowledgeVersion = library.version || sourceVersion;
-        knowledgeTruncated = Boolean(library.truncated);
-        knowledgeLoadError = "";
-      } catch (error) {
-        knowledgeLoadError = error.message;
-        knowledgeVersion = sourceVersion;
-      }
-      knowledgeRenderedKey = "";
-    }
+    if (model.library_revision !== libraryState.expectedRevision || libraryState.error || !libraryState.version) await loadLibrary();
     render();
     restoreTaskComposerFocus(composerFocus);
     if (currentView === "sales" && !customerState.loaded && !customerState.loading) loadCustomers();
@@ -2867,8 +3034,12 @@
   $("task-project").onchange = () => { selectedProject = $("task-project").value; $("schedule-project").value = selectedProject; };
   $("home-project").onchange = () => { selectedProject = $("home-project").value; $("task-project").value = selectedProject; $("schedule-project").value = selectedProject; renderProjects(); };
   $("schedule-project").onchange = () => { selectedProject = $("schedule-project").value; $("task-project").value = selectedProject; };
-  $("knowledge-query").addEventListener("input", () => { knowledgeRenderedKey = ""; renderKnowledge(); });
-  $("knowledge-status-filter").addEventListener("change", () => { knowledgeRenderedKey = ""; renderKnowledge(); });
+  $("library-query").addEventListener("input", () => { libraryState.query = $("library-query").value.trim(); libraryState.specialFilter = ""; libraryState.renderedKey = ""; renderLibrary(); });
+  $("library-status-filter").addEventListener("change", () => { libraryState.status = $("library-status-filter").value; libraryState.specialFilter = ""; libraryState.renderedKey = ""; renderLibrary(); });
+  $("library-project-filter").addEventListener("change", () => { libraryState.projectId = $("library-project-filter").value; libraryState.specialFilter = ""; libraryState.renderedKey = ""; renderLibrary(); });
+  $("library-account-filter").addEventListener("change", () => { libraryState.accountId = $("library-account-filter").value; libraryState.specialFilter = ""; libraryState.renderedKey = ""; renderLibrary(); });
+  document.querySelectorAll("[data-library-category]").forEach((button) => button.addEventListener("click", () => { libraryState.category = button.dataset.libraryCategory || ""; libraryState.specialFilter = ""; libraryState.selectedId = ""; libraryState.renderedKey = ""; libraryState.previewKey = ""; renderLibrary(); }));
+  document.querySelectorAll("[data-library-stat]").forEach((button) => button.addEventListener("click", () => { const value = button.dataset.libraryStat; libraryState.category = ""; libraryState.status = value === "verified" ? "verified" : ""; libraryState.specialFilter = value === "verified" ? "" : value; $("library-status-filter").value = libraryState.status; libraryState.selectedId = ""; libraryState.renderedKey = ""; renderLibrary(); }));
   const customerFilterMap = [["customer-filter-query", "query", "input"], ["customer-filter-owner", "owner", "input"], ["customer-filter-region", "region", "input"], ["customer-filter-industry", "industry", "input"], ["customer-filter-stage", "stage", "input"], ["customer-filter-health", "health", "input"], ["customer-filter-updated", "updated", "change"]];
   let customerFilterTimer = null;
   customerFilterMap.forEach(([id, key, eventName]) => $(id)?.addEventListener(eventName, () => { customerState.filters[key] = $(id).value.trim(); customerState.cursor = ""; clearTimeout(customerFilterTimer); customerFilterTimer = setTimeout(() => loadCustomers({ force: true }), eventName === "input" ? 260 : 0); }));
@@ -2926,13 +3097,29 @@
       if (["tender", "addendum"].includes(role) && await confirmAction({ title: "资料已登记，立即开始解读？", message: "助手将只读取当前项目已登记的招标原件，提取要求后先展示待写入卡片，仍由你确认。", confirmText: "开始解读" })) await createBidStageTask("bid-interpretation");
     } catch (error) { note(error.message, true); } finally { $("bid-file-input").value = ""; }
   };
-  $("open-knowledge-file").onclick = async () => {
+  $("open-library-directory").onclick = async () => {
+    const button = $("open-library-directory"); button.disabled = true;
+    try { const reply = await api("/api/data-directory/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); note(reply.message); }
+    catch (error) { note(error.message, true); }
+    finally { button.disabled = false; }
+  };
+  $("show-library-url").onclick = () => { $("library-url-panel").hidden = false; $("library-url").focus(); };
+  $("cancel-library-url").onclick = () => { $("library-url-panel").hidden = true; };
+  $("save-library-url").onclick = async () => {
+    const button = $("save-library-url"); button.disabled = true;
     try {
-      const reply = await api("/api/knowledge/file/open", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      const response = await api("/api/library/urls", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: $("library-url").value.trim(), title: $("library-url-title").value.trim(), category: $("library-url-category").value,
+          region: $("library-url-region").value.trim(), topic: $("library-url-topic").value.trim(), project_id: selectedProject,
+          account_id: libraryState.accountId || customerState.selectedId || "",
+        }),
       });
-      note(reply.message);
+      $("library-url").value = ""; $("library-url-title").value = ""; $("library-url-region").value = ""; $("library-url-topic").value = ""; $("library-url-panel").hidden = true;
+      libraryState.selectedId = response.entry.library_id; note(response.message); await loadLibrary(true);
     } catch (error) { note(error.message, true); }
+    finally { button.disabled = false; }
   };
 
   $("show-project-form").onclick = () => { $("project-create-panel").hidden = false; $("project-name").focus(); };
@@ -2965,7 +3152,30 @@
     return data;
   }
 
-  [$("home-upload"), $("project-upload"), $("project-quick-upload")].forEach((button) => { button.onclick = () => $("project-file-input").click(); });
+  async function uploadLibraryFile(file, targetId = "") {
+    if (!file) return null;
+    if (file.size <= 0 || file.size > 32 * 1024 * 1024) throw new Error("单个资料必须为 1 字节至 32 兆字节。");
+    const target = targetId ? [...libraryState.entries, ...libraryState.trash].find((item) => item.library_id === targetId) : null;
+    const endpoint = targetId ? `/api/library-files/${encodeURIComponent(targetId)}/versions` : "/api/library-files";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "X-Director-Token": requestToken || "", "Content-Type": "application/octet-stream",
+        "X-File-Name": encodeURIComponent(file.name), "X-Project-Id": selectedProject,
+        "X-Account-Id": libraryState.accountId || customerState.selectedId || "",
+        "X-Library-Category": libraryState.category && !["trash", "inbox"].includes(libraryState.category) ? libraryState.category : "",
+        "X-Library-Version": target ? String(target.catalog_version || 0) : "0",
+      },
+      body: file,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "资料上传失败");
+    return data;
+  }
+
+  $("home-upload").onclick = () => $("library-file-input").click();
+  $("library-upload").onclick = () => $("library-file-input").click();
+  [$("project-upload"), $("project-quick-upload")].forEach((button) => { button.onclick = () => $("project-file-input").click(); });
   $("open-data-directory").onclick = async () => {
     const button = $("open-data-directory");
     button.disabled = true;
@@ -2982,6 +3192,25 @@
     try { const reply = await uploadProjectFile(file); note(reply.message); await load(); switchView("projects"); }
     catch (error) { note(error.message, true); }
     finally { $("project-file-input").value = ""; }
+  };
+  $("library-file-input").onchange = async () => {
+    const input = $("library-file-input"); const file = input.files?.[0];
+    try {
+      const reply = await uploadLibraryFile(file); if (!reply) return;
+      libraryState.selectedId = reply.entry.library_id; note(reply.message); await loadLibrary(true); switchView("knowledge");
+      if (file.name.toLowerCase().endsWith(".pdf") && await confirmAction({ title: "资料已上传，立即提取证据？", message: "助手会按页读取当前 PDF，先展示可编辑的待写入内容，仍由你确认后才进入正式资料记录。", confirmText: "开始提取" })) {
+        selectedService = "pdf-import";
+        const task = await createTask(`【资料库 PDF 解读】\n文件：${reply.entry.path}\n资料编号：${reply.entry.library_id}\n请按页提取可引用证据，区分事实、分析和待验证内容，准备写入资料库。`);
+        note(`解读任务已登记（${task.request_id}）。`); await load(); switchView("tasks");
+      }
+    } catch (error) { note(error.message, true); }
+    finally { input.value = ""; }
+  };
+  $("library-version-input").onchange = async () => {
+    const input = $("library-version-input"); const file = input.files?.[0]; const targetId = libraryState.versionTargetId;
+    try { const reply = await uploadLibraryFile(file, targetId); if (!reply) return; libraryState.selectedId = targetId; note(reply.message); await loadLibrary(true); }
+    catch (error) { note(error.message, true); }
+    finally { input.value = ""; libraryState.versionTargetId = ""; }
   };
 
   function selectedReimbursementMessages() {
@@ -3152,11 +3381,19 @@
       const meta = document.createElement("small"); meta.textContent = item.subtitle || item.reference;
       const snippet = document.createElement("p"); snippet.textContent = item.snippet || item.reference;
       header.append(title, kind); card.append(header, meta, snippet);
-      card.onclick = () => {
+      card.onclick = async () => {
         if (item.project_id && projectById(item.project_id)?.status === "active") selectedProject = item.project_id;
         if (item.kind === "任务") switchView("tasks");
         else if (["项目", "项目文件"].includes(item.kind)) switchView("projects");
-        else if (item.kind === "知识") switchView("knowledge");
+        else if (item.kind === "资料") {
+          if (!libraryState.version) await loadLibrary(true);
+          const entry = libraryState.entries.find((candidate) => [candidate.path, candidate.url, candidate.source_id, candidate.library_id].filter(Boolean).includes(item.reference));
+          libraryState.selectedId = entry?.library_id || "";
+          libraryState.category = ""; libraryState.query = ""; libraryState.status = ""; libraryState.specialFilter = "";
+          libraryState.renderedKey = ""; libraryState.previewKey = "";
+          $("library-query").value = ""; $("library-status-filter").value = "";
+          switchView("knowledge"); renderLibrary();
+        }
         else if (item.kind === "产物") switchView("outputs");
         else switchView("sales");
         renderProjectSelectors(); renderProjects();
@@ -3194,7 +3431,7 @@
     if (/PPT|演示|汇报材料/u.test(request)) { $("ppt-topic").value = request.slice(0, 240); openService("presentation-studio"); return; }
     const serviceId = /政府|园区|政策合作/u.test(request) ? "government-proposal" : /研究|行业|竞品|公开资料|调研/u.test(request) ? "industry-research" : /文件|方案|纪要|邮件/u.test(request) ? "office-document" : "sales-review";
     selectedService = serviceId;
-    try { const response = await createTask(`【工作台快速指令】\n${request}\n请根据当前项目空间、知识库和销售台账补齐必要背景；涉及写入或正式文件时先等待审批。`); $("quick-command").value = ""; note(`任务已登记（${response.request_id}）。`); await load(); switchView("tasks"); }
+    try { const response = await createTask(`【工作台快速指令】\n${request}\n请根据当前项目空间、资料库和销售台账补齐必要背景；涉及写入或正式文件时先等待审批。`); $("quick-command").value = ""; note(`任务已登记（${response.request_id}）。`); await load(); switchView("tasks"); }
     catch (error) { note(error.message, true); }
   }
   $("quick-command-start").onclick = runQuickCommand;

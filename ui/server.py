@@ -76,6 +76,20 @@ from agent_platform.business_backend import (  # noqa: E402
     search_accounts,
     search_business_records,
 )
+from agent_platform.library_store import (  # noqa: E402
+    CATEGORIES as LIBRARY_CATEGORIES,
+    LibraryStoreError,
+    append_file_version,
+    archive_record as archive_library_record,
+    build_library_snapshot,
+    catalog_revision,
+    find_entry as find_library_entry,
+    normalize_url as normalize_library_url,
+    register_file as register_library_file,
+    register_url as register_library_url,
+    restore_record as restore_library_record,
+    update_metadata as update_library_metadata,
+)
 from agent_platform.bid_store import (  # noqa: E402
     ALLOWED_BID_SUFFIXES,
     MAX_BID_FILE_BYTES,
@@ -111,6 +125,7 @@ DESKTOP_SETTINGS = RUNTIME / "desktop-settings.json"
 AI_CORE_LOG = RUNTIME / "ai-core.log"
 REIMBURSEMENT_BATCHES = RUNTIME / "reimbursement-batches"
 FILE_TRASH = RUNTIME / "file-trash"
+LIBRARY_INPUTS = INPUTS / "library"
 SERVER_TOKEN = secrets.token_urlsafe(32)
 ACTIVE_PROFILE_ID: str | None = None
 
@@ -136,13 +151,13 @@ NODE_DISPLAY_NAMES = {
     "public_research": "检索公开资料", "search_public_sources": "检索公开资料",
     "research": "检索公开资料", "open_sources": "核验来源正文",
     "open_public_sources": "核验来源正文", "open_policy_sources": "核验政策正文",
-    "internal_evidence": "读取知识库", "search_knowledge": "读取知识库",
+    "internal_evidence": "读取资料库", "search_knowledge": "读取资料库",
     "join_evidence": "汇总内外部证据", "synthesize": "形成综合判断",
     "draft": "撰写方案", "independent_review": "执行独立复核", "validate": "校验内容",
     "approval": "确认合作方案", "frame_problem": "明确机会问题",
     "opportunity_brief": "形成机会简报", "evidence_gate": "校验证据质量",
-    "approve_knowledge": "确认知识入库", "update_knowledge": "更新知识库",
-    "persist_knowledge": "写入知识库", "load_goal": "读取指标目标",
+    "approve_knowledge": "确认资料入库", "update_knowledge": "更新资料库",
+    "persist_knowledge": "写入资料库", "load_goal": "读取指标目标",
     "design": "设计指标方案", "approve_measurement": "确认指标方案",
     "collect_release": "收集发布资料", "review": "复核发布准备",
     "gate": "检查发布门槛", "decision": "确认发布决策", "record_decision": "记录发布决策",
@@ -497,11 +512,11 @@ def open_knowledge_file() -> Path:
         return open_data_directory()
     target = ROOT / "data" / "knowledge" / "source-register.csv"
     if target.is_symlink() or not target.is_file():
-        raise ValueError("知识库文件尚未创建")
+        raise ValueError("资料库来源文件尚未创建")
     root = ROOT.resolve()
     file_path = target.resolve()
     if not file_path.is_relative_to(root) or file_path == root:
-        raise ValueError("知识库文件越出应用安装范围")
+        raise ValueError("资料库来源文件越出应用安装范围")
     try:
         if sys.platform == "win32":
             startfile = getattr(os, "startfile", None)
@@ -519,7 +534,7 @@ def open_knowledge_file() -> Path:
                 close_fds=True, start_new_session=True,
             )
     except OSError as error:
-        raise OSError(f"无法打开知识库文件：{error}") from error
+        raise OSError(f"无法打开资料库来源文件：{error}") from error
     return file_path
 
 
@@ -950,7 +965,7 @@ def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
     if value.get("confidentiality") not in {"internal", "restricted", "public"}:
         raise ValueError("演示文稿保密等级无效")
     if value.get("source_scope") != "public-web-and-profile-knowledge":
-        raise ValueError("演示文稿工作室首版只支持公开网页与当前角色知识库")
+        raise ValueError("演示文稿工作室首版只支持公开网页与当前角色资料库")
     if not isinstance(value.get("target_slides"), int) or not 4 <= value["target_slides"] <= 10:
         raise ValueError("演示文稿页数必须为 4–10")
     if not isinstance(value.get("duration_minutes"), int) or not 3 <= value["duration_minutes"] <= 120:
@@ -2230,8 +2245,13 @@ def output_summary() -> list[dict[str, Any]]:
             modified = item.stat().st_mtime
         except OSError:
             continue
-        relative = item.relative_to(ROOT).as_posix()
-        relative_parts = item.relative_to(OUTPUTS).parts
+        try:
+            relative = item.relative_to(ROOT).as_posix()
+            relative_parts = item.relative_to(OUTPUTS).parts
+        except ValueError:
+            # ROOT/OUTPUTS are normally configured together. Fail closed if a
+            # damaged runtime configuration separates them.
+            continue
         project_id = (
             relative_parts[1]
             if len(relative_parts) >= 3 and relative_parts[0] == "reimbursements" and
@@ -2376,6 +2396,124 @@ def knowledge_entries(limit: int = 500) -> dict[str, Any]:
         return {"version": "error", "entries": [], "truncated": False, "error": str(error)}
 
 
+def library_snapshot() -> dict[str, Any]:
+    source_snapshot = knowledge_entries(5000)
+    snapshot = build_library_snapshot(
+        ROOT,
+        sources=source_snapshot.get("entries", []),
+        project_files=project_files(),
+        artifacts=output_summary(),
+    )
+    if source_snapshot.get("error"):
+        snapshot["warning"] = f"来源登记暂时不可用：{source_snapshot['error']}"
+    snapshot["source_backend"] = source_snapshot.get("backend") or data_summary().get("backend")
+    return snapshot
+
+
+def library_quick_revision(data: dict[str, Any], files: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> str:
+    material = {
+        "catalog": catalog_revision(ROOT),
+        "sources": [
+            {key: item.get(key) for key in ("path", "version", "records", "updated_at")}
+            for item in data.get("knowledge", [])
+        ],
+        "files": [{"path": item.get("path"), "version": item.get("version")} for item in files],
+        "artifacts": [{"path": item.get("path"), "modified_at": item.get("modified_at")} for item in artifacts],
+    }
+    return hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def library_entry(library_id: str, *, include_trash: bool = False) -> dict[str, Any]:
+    return find_library_entry(library_snapshot(), library_id, include_trash=include_trash)
+
+
+def open_library_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    entry = library_entry(str(payload.get("library_id") or ""))
+    url = str(entry.get("url") or "").strip()
+    if url:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("资料来源地址无效")
+        if not webbrowser.open(url, new=2):
+            raise RuntimeError("无法打开系统浏览器；可复制资料来源地址后手动打开")
+        return {"message": "已在系统浏览器中打开资料来源。", "url": url}
+    relative = str(entry.get("path") or "")
+    kind = str(entry.get("kind") or "")
+    allowed = {
+        "project_file": ("inputs/projects/",),
+        "library_file": ("inputs/library/",),
+        "artifact": ("outputs/",),
+    }.get(kind)
+    if not relative or allowed is None:
+        raise ValueError("这条资料没有可打开的原件")
+    path = _safe_relative_file(relative, allowed)
+    expected_digest = str(entry.get("file_sha256") or "")
+    if expected_digest:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        if not secrets.compare_digest(digest.hexdigest(), expected_digest):
+            raise RuntimeError("资料原件内容已变化，已停止打开；请上传为新版本")
+    _open_local_file(path)
+    return {"message": f"已使用系统默认应用打开 {entry.get('title') or path.name}。", "path": relative}
+
+
+def update_library_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    identity = safe_id(str(payload.get("library_id") or ""))
+    base = library_entry(identity)
+    record = update_library_metadata(ROOT, base, payload)
+    return {"entry": record, "message": "资料信息已更新；原始文件和来源记录未被改写。"}
+
+
+def register_library_url_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_library_url(payload.get("url"))
+    existing = None
+    for entry in library_snapshot().get("entries", []):
+        if not entry.get("url"):
+            continue
+        try:
+            if normalize_library_url(entry.get("url")) == normalized:
+                existing = entry
+                break
+        except LibraryStoreError:
+            continue
+    if existing:
+        return {"entry": existing, "duplicate": True, "message": "该网页已经在资料库中，已为你打开原记录。"}
+    record = register_library_url(ROOT, {**payload, "url": normalized})
+    return {"entry": record, "duplicate": False, "message": "网页已登记到待整理区；尚未核验正文内容。"}
+
+
+def archive_library_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    identity = safe_id(str(payload.get("library_id") or ""))
+    base = library_entry(identity)
+    expected = payload.get("expected_version", 0)
+    if not isinstance(expected, int) or isinstance(expected, bool):
+        raise ValueError("资料版本无效")
+    references = _file_references(str(base.get("path") or "")) if base.get("path") else []
+    if references and payload.get("acknowledge_references") is not True:
+        return {
+            "requires_confirmation": True,
+            "references": references,
+            "message": "该资料已被任务或业务记录引用。移入资料库回收站不会永久删除原件，但会从日常检索中隐藏。",
+        }
+    record = archive_library_record(ROOT, base, expected)
+    return {
+        "entry": record,
+        "message": "资料已移入资料库回收站；原件没有被永久删除，可随时恢复。",
+    }
+
+
+def restore_library_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    identity = safe_id(str(payload.get("library_id") or ""))
+    expected = payload.get("expected_version")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1:
+        raise ValueError("资料版本无效")
+    library_entry(identity, include_trash=True)
+    record = restore_library_record(ROOT, identity, expected)
+    return {"entry": record, "message": "资料已恢复到资料库。"}
+
+
 def open_knowledge_source(payload: dict[str, Any]) -> str:
     url = str(payload.get("url") or "").strip()
     if not url or len(url) > 2048:
@@ -2387,10 +2525,15 @@ def open_knowledge_source(payload: dict[str, Any]) -> str:
         allowed = business_knowledge_urls(ROOT)
     except BusinessBackendError as error:
         raise ValueError(str(error)) from error
+    allowed.update(
+        str(entry.get("url") or "").strip()
+        for entry in library_snapshot().get("entries", [])
+        if str(entry.get("url") or "").strip()
+    )
     if url not in allowed:
-        raise ValueError("该链接不属于当前知识库记录")
+        raise ValueError("该链接不属于当前资料库记录")
     if not webbrowser.open(url, new=2):
-        raise RuntimeError("无法打开系统浏览器；可在知识卡片中复制来源链接")
+        raise RuntimeError("无法打开系统浏览器；可在资料卡片中复制来源链接")
     return url
 
 
@@ -2404,10 +2547,14 @@ def local_search(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("搜索范围无效")
     scopes = set(requested_scopes)
     results: list[dict[str, Any]] = []
+    seen_references: set[str] = set()
 
     def add(kind: str, title: str, subtitle: str, snippet: str, reference: str, project_id: str = DEFAULT_PROJECT_ID) -> None:
-        if len(results) >= 60:
+        reference_key = str(reference or "").strip()
+        if len(results) >= 60 or (reference_key and reference_key in seen_references):
             return
+        if reference_key:
+            seen_references.add(reference_key)
         results.append({
             "kind": kind, "title": title[:160], "subtitle": subtitle[:200],
             "snippet": snippet[:400], "reference": reference[:300], "project_id": project_id,
@@ -2422,11 +2569,18 @@ def local_search(payload: dict[str, Any]) -> dict[str, Any]:
             if _match_text(query, [task.get("service_id"), task.get("request"), task.get("status")]):
                 add("任务", service_display_name(task.get("service_id")), TASK_STATUS_DISPLAY_NAMES.get(str(task.get("status") or ""), "状态未知"), str(task.get("request") or ""), str(task.get("task_id") or ""), str(task.get("project_id") or DEFAULT_PROJECT_ID))
     if "knowledge" in scopes:
-        knowledge = knowledge_entries(5000)
-        for row in knowledge.get("entries", []):
-            fields = [row.get(key) for key in ("title", "publisher", "region", "topic", "notes", "status")]
+        library = library_snapshot()
+        for row in library.get("entries", []):
+            fields = [row.get(key) for key in ("title", "publisher", "region", "topic", "notes", "status", "category", "tags")]
             if _match_text(query, fields):
-                add("知识", row.get("title") or "未命名来源", _snippet([row.get("publisher"), row.get("published_date"), row.get("status")]), _snippet([row.get("topic"), row.get("region"), row.get("notes")]), row.get("url") or row.get("source_id") or "")
+                add(
+                    "资料",
+                    row.get("title") or "未命名资料",
+                    _snippet([row.get("publisher"), row.get("published_date"), row.get("status")]),
+                    _snippet([row.get("topic"), row.get("region"), row.get("notes")]),
+                    row.get("library_id") or row.get("path") or row.get("url") or row.get("source_id") or "",
+                    row.get("project_id") or DEFAULT_PROJECT_ID,
+                )
     if "sales" in scopes:
         try:
             for row in search_business_records(ROOT, query, 60 - len(results)) if len(results) < 60 else []:
@@ -2490,6 +2644,20 @@ class ControlHandler(SimpleHTTPRequestHandler):
             status = HTTPStatus.BAD_REQUEST
         elif code == "STORE_BUSY":
             status = HTTPStatus.SERVICE_UNAVAILABLE
+        else:
+            status = HTTPStatus.CONFLICT
+        self.send_json(status, {"error": str(error), "code": code})
+
+    def send_library_error(self, error: LibraryStoreError | ValueError) -> None:
+        code = error.code if isinstance(error, LibraryStoreError) else "INVALID_INPUT"
+        if code == "NOT_FOUND":
+            status = HTTPStatus.NOT_FOUND
+        elif code in {"INVALID_INPUT", "UNSAFE_PATH", "CATALOG_INVALID"}:
+            status = HTTPStatus.BAD_REQUEST
+        elif code in {"CATALOG_FULL", "VERSION_LIMIT"}:
+            status = HTTPStatus.INSUFFICIENT_STORAGE
+        elif code == "DUPLICATE_FILE":
+            status = HTTPStatus.CONFLICT
         else:
             status = HTTPStatus.CONFLICT
         self.send_json(status, {"error": str(error), "code": code})
@@ -2558,6 +2726,109 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "name": filename, "path": relative, "project_id": project_id,
             "size": received, "message": "资料已保存到项目空间；创建任务时可直接引用该路径。",
         })
+
+    def upload_library_file(self, library_id: str = "") -> None:
+        encoded_name = self.headers.get("X-File-Name", "")
+        filename = unquote(encoded_name).strip()
+        if (
+            not filename or len(filename) > 120 or Path(filename).name != filename or
+            filename in {".", ".."} or filename[-1] in {".", " "} or
+            re.search(r'[<>:"/\\|?*]', filename) is not None or
+            any(ord(character) < 32 for character in filename) or
+            Path(filename).suffix.lower() not in ALLOWED_UPLOAD_SUFFIXES
+        ):
+            raise ValueError("文件名无效；仅支持电子文档、文字文档、表格、图片、压缩包和演示文稿")
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            raise ValueError("上传文件必须为 1 字节至 32 兆字节")
+
+        is_new = not library_id
+        if is_new:
+            library_id = f"library-{uuid.uuid4().hex[:24]}"
+            expected_version = 0
+            version_number = 1
+        else:
+            library_id = safe_id(library_id)
+            entry = library_entry(library_id)
+            if entry.get("kind") != "library_file":
+                raise ValueError("只有直接上传到资料库的文件可以追加版本")
+            try:
+                expected_version = int(self.headers.get("X-Library-Version", ""))
+            except ValueError as error:
+                raise ValueError("资料版本无效") from error
+            if expected_version != entry.get("catalog_version"):
+                raise RuntimeError("资料信息已变化，请刷新后重试")
+            version_number = len(entry.get("versions") or []) + 1
+        version_id = f"version-{version_number:04d}"
+
+        category = unquote(self.headers.get("X-Library-Category", "")).strip()
+        if category and category not in LIBRARY_CATEGORIES:
+            raise ValueError("资料分类无效")
+        project_id = unquote(self.headers.get("X-Project-Id", "")).strip()
+        account_id = unquote(self.headers.get("X-Account-Id", "")).strip()
+        bid_id = unquote(self.headers.get("X-Bid-Id", "")).strip()
+        if project_id:
+            active_project(project_id)
+        if account_id:
+            safe_id(account_id)
+        if bid_id:
+            safe_id(bid_id)
+
+        if INPUTS.is_symlink() or LIBRARY_INPUTS.is_symlink():
+            raise ValueError("资料库文件目录不能是符号链接")
+        version_root = LIBRARY_INPUTS / library_id / "versions" / version_id
+        version_root.mkdir(parents=True, exist_ok=False)
+        actual_root = version_root.resolve()
+        if not actual_root.is_relative_to(INPUTS.resolve()) or version_root.is_symlink():
+            raise ValueError("资料库文件目录越出受控 inputs 范围")
+        target = version_root / filename
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".library-upload-", suffix=".tmp", dir=version_root)
+        temporary = Path(temporary_name)
+        received = 0
+        digest = hashlib.sha256()
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                while received < length:
+                    block = self.rfile.read(min(1024 * 1024, length - received))
+                    if not block:
+                        raise ValueError("上传连接提前中断")
+                    handle.write(block)
+                    digest.update(block)
+                    received += len(block)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(temporary, target)
+            relative = target.relative_to(ROOT).as_posix()
+            metadata = {
+                "library_id": library_id,
+                "version_id": version_id,
+                "path": relative,
+                "filename": filename,
+                "title": unquote(self.headers.get("X-Library-Title", "")).strip() or Path(filename).stem,
+                "sha256": digest.hexdigest(),
+                "size": received,
+                "project_id": project_id,
+                "account_id": account_id,
+                "bid_id": bid_id,
+            }
+            if category:
+                metadata["category"] = category
+            if is_new:
+                record = register_library_file(ROOT, metadata)
+                message = "资料已保存并进入待整理区；可继续编辑分类、关联对象或发起资料解读。"
+            else:
+                record = append_file_version(ROOT, library_id, metadata, expected_version)
+                message = "新版本已保存，旧版本继续保留；该资料已重新标记为待核验。"
+        except Exception:
+            target.unlink(missing_ok=True)
+            try:
+                version_root.rmdir()
+            except OSError:
+                pass
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.send_json(HTTPStatus.CREATED, {"entry": record, "message": message})
 
     def upload_bid_file(self) -> None:
         bid_id = safe_id(self.headers.get("X-Bid-Id", ""))
@@ -2647,10 +2918,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
             tasks = task_summaries()
             files = project_files()
             outputs = output_summary()
+            data = data_summary()
             batches = reimbursement_batches()
             self.send_json(HTTPStatus.OK, {"profiles": profiles(), "workflows": workflows(), "tasks": tasks,
-                                           "data": data_summary(), "outputs": outputs,
+                                           "data": data, "outputs": outputs,
                                             "projects": project_summaries(tasks, files, outputs), "project_files": files,
+                                            "library_revision": library_quick_revision(data, files, outputs),
                                             "schedules": schedule_records(),
                                             "model": model_settings_summary(ROOT),
                                             "search": search_settings_summary(ROOT),
@@ -2683,6 +2956,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/knowledge":
             self.send_json(HTTPStatus.OK, knowledge_entries())
+            return
+        if route == "/api/library":
+            try:
+                self.send_json(HTTPStatus.OK, library_snapshot())
+            except (LibraryStoreError, ValueError) as error:
+                self.send_library_error(error)
             return
         if route == "/api/accounts":
             try:
@@ -2836,6 +3115,21 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     return
                 self.upload_project_file()
                 return
+            if route == "/api/library-files":
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+                    self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "资料库上传只接受二进制文件"})
+                    return
+                self.upload_library_file()
+                return
+            if route.startswith("/api/library-files/") and route.endswith("/versions"):
+                parts = route.split("/")
+                if len(parts) != 5:
+                    raise ValueError("资料版本上传地址无效")
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+                    self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "资料版本上传只接受二进制文件"})
+                    return
+                self.upload_library_file(unquote(parts[3]))
+                return
             if route == "/api/bid-files":
                 if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
                     self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "投标资料上传只接受二进制文件"})
@@ -2880,6 +3174,17 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.CREATED, run_schedule_now(route.split("/")[3]))
             elif route == "/api/search":
                 self.send_json(HTTPStatus.OK, local_search(payload))
+            elif route == "/api/library/urls":
+                result = register_library_url_entry(payload)
+                self.send_json(HTTPStatus.OK if result["duplicate"] else HTTPStatus.CREATED, result)
+            elif route == "/api/library/metadata":
+                self.send_json(HTTPStatus.OK, update_library_entry(payload))
+            elif route == "/api/library/archive":
+                self.send_json(HTTPStatus.OK, archive_library_entry(payload))
+            elif route == "/api/library/restore":
+                self.send_json(HTTPStatus.OK, restore_library_entry(payload))
+            elif route == "/api/library/open":
+                self.send_json(HTTPStatus.OK, open_library_entry(payload))
             elif route == "/api/model-discovery":
                 self.discover_model_options(payload)
             elif route == "/api/model-settings":
@@ -2916,8 +3221,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 sqlite_directory = file_path.is_dir()
                 self.send_json(HTTPStatus.OK, {
                     "message": (
-                        "当前知识库使用 SQLite；已打开其所在数据目录，请在工作台知识库页面查看和检索内容。"
-                        if sqlite_directory else "已使用系统默认表格软件打开知识库。"
+                        "当前资料来源使用 SQLite；已打开其所在数据目录，请在工作台资料库页面查看和检索内容。"
+                        if sqlite_directory else "已使用系统默认表格软件打开资料库来源文件。"
                     ),
                     "path": str(file_path),
                 })
@@ -2983,6 +3288,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_error(HTTPStatus.NOT_FOUND)
         except BidStoreError as error:
             self.send_bid_error(error)
+        except LibraryStoreError as error:
+            self.send_library_error(error)
         except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError, MailProviderError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:
@@ -3268,7 +3575,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, {
             "task_id": task_id,
             "removed_records": removed,
-            "message": "任务记录及其运行过程已彻底删除；已生成文件、知识库和销售台账未受影响。",
+            "message": "任务记录及其运行过程已彻底删除；已生成文件、资料库和销售台账未受影响。",
         })
 
     def revise_write_intent(self, task_id: str, payload: dict[str, Any]) -> None:

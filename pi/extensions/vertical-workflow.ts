@@ -1322,10 +1322,10 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       "web.search": ["collecting", "正在检索公开资料并筛选候选来源。"],
       "web.open": ["collecting", "正在读取来源正文并核对出处。"],
       "pdf.read": ["collecting", "正在提取 PDF 正文、页码和来源信息。"],
-      "knowledge.search": ["collecting", "正在读取当前项目和知识库资料。"],
+      "knowledge.search": ["collecting", "正在读取当前项目和资料库。"],
       "sales.read": ["collecting", "正在汇总客户、跟进和资源记录。"],
       "weekly.snapshot": ["collecting", "正在汇总本周销售记录与任务变化。"],
-      "knowledge.write": ["delivering", "正在写入已批准的知识记录。"],
+      "knowledge.write": ["delivering", "正在写入已批准的资料记录。"],
       "sales.write": ["delivering", "正在提交已批准的销售台账变更。"],
       "bid.read": ["collecting", "正在读取投标项目、资料、要求与应答记录。"],
       "bid.write": ["delivering", "正在提交已批准的投标项目变更。"],
@@ -1376,7 +1376,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow, recoveryNote = "") => {
     pi.sendUserMessage(
-      `/skill:${service.skill} ${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护知识库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
+      `/skill:${service.skill} ${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护资料库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
       { expandPromptTemplates: true },
     );
   };
@@ -2012,8 +2012,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "director_propose_write_intent",
-    label: "Prepare Exact Write for Approval",
-    description: "确定性校验并冻结知识库、销售台账、投标项目或正式文件的精确载荷，生成审批绑定哈希；此工具本身不写正式文件。",
+    label: "准备待审批的精确写入",
+    description: "确定性校验并冻结资料库、销售台账、投标项目或正式文件的精确载荷，生成审批绑定哈希；此工具本身不写正式文件。",
     parameters: Type.Object({
       logical_tool: Type.Union([
         Type.Literal("knowledge.write"), Type.Literal("sales.write"), Type.Literal("bid.write"),
@@ -2091,7 +2091,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     if ((toolName === "write" || toolName === "edit") && inputTargetsData(input, projectRoot)) {
       return {
         block: true,
-        reason: "data/ 下的结构化数据只能通过受控知识库、销售台账或投标项目适配器修改。",
+        reason: "data/ 下的结构化数据只能通过受控资料库、销售台账或投标项目适配器修改。",
       };
     }
     if ((toolName === "write" || toolName === "edit") && inputTargetsGovernedArtifact(input)) {

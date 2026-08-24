@@ -924,13 +924,21 @@ def data_summary(project_root: Path | str) -> dict[str, Any]:
         return {"backend": "csv", "binding_id": backend.binding_id}
     tables = {"knowledge": ("sources",), "sales": ("accounts", "activities", "resource_requests", "sales_assets")}
     with _sqlite_connection(backend) as connection:
-        result = {
-            group: [
-                {"path": f"SQLite · {table}", "exists": True, "records": connection.execute(f"SELECT count(*) FROM {table} WHERE deleted_at IS NULL").fetchone()[0], "updated_at": None, "version": backend.binding_id}
-                for table in names
-            ]
-            for group, names in tables.items()
-        }
+        result: dict[str, list[dict[str, Any]]] = {}
+        for group, names in tables.items():
+            summaries: list[dict[str, Any]] = []
+            for table in names:
+                row = connection.execute(
+                    f"SELECT count(*) AS records,max(updated_at) AS updated_at FROM {table} WHERE deleted_at IS NULL"
+                ).fetchone()
+                records = int(row["records"])
+                updated_at = row["updated_at"]
+                summaries.append({
+                    "path": f"SQLite · {table}", "exists": True, "records": records,
+                    "updated_at": updated_at,
+                    "version": f"{backend.binding_id}:{table}:{records}:{updated_at or ''}",
+                })
+            result[group] = summaries
     return {"backend": "sqlite", "binding_id": backend.binding_id, **result}
 
 

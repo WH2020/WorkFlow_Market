@@ -217,13 +217,22 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('selectedCustomerContextText()', javascript)
         self.assertIn('.customer-operation-layout', styles)
         self.assertIn('api("/api/data-directory/open"', javascript)
-        self.assertIn('id="open-knowledge-file"', html)
-        self.assertIn('id="knowledge-query"', html)
-        self.assertIn('id="knowledge-status-filter"', html)
-        self.assertIn('id="knowledge-records"', html)
-        self.assertIn('api("/api/knowledge/source/open"', javascript)
-        self.assertIn('api("/api/knowledge/file/open"', javascript)
-        self.assertIn("function renderKnowledge", javascript)
+        self.assertIn('id="open-library-directory"', html)
+        self.assertIn('id="library-query"', html)
+        self.assertIn('id="library-status-filter"', html)
+        self.assertIn('id="library-records"', html)
+        self.assertIn('id="library-preview"', html)
+        self.assertIn('id="library-file-input"', html)
+        self.assertIn('id="library-version-input"', html)
+        self.assertIn('api("/api/library/open"', javascript)
+        self.assertIn('api("/api/library/metadata"', javascript)
+        self.assertIn('api("/api/library/archive"', javascript)
+        self.assertIn('api("/api/library/restore"', javascript)
+        self.assertIn("function renderLibrary", javascript)
+        self.assertIn("function loadLibrary", javascript)
+        self.assertIn("function libraryTaskOptions", javascript)
+        self.assertIn("销售总监资料库", html)
+        self.assertNotIn(">知识库</button>", html)
         self.assertIn('data-page="tools"', html)
         self.assertIn('id="expense-mail-results"', html)
         self.assertIn('id="search-expense-mail"', html)
@@ -280,7 +289,7 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('summary.textContent = "查看技术明细与校验码"', javascript)
         self.assertIn("saved.reviewTop = cards.scrollTop", javascript)
         self.assertIn("saved.rawTop = payload.scrollTop", javascript)
-        self.assertIn('return "批准写入知识库"', javascript)
+        self.assertIn('return "批准写入资料库"', javascript)
         self.assertIn(".write-review-card", styles)
         self.assertIn(".write-edit-overlay", styles)
         self.assertIn("function confirmAction", javascript)
@@ -893,6 +902,24 @@ class ControlCentreTests(unittest.TestCase):
         self.assertNotIn("private_field", json.dumps(result, ensure_ascii=False))
         self.assertNotIn("不应直接整行返回", json.dumps(result, ensure_ascii=False))
 
+    def test_local_search_returns_a_stable_material_reference(self):
+        previous_root, previous_inputs, previous_outputs = server.ROOT, server.INPUTS, server.OUTPUTS
+        try:
+            root = Path(self.temporary.name) / "library-search-root"
+            knowledge = root / "data" / "knowledge"
+            knowledge.mkdir(parents=True)
+            (knowledge / "source-register.csv").write_text(
+                "source_id,title,url,publisher,published_date,accessed_date,region,topic,source_type,quality,exposure_status,status,notes\n"
+                "source-policy,江苏具身智能政策,https://example.com/policy,主管部门,2026-08-01,2026-08-20,江苏,具身智能,html,high,public,verified,待复核\n",
+                encoding="utf-8",
+            )
+            server.ROOT, server.INPUTS, server.OUTPUTS = root, root / "inputs", root / "outputs"
+            result = server.local_search({"query": "具身智能", "scopes": ["knowledge"]})
+            self.assertEqual(result["results"][0]["kind"], "资料")
+            self.assertTrue(result["results"][0]["reference"].startswith("library-"))
+        finally:
+            server.ROOT, server.INPUTS, server.OUTPUTS = previous_root, previous_inputs, previous_outputs
+
     def test_project_upload_is_confined_and_never_overwrites(self):
         previous_root, previous_inputs = server.ROOT, server.INPUTS
         try:
@@ -920,6 +947,77 @@ class ControlCentreTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), payload)
         finally:
             server.ROOT, server.INPUTS = previous_root, previous_inputs
+
+    def test_library_upload_creates_catalog_record_and_keeps_version_history(self):
+        previous_root, previous_inputs, previous_outputs, previous_library_inputs = (
+            server.ROOT, server.INPUTS, server.OUTPUTS, server.LIBRARY_INPUTS
+        )
+        try:
+            root = Path(self.temporary.name) / "library-upload-root"
+            root.mkdir()
+            server.ROOT, server.INPUTS, server.OUTPUTS = root, root / "inputs", root / "outputs"
+            server.LIBRARY_INPUTS = server.INPUTS / "library"
+            payload = b"%PDF-1.7 first"
+            handler = object.__new__(server.ControlHandler)
+            replies = []
+            handler.headers = {
+                "X-File-Name": "customer-evidence.pdf", "X-Project-Id": server.DEFAULT_PROJECT_ID,
+                "X-Library-Category": "customer", "X-Account-Id": "account-a",
+                "Content-Length": str(len(payload)),
+            }
+            handler.rfile = io.BytesIO(payload)
+            handler.send_json = lambda status, value: replies.append((status, value))
+            handler.upload_library_file()
+            self.assertEqual(replies[-1][0], HTTPStatus.CREATED)
+            first = replies[-1][1]["entry"]
+            self.assertEqual(first["category"], "customer")
+            self.assertEqual(first["account_id"], "account-a")
+            self.assertEqual((root / first["path"]).read_bytes(), payload)
+
+            second_payload = b"%PDF-1.7 second"
+            handler.headers = {
+                "X-File-Name": "customer-evidence.pdf", "X-Project-Id": server.DEFAULT_PROJECT_ID,
+                "X-Library-Version": str(first["version"]), "Content-Length": str(len(second_payload)),
+            }
+            handler.rfile = io.BytesIO(second_payload)
+            handler.upload_library_file(first["library_id"])
+            second = replies[-1][1]["entry"]
+            self.assertEqual(len(second["versions"]), 2)
+            self.assertEqual(second["status"], "pending")
+            self.assertEqual((root / second["path"]).read_bytes(), second_payload)
+        finally:
+            server.ROOT, server.INPUTS, server.OUTPUTS, server.LIBRARY_INPUTS = (
+                previous_root, previous_inputs, previous_outputs, previous_library_inputs
+            )
+
+    def test_library_metadata_archive_and_restore_do_not_mutate_original_source(self):
+        previous_root, previous_inputs, previous_outputs = server.ROOT, server.INPUTS, server.OUTPUTS
+        try:
+            root = Path(self.temporary.name) / "library-metadata-root"
+            knowledge = root / "data" / "knowledge"
+            knowledge.mkdir(parents=True)
+            (knowledge / "source-register.csv").write_text(
+                "source_id,title,url,publisher,published_date,accessed_date,region,topic,source_type,quality,exposure_status,key_facts,important_quotes,interpretation,limitations,status,notes\n"
+                "source-a,政策原文,https://example.com/a,主管部门,2026-08-01,2026-08-20,江苏,具身智能,html,high,public,支持试点,,,需核验有效期,verified,第3段\n",
+                encoding="utf-8",
+            )
+            server.ROOT, server.INPUTS, server.OUTPUTS = root, root / "inputs", root / "outputs"
+            entry = server.library_snapshot()["entries"][0]
+            updated = server.update_library_entry({
+                "library_id": entry["library_id"], "expected_version": 0, "title": "政策原文（销售使用）",
+                "category": "government", "status": "verified", "project_id": server.DEFAULT_PROJECT_ID,
+            })["entry"]
+            archived = server.archive_library_entry({
+                "library_id": entry["library_id"], "expected_version": updated["version"],
+            })["entry"]
+            self.assertTrue(archived["deleted_at"])
+            restored = server.restore_library_entry({
+                "library_id": entry["library_id"], "expected_version": archived["version"],
+            })["entry"]
+            self.assertEqual(restored["deleted_at"], "")
+            self.assertIn("政策原文,https://example.com/a", (knowledge / "source-register.csv").read_text(encoding="utf-8"))
+        finally:
+            server.ROOT, server.INPUTS, server.OUTPUTS = previous_root, previous_inputs, previous_outputs
 
     def test_project_file_can_be_renamed_trashed_and_restored(self):
         previous_root, previous_inputs, previous_outputs = server.ROOT, server.INPUTS, server.OUTPUTS
