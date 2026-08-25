@@ -35,6 +35,17 @@ from .sales_store import (
 )
 
 
+def configure_utf8_console() -> None:
+    """Emit stable UTF-8 JSON and Chinese messages on Windows and macOS."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate and inspect vertical agent bundles")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
@@ -202,6 +213,7 @@ def _run_coding_agent_command(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_utf8_console()
     args = build_parser().parse_args(argv)
     if args.command == "coding-agent":
         return _run_coding_agent_command(args)

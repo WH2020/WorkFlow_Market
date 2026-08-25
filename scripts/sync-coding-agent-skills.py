@@ -14,6 +14,17 @@ TARGETS = (
 )
 
 
+def configure_utf8_console() -> None:
+    """Keep Chinese status messages portable across Windows CI code pages."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def files(root: Path) -> dict[str, bytes]:
     if root.is_symlink() or not root.is_dir():
         raise RuntimeError(f"技能目录不存在或不安全：{root}")
@@ -61,6 +72,7 @@ def sync(check_only: bool) -> list[str]:
 
 
 def main() -> int:
+    configure_utf8_console()
     parser = argparse.ArgumentParser(description="同步 Codex CLI 与 Claude Code 的 Agent4Market 技能")
     parser.add_argument("--check", action="store_true", help="只检查，不修改文件")
     args = parser.parse_args()
