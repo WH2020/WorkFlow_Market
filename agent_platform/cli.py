@@ -8,6 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .coding_agents import (
+    CodingAgentBridgeError,
+    WorkbenchClient,
+    coding_agent_doctor,
+    sales_services,
+)
 from .core import ManifestError, Platform, WorkflowError
 from .environment import (
     discover_ppt_runtime,
@@ -46,6 +52,37 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--require-ppt", action="store_true", help="Fail unless the independent PPT toolchain is complete")
     launch = subparsers.add_parser("launch", help="Start Pi with the validated project-local PPT toolchain")
     launch.add_argument("pi_args", nargs=argparse.REMAINDER)
+    coding = subparsers.add_parser(
+        "coding-agent",
+        help="Use Codex CLI or Claude Code as a governed local entry point",
+    )
+    coding_commands = coding.add_subparsers(dest="coding_command", required=True)
+    coding_commands.add_parser("doctor", help="Check both coding-agent hosts and the local workbench")
+    coding_commands.add_parser("services", help="List Sales Director services available to coding agents")
+    coding_commands.add_parser("projects", help="List active local project spaces")
+    coding_tasks = coding_commands.add_parser("tasks", help="List governed tasks without raw write payloads")
+    coding_tasks.add_argument("--include-history", action="store_true")
+    coding_tasks.add_argument("--limit", type=int, default=20)
+    coding_status = coding_commands.add_parser("status", help="Read one governed task")
+    coding_status.add_argument("--task-id", required=True)
+    coding_submit = coding_commands.add_parser("submit", help="Create a Sales Director task through the local workbench")
+    coding_submit.add_argument("--service", required=True)
+    coding_submit.add_argument("--project", default="project-default")
+    request_source = coding_submit.add_mutually_exclusive_group()
+    request_source.add_argument("--request", help="Task text; prefer --request-file or stdin for sensitive text")
+    request_source.add_argument("--request-file", help="UTF-8 text file, or '-' for stdin")
+    coding_submit.add_argument("--model", help="Configured Agent4Market model identifier")
+    coding_submit.add_argument(
+        "--thinking",
+        choices=("off", "minimal", "low", "medium", "high", "xhigh", "max"),
+    )
+    coding_message = coding_commands.add_parser("message", help="Supplement or redirect a running task")
+    coding_message.add_argument("--task-id", required=True)
+    coding_message.add_argument("--mode", choices=("supplement", "redirect"), required=True)
+    message_source = coding_message.add_mutually_exclusive_group()
+    message_source.add_argument("--content", help="Message text; prefer --content-file or stdin for sensitive text")
+    message_source.add_argument("--content-file", help="UTF-8 text file, or '-' for stdin")
+    coding_commands.add_parser("open", help="Open an already-running Sales Director workbench")
     migrate = subparsers.add_parser("migrate-sales-store", help="Preflight CSV data or build a new staging SQLite store")
     migrate.add_argument("--source", type=Path, default=Path("data/sales"), help="Controlled sales CSV directory")
     migrate.add_argument("--knowledge", type=Path, default=Path("data/knowledge/source-register.csv"))
@@ -82,8 +119,92 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _bounded_text(
+    direct: str | None,
+    source: str | None,
+    *,
+    label: str,
+    maximum: int,
+) -> str:
+    if direct is not None:
+        value = direct
+    elif source == "-" or (source is None and not sys.stdin.isatty()):
+        value = sys.stdin.read(maximum + 2)
+    elif source:
+        path = Path(source).expanduser()
+        if path.is_symlink() or not path.is_file():
+            raise CodingAgentBridgeError("INVALID_INPUT", f"{label}文件不存在或不是普通文件")
+        if path.stat().st_size > 64 * 1024:
+            raise CodingAgentBridgeError("INVALID_INPUT", f"{label}文件超过 64 KB")
+        try:
+            value = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise CodingAgentBridgeError("INVALID_INPUT", f"{label}文件必须使用 UTF-8 编码") from error
+    else:
+        raise CodingAgentBridgeError("INVALID_INPUT", f"请通过标准输入或文件提供{label}")
+    value = value.strip()
+    if not value or len(value) > maximum:
+        raise CodingAgentBridgeError("INVALID_INPUT", f"{label}必须为 1–{maximum} 字")
+    return value
+
+
+def _run_coding_agent_command(args: argparse.Namespace) -> int:
+    try:
+        if args.coding_command == "doctor":
+            result = coding_agent_doctor(args.root)
+        elif args.coding_command == "services":
+            result = {"status": "ok", "profile_id": "sales-director", "services": sales_services(args.root)}
+        else:
+            client = WorkbenchClient()
+            if args.coding_command == "projects":
+                result = {"status": "ok", "projects": client.projects()}
+            elif args.coding_command == "tasks":
+                result = {
+                    "status": "ok",
+                    "tasks": client.tasks(include_history=args.include_history, limit=args.limit),
+                }
+            elif args.coding_command == "status":
+                result = {"status": "ok", "task": client.task(args.task_id)}
+            elif args.coding_command == "submit":
+                request_text = _bounded_text(
+                    args.request, args.request_file, label="任务说明", maximum=4000,
+                )
+                result = {
+                    "status": "ok",
+                    "task": client.submit_task(
+                        service_id=args.service,
+                        project_id=args.project,
+                        request_text=request_text,
+                        requested_model=args.model,
+                        thinking_level=args.thinking,
+                    ),
+                }
+            elif args.coding_command == "message":
+                content = _bounded_text(
+                    args.content, args.content_file, label="任务消息", maximum=1200,
+                )
+                result = {
+                    "status": "ok",
+                    "message": client.send_message(
+                        task_id=args.task_id,
+                        mode=args.mode,
+                        content=content,
+                    ),
+                }
+            else:
+                result = client.open_workbench()
+    except (CodingAgentBridgeError, ManifestError, WorkflowError, OSError) as error:
+        code = error.code if isinstance(error, CodingAgentBridgeError) else "LOCAL_ERROR"
+        print(json_text({"status": "error", "code": code, "error": str(error)}), file=sys.stderr)
+        return 3
+    print(json_text(result))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "coding-agent":
+        return _run_coding_agent_command(args)
     if args.command == "doctor":
         result = doctor_report(args.root)
         print(json_text(result))

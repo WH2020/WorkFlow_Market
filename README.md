@@ -1,4 +1,4 @@
-# 垂直岗位智能体工作台
+# Agent4Market 销售总监智能工作台
 
 一个以 [Pi](https://github.com/earendil-works/pi) 为 Agent 运行时的轻本体插件框架。当前 Windows 桌面发行版只提供一个开箱即用岗位：
 
@@ -12,7 +12,8 @@
 
 ```mermaid
 flowchart LR
-    U[本地工作台 / Pi 命令] --> PI[Pi 会话与模型]
+    U[桌面端 / Codex CLI / Claude Code] --> B[本机受控入口]
+    B --> PI[Pi 会话与模型]
     PI --> A[主 Agent：识别意图与路由]
     A --> D[DAG 状态机]
     D --> N1[Agent / Tool 节点]
@@ -25,6 +26,8 @@ flowchart LR
 ```
 
 轻本体负责插件加载、依赖与权限校验、Profile 组合、DAG 状态和工具门禁。领域规则放在插件与 Skill 中。主 Agent 负责判断“做什么”，状态机约束“按什么顺序做”，Subagent 只承担边界清楚的独立研究或复核。任务快照同时写入 Pi 会话和本地 `.pi/director-runtime/`；Approval 只能由用户命令或本地工作台提出，模型不能自行批准。
+
+Codex CLI 与 Claude Code 可作为额外对话入口：它们通过项目级 Skill 和本机桥接创建、查看、补充或调整同一批任务，Pi 仍是唯一业务执行内核。桥接层不提供批准命令，也不会复制资料库或另建一套工作流。完整步骤见 [Codex CLI 与 Claude Code 使用说明](docs/Codex-CLI与Claude-Code使用说明.md)。
 
 详见 [轻本体插件架构](docs/轻本体插件架构.md) 和 [插件开发指南](docs/插件开发指南.md)。
 
@@ -76,6 +79,7 @@ bash scripts/start-macos.sh
 ```text
 python -m agent_platform doctor
 python -m agent_platform doctor --require-ppt
+python -m agent_platform coding-agent doctor
 ```
 
 安装器不会把密钥或本机绝对路径写入仓库或可执行配置文件。PPTX 由项目固定版本的 PptxGenJS 生成；安装器会检测并在需要时安装开源 LibreOffice，用它完成真实逐页渲染，PDF.js 与本地 Canvas 负责 PNG 预览。启动脚本只向本次 Pi 子进程注入已核验的 LibreOffice 路径和平台字体，不依赖 Codex Desktop。完整步骤见 [Windows / macOS 安装部署](docs/双平台安装部署.md)，依赖来源和许可证见 [PPT 第三方工具](docs/第三方工具.md)。
@@ -139,9 +143,9 @@ macOS 使用 `python3 ui/server.py`。
 
 ```powershell
 python -m agent_platform validate
-python -m agent_platform resolve-profile market-director
-python -m agent_platform resolve-profile product-director
-python -m agent_platform list-services --profile product-director
+python -m agent_platform resolve-profile sales-director
+python -m agent_platform list-services --profile sales-director
+python scripts/sync-coding-agent-skills.py --check
 ```
 
 校验会阻止缺失或循环依赖、重复插件、DAG 环路、未知节点、节点权限越界、未约束 Subagent、任何 WeFlow 引用，以及销售总监和 `market.wechat` 之外的微信能力。安装器同时写入受控 Subagent 配置并关闭 Pi Subagent 的通用后台任务、内置定时、Missions 和跨 Agent 通信；工作台自带的本地每日排队器不属于该机制。
@@ -158,6 +162,9 @@ python -m agent_platform list-services --profile product-director
 
 ```text
 agent_platform/                   轻本体加载、校验、组合与 DAG 规划
+.agents/skills/                   Codex CLI 项目级销售总监技能
+.claude/skills/                   Claude Code 项目级销售总监技能
+integrations/coding-agents/       两种编码助手共用的标准技能源
 contracts/                        插件、Profile、Workflow JSON 契约
 profiles/                         Profile 源码；桌面发行版锁定销售总监
 vertical_plugins/                 shared / market / product 插件
@@ -172,7 +179,7 @@ docs/                             架构、开发和操作说明
 
 ## 当前范围
 
-当前版本是可安装、可受管执行的双平台本地原型：已包含 Windows/macOS 安装与启动入口、NewAPI 动态模型接入与选择、统一 `doctor`、项目自带 PPT 引擎、LibreOffice 真实渲染、平台中文字体和双平台真实 PPT CI，以及销售总监 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、资料/销售适配器、销售总监资料库、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT、通用 PPT 工作室和本地工作台。PPT 工作室首版覆盖周报、行业研究、政府方案和自定义演示，输出 4–10 页可编辑 PPTX，并提供经营管理、政企合作、前沿研究三套确定性视觉令牌。
+当前版本是可安装、可受管执行的双平台本地原型：已包含 Windows/macOS 桌面入口、Codex CLI / Claude Code 项目入口、NewAPI 动态模型接入与选择、统一 `doctor`、项目自带 PPT 引擎、LibreOffice 真实渲染、平台中文字体和双平台真实 PPT CI，以及销售总监 Skills、持久化 DAG 状态机、绑定具体载荷的硬 Approval、资料/销售适配器、销售总监资料库、公开搜索与受控正文读取、本地 PDF 页码提取、周报 PPT、通用 PPT 工作室和本地工作台。PPT 工作室首版覆盖周报、行业研究、政府方案和自定义演示，输出 4–10 页可编辑 PPTX，并提供经营管理、政企合作、前沿研究三套确定性视觉令牌。
 
 行业研究会在受管 DAG 中自动调用“公开研究员”Subagent，政府合作方案会在初稿后自动调用一次“只读复核员”Subagent。两者均以前台独立 Pi 子进程运行：公开研究员只能使用受控网页检索和正文读取；复核员没有任何工具；二者都不能读取任意本地文件、修改资料库/销售台账、生成正式文件、审批或外发。Subagent 输出只作为主 Agent 的证据或复核意见，所有正式写入和 PPT 仍由主任务在硬 Approval 后执行。Pi Subagent 的通用后台运行、内置定时、Missions 和跨 Agent 通信默认关闭；工作台的每日任务只负责按时创建同一受管请求。
 

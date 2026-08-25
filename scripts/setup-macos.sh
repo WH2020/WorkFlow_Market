@@ -102,6 +102,7 @@ if [ -z "$PI_COMMAND" ]; then
   PI_COMMAND="$(command -v pi)"
 fi
 python3 plugin/market-director-copilot/scripts/init_local_data.py --project .
+python3 scripts/sync-coding-agent-skills.py --check
 python3 -m agent_platform configure-subagents
 python3 -m agent_platform validate
 "$PI_COMMAND" install -l . --approve
@@ -153,3 +154,4 @@ codesign --verify --deep --strict "$INSTALL_APP"
 
 printf '%s\n' "Setup complete. Open $INSTALL_APP or run: open '$INSTALL_APP'"
 printf '%s\n' 'The app uses this checked-out directory as its local runtime and data root.'
+printf '%s\n' 'Codex CLI and Claude Code can be started with scripts/start-coding-agent.sh after the desktop app is open.'

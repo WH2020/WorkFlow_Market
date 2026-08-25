@@ -272,6 +272,7 @@ if (-not $PiCommand) {
     $PiPath = $PiCommand.Source
 }
 Invoke-ProjectPython @("plugin/market-director-copilot/scripts/init_local_data.py", "--project", ".")
+Invoke-ProjectPython @("scripts/sync-coding-agent-skills.py", "--check")
 Invoke-ProjectPython @("-m", "agent_platform", "configure-subagents")
 Invoke-ProjectPython @("-m", "agent_platform", "validate")
 Invoke-Checked -FilePath $PiPath -Arguments @("install", "-l", ".", "--approve")
@@ -284,5 +285,5 @@ $DesktopBuild = Join-Path $ProjectRoot "scripts\build-windows-desktop.ps1"
 & $DesktopBuild
 if ($LASTEXITCODE -ne 0) { throw "Agent4Market.exe build failed." }
 
-Write-Host "Setup complete. Double-click Agent4Market.exe to open the Sales Director desktop app." -ForegroundColor Green
+Write-Host "Setup complete. Double-click Agent4Market.exe, or use scripts/start-coding-agent.ps1 with Codex CLI or Claude Code." -ForegroundColor Green
 exit 0

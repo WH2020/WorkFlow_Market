@@ -1,6 +1,6 @@
 {
   "name": "workflow-director-agent",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "type": "module",
   "description": "A single-role Sales Director AI Assistant with customer, government, presentation, and governed bidding workflows.",
   "license": "MIT",
