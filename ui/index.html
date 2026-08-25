@@ -53,6 +53,7 @@
                   <button data-service="government-proposal"><span>♜</span>政府合作方案<small>初稿后独立复核</small></button>
                   <button data-service="office-document"><span>▤</span>销售文件处理<small>按用途生成初稿</small></button>
                   <button data-service="sales-review"><span>♙</span>客户销售复盘<small>风险与行动建议</small></button>
+                  <button data-service="wechat-review"><span>微</span>微信会话整理<small>本地导入并选择范围</small></button>
                   <button data-service="presentation-studio"><span>▥</span>PPT 工作室<small>主题必填，其余自动</small></button>
                   <button data-service="weekly-deck"><span>▨</span>生成即时周报<small>自动汇总本周记录</small></button>
                 </div>
@@ -173,8 +174,42 @@
 
         <section class="page" data-page="tools">
           <div class="page-heading"><div><p class="section-kicker">QUICK TOOLS</p><h1>工具栏</h1><p>把高频行政工作集中在这里，减少重复整理和文件切换。</p></div></div>
-          <div class="tool-shelf" aria-label="可用工具"><button class="tool-card active" type="button"><span>¥</span><strong>报销材料</strong><small>从邮箱筛选并导入发票、行程单和附件</small></button></div>
-          <section class="panel reimbursement-panel">
+          <div class="tool-shelf" aria-label="可用工具">
+            <button id="tool-wechat" class="tool-card active" type="button" data-tool="wechat"><span>微</span><strong>微信会话整理</strong><small>导入、筛选并整理本人有权处理的会话</small></button>
+            <button id="tool-reimbursement" class="tool-card" type="button" data-tool="reimbursement"><span>¥</span><strong>报销材料</strong><small>从邮箱筛选并导入发票、行程单和附件</small></button>
+          </div>
+          <section id="wechat-tool-panel" class="panel wechat-panel" data-tool-panel="wechat">
+            <div class="panel-heading"><div><h2>导入微信会话</h2><p class="hint">选择 WXDecipher 风格的 JSON、JSONL 或 CSV 结构化导出文件。导入和浏览只在本机进行。</p></div><span class="period-badge">本地只读</span></div>
+            <div class="wechat-import-row">
+              <label>微信账号标记（可选）<input id="wechat-account" maxlength="120" placeholder="例如：工作微信"></label>
+              <label class="wechat-consent"><input id="wechat-ownership" type="checkbox"><span>我确认这是本人账号，且有权处理所选聊天内容</span></label>
+              <button id="choose-wechat-export" class="primary" type="button">选择导出文件</button>
+            </div>
+            <p class="safety-note">不会连接微信进程、提取密钥或修改微信原数据库。工具副本和消息原文固定保留 7 天后自动清理，已生成的整理报告继续保留。WXDecipher 当前公开仓库主要提供设计规范；本版不会声称可自动解密。</p>
+            <div id="wechat-summary" class="wechat-summary" aria-live="polite"><strong>尚未导入会话</strong><span>支持 JSON、JSONL、CSV</span></div>
+          </section>
+          <section id="wechat-browser-panel" class="panel wechat-browser-panel" data-tool-panel="wechat">
+            <div class="panel-heading"><div><h2>选择要整理的会话</h2><p class="hint">先缩小日期和关键词，再勾选会话。智能核心只能读取你本次确认的范围。</p></div><button id="refresh-wechat" class="secondary" type="button">刷新会话</button></div>
+            <div class="wechat-filter-grid">
+              <label>开始日期<input id="wechat-date-from" type="date"></label>
+              <label>结束日期<input id="wechat-date-to" type="date"></label>
+              <label>会话类型<select id="wechat-chat-type"><option value="">全部会话</option><option value="direct">个人会话</option><option value="group">群聊</option><option value="official">公众号</option><option value="unknown">其他</option></select></label>
+              <label>关键词（可选）<input id="wechat-query" maxlength="100" placeholder="客户、人名、项目或事项"></label>
+            </div>
+            <div class="wechat-browser-grid">
+              <div class="wechat-conversation-column">
+                <div class="wechat-column-heading"><label><input id="wechat-select-all" type="checkbox">全选当前结果</label><span id="wechat-selection-status">已选 0 个</span></div>
+                <div id="wechat-conversations" class="wechat-conversation-list empty">导入后点击“刷新会话”。</div>
+              </div>
+              <div class="wechat-preview-column">
+                <div class="wechat-column-heading"><strong id="wechat-preview-title">会话预览</strong><span>最多显示最近 100 条</span></div>
+                <div id="wechat-messages" class="wechat-message-list empty">选择一个会话查看原文。</div>
+              </div>
+            </div>
+            <label class="wechat-model-consent"><input id="wechat-model-sharing" type="checkbox"><span><strong>允许当前任务使用所选会话文字</strong><small>若当前模型由云端服务提供，所选文字会发送给该模型。未勾选不会创建整理任务。</small></span></label>
+            <div class="form-actions"><button id="review-selected-wechat" class="primary" type="button">整理所选会话</button><button id="review-today-wechat" class="secondary" type="button">整理今天全部会话</button><button id="cleanup-wechat" class="secondary" type="button">清理已到期原文</button><span class="hint">整理报告按人员/群聊、进展、承诺、异议、风险和下一步组织，并保留消息定位。</span></div>
+          </section>
+          <section class="panel reimbursement-panel" data-tool-panel="reimbursement" hidden>
             <div class="panel-heading"><div><h2>从邮箱获取报销材料</h2><p class="hint">按日期和关键词筛选邮件，只导入你勾选的附件，不读取正文用于其他任务。</p></div><span class="period-badge">只读连接</span></div>
             <div id="expense-mail-unconfigured" class="mail-empty-state" hidden><strong>还没有连接报销邮箱</strong><p>先在设置中填写邮箱客户端授权码或应用专用密码，通过只读验证后即可搜索。</p><button id="open-mail-settings" class="primary" type="button">前往连接邮箱</button></div>
             <div id="expense-mail-workspace">
@@ -189,11 +224,11 @@
               <p class="safety-note">邮箱始终以只读方式连接；不会标记已读、移动、删除或发送邮件。单次最多导入 20 封邮件、50 个附件，合计不超过 50 兆字节。</p>
             </div>
           </section>
-          <section class="panel reimbursement-library-panel">
+          <section class="panel reimbursement-library-panel" data-tool-panel="reimbursement" hidden>
             <div class="panel-heading"><div><h2>报销材料库</h2><p class="hint">导入后的附件默认保存在这里，不占用项目空间；需要时再移动到具体项目。</p></div><button id="migrate-legacy-expenses" class="secondary" type="button" hidden>迁移旧材料</button></div>
             <div id="reimbursement-batches" class="reimbursement-batch-list empty">还没有导入报销材料。</div>
           </section>
-          <section class="panel reimbursement-trash-panel">
+          <section class="panel reimbursement-trash-panel" data-tool-panel="reimbursement" hidden>
             <div class="panel-heading"><div><h2>文件回收站</h2><p class="hint">项目文件和报销材料删除后会先保存在这里，可恢复到原位置。</p></div></div>
             <div id="file-trash-list" class="file-list empty">回收站为空。</div>
           </section>
@@ -207,6 +242,7 @@
   <input id="library-file-input" type="file" accept=".pdf,.ofd,.docx,.xlsx,.xls,.csv,.txt,.md,.pptx,.png,.jpg,.jpeg,.heic,.zip" hidden>
   <input id="library-version-input" type="file" accept=".pdf,.ofd,.docx,.xlsx,.xls,.csv,.txt,.md,.pptx,.png,.jpg,.jpeg,.heic,.zip" hidden>
   <input id="bid-file-input" type="file" accept=".pdf,.ofd,.docx,.xls,.xlsx,.csv,.txt,.md,.pptx,.png,.jpg,.jpeg,.heic,.zip" hidden>
+  <input id="wechat-file-input" type="file" accept=".json,.jsonl,.csv" hidden>
   <template id="task-template"><article class="task"><div class="task-title"><strong></strong><span class="status"></span></div><p class="task-meta"></p><p class="task-request"></p><div class="task-actions"></div></article></template>
   <script src="/app.js"></script>
 </body>

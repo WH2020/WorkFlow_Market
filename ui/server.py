@@ -104,6 +104,17 @@ from agent_platform.bid_store import (  # noqa: E402
     transition_bid_project,
     update_bid_project,
 )
+from agent_platform.wechat_store import (  # noqa: E402
+    MAX_IMPORT_BYTES as MAX_WECHAT_IMPORT_BYTES,
+    WechatStoreError,
+    cleanup_expired as cleanup_expired_wechat,
+    create_review_scope as create_wechat_review_scope,
+    dashboard as wechat_dashboard,
+    import_export as import_wechat_export,
+    list_conversations as list_wechat_conversations,
+    read_messages as read_wechat_messages,
+    review_scope_summary as wechat_review_scope_summary,
+)
 
 
 UI_ROOT = Path(__file__).resolve().parent
@@ -182,6 +193,8 @@ NODE_DISPLAY_NAMES = {
     "analyze_opportunities": "分析投标机会", "validate_opportunities": "核验投标机会",
     "prepare_bid_document": "组织正式标书", "freeze_bid_document": "冻结正式标书内容",
     "validate_bid_write": "校验投标数据更新",
+    "read_scope": "读取已选微信会话", "read_accounts": "读取关联客户记录",
+    "organize_conversations": "整理会话进展与行动", "validate_report": "校验会话整理报告",
 }
 NODE_TYPE_DISPLAY_NAMES = {
     "agent": "智能分析", "tool": "资料处理", "validator": "规则校验", "approval": "人工确认",
@@ -2662,6 +2675,20 @@ class ControlHandler(SimpleHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
         self.send_json(status, {"error": str(error), "code": code})
 
+    def send_wechat_error(self, error: WechatStoreError | ValueError) -> None:
+        code = error.code if isinstance(error, WechatStoreError) else "INVALID_INPUT"
+        if code in {"NOT_FOUND", "NOT_CONFIGURED"}:
+            status = HTTPStatus.NOT_FOUND
+        elif code in {"STORE_ERROR"}:
+            status = HTTPStatus.SERVICE_UNAVAILABLE
+        elif code in {"FILE_TOO_LARGE", "ROW_LIMIT", "SCOPE_TOO_LARGE"}:
+            status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        elif code in {"SCHEMA_MISMATCH"}:
+            status = HTTPStatus.CONFLICT
+        else:
+            status = HTTPStatus.BAD_REQUEST
+        self.send_json(status, {"error": str(error), "code": code})
+
     def body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
@@ -2830,6 +2857,50 @@ class ControlHandler(SimpleHTTPRequestHandler):
             temporary.unlink(missing_ok=True)
         self.send_json(HTTPStatus.CREATED, {"entry": record, "message": message})
 
+    def upload_wechat_export(self) -> None:
+        if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+            raise WechatStoreError("PROFILE_FORBIDDEN", "微信会话整理只在销售总监版本中提供")
+        encoded_name = self.headers.get("X-File-Name", "")
+        filename = unquote(encoded_name).strip()
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".json", ".jsonl", ".csv"}:
+            raise WechatStoreError("UNSUPPORTED_FORMAT", "请选择 WXDecipher 结构化导出的 JSON、JSONL 或 CSV 文件")
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0 or length > MAX_WECHAT_IMPORT_BYTES:
+            raise WechatStoreError("FILE_TOO_LARGE", "微信导出文件必须为 1 字节至 64 兆字节")
+        ownership_confirmed = self.headers.get("X-Wechat-Ownership", "").strip().lower() == "confirmed"
+        auto_cleanup = self.headers.get("X-Wechat-Auto-Cleanup", "true").strip().lower() == "true"
+        try:
+            retention_days = int(self.headers.get("X-Wechat-Retention-Days", "7"))
+        except ValueError as error:
+            raise WechatStoreError("INVALID_RETENTION", "原文保留时间必须是整数天") from error
+        account_label = unquote(self.headers.get("X-Wechat-Account", "")).strip() or "本机微信"
+        descriptor, temporary_name = tempfile.mkstemp(prefix="agent4market-wechat-", suffix=suffix)
+        temporary = Path(temporary_name)
+        received = 0
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                while received < length:
+                    block = self.rfile.read(min(1024 * 1024, length - received))
+                    if not block:
+                        raise WechatStoreError("INVALID_FILE", "上传连接提前中断")
+                    handle.write(block)
+                    received += len(block)
+                handle.flush()
+                os.fsync(handle.fileno())
+            result = import_wechat_export(
+                ROOT,
+                temporary,
+                source_name=filename,
+                account_label=account_label,
+                retention_days=retention_days,
+                auto_cleanup=auto_cleanup,
+                ownership_confirmed=ownership_confirmed,
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.send_json(HTTPStatus.OK if result.get("duplicate_file") else HTTPStatus.CREATED, result)
+
     def upload_bid_file(self) -> None:
         bid_id = safe_id(self.headers.get("X-Bid-Id", ""))
         role = str(self.headers.get("X-Bid-Role", "tender")).strip()
@@ -2915,6 +2986,15 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route == "/api/bootstrap":
             process_due_schedules()
+            try:
+                cleanup_expired_wechat(ROOT)
+                wechat = wechat_dashboard(ROOT)
+            except WechatStoreError as error:
+                wechat = {
+                    "configured": False, "status": "error", "error": str(error),
+                    "conversation_count": 0, "message_count": 0, "batch_count": 0,
+                    "batches": [], "revision": "error",
+                }
             tasks = task_summaries()
             files = project_files()
             outputs = output_summary()
@@ -2932,6 +3012,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                                             "reimbursements": {"batches": batches,
                                                                "trash": trash_summary(),
                                                                "legacy_count": len(legacy_reimbursement_files(files))},
+                                            "wechat": wechat,
                                             "bidding": bid_dashboard(ROOT),
                                             "desktop_runtime": desktop_runtime_summary(),
                                             "request_token": SERVER_TOKEN})
@@ -3130,6 +3211,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     return
                 self.upload_library_file(unquote(parts[3]))
                 return
+            if route == "/api/wechat/import":
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+                    self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "微信会话导入只接受结构化导出文件"})
+                    return
+                self.upload_wechat_export()
+                return
             if route == "/api/bid-files":
                 if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
                     self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "投标资料上传只接受二进制文件"})
@@ -3185,6 +3272,43 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, restore_library_entry(payload))
             elif route == "/api/library/open":
                 self.send_json(HTTPStatus.OK, open_library_entry(payload))
+            elif route == "/api/wechat/query":
+                if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+                    raise WechatStoreError("PROFILE_FORBIDDEN", "微信会话整理只在销售总监版本中提供")
+                action = str(payload.get("action", "")).strip()
+                if action == "conversations":
+                    self.send_json(HTTPStatus.OK, list_wechat_conversations(
+                        ROOT,
+                        query=str(payload.get("query", "")),
+                        chat_type=str(payload.get("chat_type", "")),
+                        date_from=str(payload.get("date_from", "")),
+                        date_to=str(payload.get("date_to", "")),
+                        limit=int(payload.get("limit", 100)),
+                        offset=int(payload.get("offset", 0)),
+                    ))
+                elif action == "messages":
+                    self.send_json(HTTPStatus.OK, read_wechat_messages(
+                        ROOT,
+                        str(payload.get("conversation_id", "")),
+                        query=str(payload.get("query", "")),
+                        date_from=str(payload.get("date_from", "")),
+                        date_to=str(payload.get("date_to", "")),
+                        limit=int(payload.get("limit", 100)),
+                        before_epoch=payload.get("before_epoch"),
+                    ))
+                else:
+                    raise WechatStoreError("INVALID_INPUT", "微信会话查询操作无效")
+            elif route == "/api/wechat/scopes":
+                if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+                    raise WechatStoreError("PROFILE_FORBIDDEN", "微信会话整理只在销售总监版本中提供")
+                self.send_json(HTTPStatus.CREATED, create_wechat_review_scope(ROOT, payload))
+            elif route == "/api/wechat/cleanup":
+                if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+                    raise WechatStoreError("PROFILE_FORBIDDEN", "微信会话整理只在销售总监版本中提供")
+                self.send_json(HTTPStatus.OK, {
+                    **cleanup_expired_wechat(ROOT),
+                    "message": "已按导入时确认的保留期限清理到期副本和消息原文；会话整理报告及销售台账不受影响。",
+                })
             elif route == "/api/model-discovery":
                 self.discover_model_options(payload)
             elif route == "/api/model-settings":
@@ -3290,6 +3414,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_bid_error(error)
         except LibraryStoreError as error:
             self.send_library_error(error)
+        except WechatStoreError as error:
+            self.send_wechat_error(error)
         except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError, MailProviderError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:
@@ -3401,6 +3527,15 @@ class ControlHandler(SimpleHTTPRequestHandler):
         service = next((item for item in profile["services"] if item["id"] == service_id), None)
         if service is None:
             raise ValueError("该服务不属于当前角色")
+        if service_id == "wechat-review":
+            if profile_id != "sales-director":
+                raise ValueError("微信会话整理只在销售总监版本中提供")
+            scope_ids = sorted(set(re.findall(r"\bwechat-scope-[a-f0-9]{20}\b", request_text)))
+            if len(scope_ids) != 1:
+                raise ValueError("微信会话整理任务必须绑定一个工作台生成的授权范围")
+            scope = wechat_review_scope_summary(ROOT, scope_ids[0])
+            if scope.get("project_id") != project_id:
+                raise ValueError("微信会话授权范围与当前项目空间不一致")
         if service_id in PUBLIC_SEARCH_SERVICES:
             search = search_settings_summary(ROOT)
             gateway = search_gateway_settings_summary(ROOT)

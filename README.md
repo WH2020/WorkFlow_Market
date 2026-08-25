@@ -6,7 +6,7 @@
 
 用户直接选择销售服务，不需要再选择岗位或理解底层插件。仓库仍保留 Profile 插件框架，供开发者维护既有兼容组合，但销售总监发行版会在界面和 Pi 运行时同时锁定 `sales-director`。
 
-> 新的 Pi Agent 不接入微信或 WeFlow。仓库中原有 WeFlow 代码只为旧版 Codex 工作台兼容保留，不会被销售总监桌面发行版加载。
+> 销售总监版支持用户主动导入本人有权处理的微信结构化导出文件，并只读取本次明确选择的会话范围。它不连接微信进程、不提取密钥、不修改微信原库，也不接入 WeFlow。仓库中原有 WeFlow 代码只为旧版 Codex 工作台兼容保留，不会被桌面发行版加载。
 
 ## 架构
 
@@ -92,7 +92,7 @@ python -m agent_platform doctor --require-ppt
 
 设置页另有独立的“One Search 搜索聚合网关”卡片。它连接用户自行部署的 One Search，可把 Exa、You、Jina、Tavily、Firecrawl、Serper、Brave 等上游按并行、依次尝试或单提供商方式聚合；Agent4Market 不捆绑或代管该服务。启用后 `web.search` 优先走 `/v1/search`，保留具体上游名称并继续标记为“仅发现”；网关失败时不会把同一查询静默转发给其他服务。配置只接受权限受限的 `osr_` 检索令牌，拒绝 `oak_` 管理凭据；本机/局域网地址必须显式允许，运行时会重新解析并把实际连接固定到核验地址。[One Search 项目与接口](https://github.com/CncCbz/one-search)，[管理员凭据说明](https://github.com/CncCbz/one-search/blob/main/docs/admin-api-key.md)。
 
-桌面发行版只加载销售总监所需 Skills，包含政府合作与智能招投标能力，不加载产品研发 Skills；旧版邮箱与聊天 Skill 也不会加载。
+桌面发行版只加载销售总监所需 Skills，包含政府合作、智能招投标和受控微信会话整理能力，不加载产品研发 Skills；旧版 WeFlow 聊天 Skill 不会加载。
 
 ### 全流程智能招投标
 
@@ -131,6 +131,7 @@ macOS 使用 `python3 ui/server.py`。
 - 每日定时任务由本地工作台调度：应用运行且到达设定时间后，才向受管 DAG 排队；当天晚些时候重新打开会补排一次，同一计划每天最多自动创建一个任务。它不会自动批准台账写入、正式 PPT 或对外发送。
 - 自定义操作中的“资料查询”默认只查本地项目、任务、资料库、销售台账、项目资料和产物。公开资料调研不会从浏览器直接请求，而是转换为行业研究任务，经受控 `web.search` / `web.open`、来源核验和现有 Approval 执行。
 - 工具栏的“报销材料”可通过只读 IMAP 筛选 QQ、163、126、阿里企业邮箱、Gmail 或自定义邮箱中的附件。勾选的附件默认进入独立报销材料库，不再强制占用项目空间；用户可打开、重命名、按需移动到项目，或先移入可恢复的文件回收站。授权码使用 Windows DPAPI 或 macOS 钥匙串保护；工作台不会标记已读、移动、删除或发送邮件。Outlook/Microsoft 365 首版暂不接入，避免用普通密码替代 OAuth。
+- 工具栏的“微信会话整理”接受 JSON、JSONL、CSV 结构化导出。导入、筛选与预览留在本机；创建智能整理任务前，用户必须再次确认允许当前模型处理所选文字。若模型在云端，所选文字会发送给模型服务商。应用副本和索引原文固定保留 7 天后自动清理，不触碰用户原始导出文件，也不会自动更新销售台账或外发。详见 [微信会话导入与整理](docs/微信会话导入与整理.md)。
 
 ## 校验插件与工作流
 
@@ -143,7 +144,7 @@ python -m agent_platform resolve-profile product-director
 python -m agent_platform list-services --profile product-director
 ```
 
-校验会阻止缺失或循环依赖、重复插件、DAG 环路、未知节点、节点权限越界、未约束 Subagent，以及新 Profile 中的微信/WeFlow 引用。安装器同时写入受控 Subagent 配置并关闭 Pi Subagent 的通用后台任务、内置定时、Missions 和跨 Agent 通信；工作台自带的本地每日排队器不属于该机制。
+校验会阻止缺失或循环依赖、重复插件、DAG 环路、未知节点、节点权限越界、未约束 Subagent、任何 WeFlow 引用，以及销售总监和 `market.wechat` 之外的微信能力。安装器同时写入受控 Subagent 配置并关闭 Pi Subagent 的通用后台任务、内置定时、Missions 和跨 Agent 通信；工作台自带的本地每日排队器不属于该机制。
 
 ## 销售总监资料库
 

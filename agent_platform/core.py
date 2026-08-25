@@ -9,13 +9,14 @@ from typing import Any, Iterable
 
 
 NODE_TYPES = {"agent", "tool", "subagent", "approval", "parallel", "join", "validator"}
-FORBIDDEN_PROFILE_TERMS = ("wechat", "weflow", "微信")
+FORBIDDEN_PROFILE_TERMS = ("weflow",)
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 TOOL_REQUIRED_PERMISSIONS = {
     "knowledge.search": {"knowledge.read"},
     "knowledge.write": {"knowledge.write"},
     "sales.read": {"sales.read"},
     "sales.write": {"sales.write"},
+    "wechat.read": {"wechat.read"},
     "bid.read": {"bid.read"},
     "bid.write": {"bid.write"},
     "account.search": {"sales.read"},
@@ -363,6 +364,9 @@ class Platform:
                 raise ManifestError(
                     f"{manifest_path}: forbidden chat integration reference: {forbidden}"
                 )
+            contains_wechat = "wechat" in serialized or "微信" in serialized
+            if contains_wechat and plugin_id != "market.wechat":
+                raise ManifestError(f"{manifest_path}: WeChat capability is isolated to market.wechat")
             _semver(version, str(manifest_path))
             if manifest.get("api_version") != "1.0":
                 raise ManifestError(f"{manifest_path}: api_version must be '1.0'")
@@ -378,6 +382,12 @@ class Platform:
                     raise ManifestError(f"{manifest_path}: {field_name} must be a string array")
                 if len(value) != len(set(value)):
                     raise ManifestError(f"{manifest_path}: duplicate values in {field_name}")
+            wechat_permissions = {
+                permission for permission in manifest["permissions"]
+                if permission.startswith("wechat.")
+            }
+            if plugin_id == "market.wechat" and wechat_permissions != {"wechat.read"}:
+                raise ManifestError(f"{manifest_path}: market.wechat must declare only wechat.read")
             if "dependencies" not in manifest:
                 raise ManifestError(f"{manifest_path}: dependencies is required")
             dependencies = manifest["dependencies"]
@@ -463,6 +473,9 @@ class Platform:
         forbidden = [term for term in FORBIDDEN_PROFILE_TERMS if term in serialized]
         if forbidden:
             raise ManifestError(f"{source}: forbidden chat integration reference: {forbidden}")
+        contains_wechat = "wechat" in serialized or "微信" in serialized
+        if contains_wechat and profile.get("id") != "sales-director":
+            raise ManifestError(f"{source}: WeChat capability is available only in sales-director")
         for field_name in ("display_name", "description", "default_service"):
             _require_text(profile, field_name, source)
         plugins = profile.get("plugins")
@@ -470,6 +483,10 @@ class Platform:
             raise ManifestError(f"{source}: plugins must be a non-empty string array")
         if len(plugins) != len(set(plugins)):
             raise ManifestError(f"{source}: duplicate plugin in profile")
+        if contains_wechat and "market.wechat" not in plugins:
+            raise ManifestError(f"{source}: WeChat service requires market.wechat")
+        if profile.get("id") != "sales-director" and "market.wechat" in plugins:
+            raise ManifestError(f"{source}: market.wechat is available only in sales-director")
         services = profile.get("services")
         if not isinstance(services, list) or not services:
             raise ManifestError(f"{source}: services must be a non-empty array")

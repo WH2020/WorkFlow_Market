@@ -87,6 +87,7 @@ class ControlCentreTests(unittest.TestCase):
         service_ids = {service["id"] for service in profiles[0]["services"]}
         self.assertIn("sales-review", service_ids)
         self.assertIn("government-proposal", service_ids)
+        self.assertIn("wechat-review", service_ids)
         self.assertNotIn("product-discovery", service_ids)
         workflow_ids = set(server.workflows())
         self.assertIn("market.government.proposal", workflow_ids)
@@ -128,6 +129,10 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="ai-core-log"', html)
         self.assertIn('id="weekly-task-form"', html)
         self.assertIn('id="create-weekly"', html)
+        self.assertIn('id="wechat-tool-panel"', html)
+        self.assertIn('id="wechat-file-input"', html)
+        self.assertIn('id="wechat-model-sharing"', html)
+        self.assertIn("固定保留 7 天后自动清理", html)
         self.assertIn("高级设置（页数、风格和文件名）", html)
         self.assertNotIn('id="request"', html)
         self.assertNotIn('id="ppt-purpose"', html)
@@ -151,6 +156,10 @@ class ControlCentreTests(unittest.TestCase):
         self.assertNotIn("item.textContent = node.id", javascript)
         self.assertIn("task.waiting_node_display_name", javascript)
         self.assertIn("function displayTaskRequest", javascript)
+        self.assertIn("function loadWechatConversations", javascript)
+        self.assertIn("function createWechatReview", javascript)
+        self.assertIn('api("/api/wechat/scopes"', javascript)
+        self.assertIn('service_id: "wechat-review"', javascript)
         self.assertIn("taskCardExpansion", javascript)
         self.assertIn("function addDeleteAction", javascript)
         self.assertIn("addDeleteAction(titleControls, task)", javascript)
@@ -464,6 +473,40 @@ class ControlCentreTests(unittest.TestCase):
                 handler.create_request({**payload, "requested_model": "agent4market-newapi/not-allowed"})
         with self.assertRaises(ValueError):
             handler.create_request({**payload, "requested_thinking_level": "unlimited"})
+
+    def test_wechat_task_request_requires_one_live_scope_in_the_same_project(self):
+        root = Path(self.temporary.name)
+        source = root / "wechat.json"
+        source.write_text(json.dumps([{
+            "conversation": "client-a", "conversation_name": "客户甲", "message_id": "1",
+            "sender_name": "客户甲", "time": "2026-08-25T09:00:00+08:00", "content": "请下周提供方案",
+        }], ensure_ascii=False), encoding="utf-8")
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        with patch.object(server, "ROOT", root):
+            server.import_wechat_export(
+                root, source, source_name=source.name, retention_days=7,
+                auto_cleanup=True, ownership_confirmed=True,
+            )
+            conversation = server.list_wechat_conversations(root)["rows"][0]
+            scope = server.create_wechat_review_scope(root, {
+                "project_id": server.DEFAULT_PROJECT_ID,
+                "conversation_ids": [conversation["conversation_id"]],
+                "date_from": "2026-08-25", "date_to": "2026-08-25", "query": "",
+                "model_sharing_confirmed": True,
+            })
+            request = f"【微信会话整理】\n授权范围编号：{scope['scope_id']}\n整理范围：客户甲\n日期范围：2026-08-25 至 2026-08-25"
+            handler.create_request({
+                "profile_id": "sales-director", "service_id": "wechat-review",
+                "project_id": server.DEFAULT_PROJECT_ID, "request": request,
+            })
+            self.assertEqual(HTTPStatus.CREATED, replies[-1][0])
+            with self.assertRaisesRegex(ValueError, "必须绑定一个"):
+                handler.create_request({
+                    "profile_id": "sales-director", "service_id": "wechat-review",
+                    "project_id": server.DEFAULT_PROJECT_ID, "request": "整理微信会话",
+                })
 
     def test_public_research_task_is_rejected_before_queueing_when_search_is_not_ready(self):
         handler = server.ControlHandler.__new__(server.ControlHandler)

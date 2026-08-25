@@ -17,10 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class PlatformTests(unittest.TestCase):
     def test_repository_bundles_validate(self) -> None:
         report = Platform(ROOT).validate_all()
-        self.assertEqual(13, report.plugins)
-        self.assertEqual(22, report.workflows)
+        self.assertEqual(14, report.plugins)
+        self.assertEqual(23, report.workflows)
         self.assertEqual(3, report.profiles)
-        self.assertEqual(29, report.services)
+        self.assertEqual(30, report.services)
 
     def test_director_profiles_resolve_expected_dependencies(self) -> None:
         platform = Platform(ROOT)
@@ -38,20 +38,25 @@ class PlatformTests(unittest.TestCase):
         self.assertIn("shared.presentation-studio", product["resolved_plugins"])
         self.assertNotIn("market.sales", product["resolved_plugins"])
         self.assertIn("market.sales", sales["resolved_plugins"])
+        self.assertIn("market.wechat", sales["resolved_plugins"])
         self.assertIn("market.government", sales["resolved_plugins"])
         self.assertIn("market.bidding", sales["resolved_plugins"])
         self.assertNotIn("product.discovery", sales["resolved_plugins"])
 
-    def test_resolved_profiles_contain_no_chat_import_reference(self) -> None:
+    def test_wechat_import_is_isolated_to_sales_director(self) -> None:
         platform = Platform(ROOT)
         platform.validate_all()
         for path in (ROOT / "profiles").glob("*/profile.json"):
             content = path.read_text(encoding="utf-8").lower()
-            self.assertNotIn("wechat", content)
             self.assertNotIn("weflow", content)
-            self.assertNotIn("微信", content)
+            if path.parent.name == "sales-director":
+                self.assertIn("market.wechat", content)
+                self.assertIn("wechat-review", content)
+            else:
+                self.assertNotIn("wechat", content)
+                self.assertNotIn("微信", content)
 
-    def test_pi_package_exposes_every_profile_skill_without_chat_import(self) -> None:
+    def test_pi_package_exposes_every_profile_skill_with_isolated_wechat_import(self) -> None:
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         self.assertNotIn("skills", package["pi"])
         catalog = json.loads(
@@ -60,6 +65,7 @@ class PlatformTests(unittest.TestCase):
         skill_names: set[str] = set()
         self.assertNotIn("review-sales-conversations", catalog)
         self.assertNotIn("qq-mail-invoice-reimbursement", catalog)
+        self.assertIn("review-wechat-conversations", catalog)
         for expected_name, relative_path in catalog.items():
             skill_file = ROOT / relative_path / "SKILL.md"
             self.assertTrue(skill_file.is_file(), relative_path)
@@ -106,14 +112,18 @@ class PlatformTests(unittest.TestCase):
                     references - available_skills,
                     f"{profile_id}/{skill_name} has unavailable Skill references",
                 )
-        for plugin in platform.load_plugins().values():
+        for plugin_id, plugin in platform.load_plugins().items():
             content = json.dumps(
                 {"manifest": plugin.manifest, "workflows": plugin.workflows},
                 ensure_ascii=False,
             ).lower()
-            self.assertNotIn("wechat", content)
             self.assertNotIn("weflow", content)
-            self.assertNotIn("微信", content)
+            if plugin_id == "market.wechat":
+                self.assertIn("wechat.read", content)
+                self.assertNotIn("wechat.write", content)
+            else:
+                self.assertNotIn("wechat", content)
+                self.assertNotIn("微信", content)
 
     def test_missing_dependency_is_rejected(self) -> None:
         with self._temporary_platform() as root:

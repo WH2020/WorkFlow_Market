@@ -33,6 +33,11 @@
   const taskWriteIntentState = {};
   const taskCardExpansion = new Map();
   const reimbursementBatchExpansion = new Map();
+  let activeTool = "wechat";
+  const wechatState = {
+    rows: [], selected: new Set(), selectedId: "", messages: [], revision: "", renderedKey: "",
+    loading: false, loaded: false, error: "", previewLoading: false, previewGeneration: 0, creating: false,
+  };
   const customerState = {
     filters: { query: "", owner: "", region: "", industry: "", stage: "", health: "", updated: "" },
     rows: [], cursor: "", hasMore: false, loading: false, loaded: false, error: "", selectedId: "", detail: null,
@@ -375,6 +380,11 @@
 
   function displayTaskRequest(task) {
     const request = String(task?.request || "").trim();
+    if (request.startsWith("【微信会话整理】")) {
+      const title = request.match(/^整理范围：(.+)$/mu)?.[1] || "已选择的微信会话";
+      const dates = request.match(/^日期范围：(.+)$/mu)?.[1] || "已授权日期";
+      return `微信会话整理：${title}；${dates}`;
+    }
     if (request.startsWith("[PRESENTATION_BRIEF]")) {
       try {
         const end = request.indexOf("[/PRESENTATION_BRIEF]");
@@ -420,6 +430,12 @@
     }
     if (view === "work") renderServices();
     if (view === "bids" && !bidState.loaded && !bidState.loading) loadBids();
+    if (view === "tools") {
+      renderToolPanels();
+      if (activeTool === "wechat" && model?.wechat?.configured && !wechatState.loaded && !wechatState.loading) {
+        loadWechatConversations();
+      }
+    }
     updateBackButton();
     if (view !== previousView) requestAnimationFrame(() => window.scrollTo({ top: restoreScroll ? (viewScrollPositions[view] || 0) : 0, behavior: "auto" }));
   }
@@ -434,7 +450,8 @@
     if (!serviceById(serviceId)) { note("当前销售总监版本未启用该服务。", true); return; }
     selectedService = serviceId;
     guidedRenderedService = null;
-    if (serviceId === "weekly-deck") switchView("weekly");
+    if (serviceId === "wechat-review") { activeTool = "wechat"; switchView("tools"); }
+    else if (serviceId === "weekly-deck") switchView("weekly");
     else switchView("work");
     renderWorkflow();
     renderServices();
@@ -454,7 +471,7 @@
 
   function renderServices() {
     const box = $("services");
-    const services = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-"));
+    const services = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-") && service.id !== "wechat-review");
     box.replaceChildren(...services.map((service) => {
       const button = choice(service.display_name, service.description, service.id === selectedService);
       button.onclick = () => openService(service.id);
@@ -2712,6 +2729,208 @@
     } catch (error) { note(error.message, true); }
   }
 
+  function renderToolPanels() {
+    document.querySelectorAll("[data-tool]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.tool === activeTool);
+    });
+    document.querySelectorAll("[data-tool-panel]").forEach((panel) => {
+      panel.hidden = panel.dataset.toolPanel !== activeTool;
+    });
+  }
+
+  function wechatFilters() {
+    return {
+      date_from: $("wechat-date-from").value,
+      date_to: $("wechat-date-to").value,
+      chat_type: $("wechat-chat-type").value,
+      query: $("wechat-query").value.trim(),
+    };
+  }
+
+  function renderWechatSummary() {
+    const summary = model?.wechat || { configured: false, status: "empty", conversation_count: 0, message_count: 0 };
+    const box = $("wechat-summary");
+    box.replaceChildren();
+    const strong = document.createElement("strong");
+    const detail = document.createElement("span");
+    if (summary.status === "error") {
+      strong.textContent = "会话索引暂不可用";
+      detail.textContent = summary.error || "请重新打开应用后再试";
+    } else if (!summary.configured || !summary.message_count) {
+      strong.textContent = summary.status === "raw_expired" ? "原文已按期限清理" : "尚未导入会话";
+      detail.textContent = "支持 JSON、JSONL、CSV；单个文件不超过 64 兆字节";
+    } else {
+      strong.textContent = `本机已有 ${summary.conversation_count} 个会话、${summary.message_count} 条消息`;
+      const latest = summary.batches?.[0];
+      detail.textContent = latest?.expires_at
+        ? `本批原文将在 ${new Date(latest.expires_at).toLocaleString("zh-CN", { hour12: false })} 后清理`
+        : "原文按导入日起 7 天自动清理";
+    }
+    box.append(strong, detail);
+    $("review-selected-wechat").disabled = wechatState.creating || wechatState.selected.size === 0 || !summary.message_count;
+    $("review-today-wechat").disabled = wechatState.creating || !summary.message_count;
+  }
+
+  function wechatTime(value) {
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime())
+      ? parsed.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+      : String(value || "时间未知");
+  }
+
+  function updateWechatSelection() {
+    $("wechat-selection-status").textContent = `已选 ${wechatState.selected.size} 个`;
+    const visibleIds = wechatState.rows.map((row) => row.conversation_id);
+    $("wechat-select-all").checked = visibleIds.length > 0 && visibleIds.every((id) => wechatState.selected.has(id));
+    $("wechat-select-all").indeterminate = visibleIds.some((id) => wechatState.selected.has(id)) && !$("wechat-select-all").checked;
+    $("review-selected-wechat").disabled = wechatState.creating || wechatState.selected.size === 0;
+  }
+
+  function renderWechatConversations() {
+    const box = $("wechat-conversations");
+    const previousScroll = box.scrollTop;
+    box.classList.toggle("empty", wechatState.rows.length === 0);
+    if (!wechatState.rows.length) {
+      box.replaceChildren();
+      box.textContent = wechatState.error || (wechatState.loading ? "正在读取会话…" : "当前筛选范围没有会话。");
+      updateWechatSelection();
+      return;
+    }
+    box.replaceChildren(...wechatState.rows.map((row) => {
+      const card = document.createElement("article");
+      card.className = `wechat-conversation-card${wechatState.selected.has(row.conversation_id) ? " selected" : ""}${wechatState.selectedId === row.conversation_id ? " previewing" : ""}`;
+      card.tabIndex = 0;
+      const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = wechatState.selected.has(row.conversation_id);
+      checkbox.setAttribute("aria-label", `选择${row.display_name}`);
+      checkbox.onchange = () => {
+        if (checkbox.checked) wechatState.selected.add(row.conversation_id); else wechatState.selected.delete(row.conversation_id);
+        renderWechatConversations(); renderWechatSummary();
+      };
+      const copy = document.createElement("div"); copy.className = "wechat-conversation-copy";
+      const title = document.createElement("strong"); title.textContent = row.display_name || "未命名会话";
+      const meta = document.createElement("small");
+      const type = row.chat_type === "group" ? "群聊" : row.chat_type === "official" ? "公众号" : row.chat_type === "direct" ? "个人会话" : "其他";
+      meta.textContent = `${type} · 保留 ${row.retained_messages} 条 · ${wechatTime(row.last_sent_at)}`;
+      const preview = document.createElement("p"); preview.className = "wechat-conversation-preview"; preview.textContent = row.last_preview || "无文字预览";
+      copy.append(title, meta, preview); card.append(checkbox, copy);
+      const previewConversation = () => {
+        wechatState.selectedId = row.conversation_id;
+        renderWechatConversations();
+        loadWechatMessages(row.conversation_id);
+      };
+      card.onclick = (event) => { if (event.target !== checkbox) previewConversation(); };
+      card.onkeydown = (event) => { if ((event.key === "Enter" || event.key === " ") && event.target === card) { event.preventDefault(); previewConversation(); } };
+      return card;
+    }));
+    box.scrollTop = previousScroll;
+    updateWechatSelection();
+  }
+
+  function renderWechatMessages() {
+    const box = $("wechat-messages");
+    const selected = wechatState.rows.find((row) => row.conversation_id === wechatState.selectedId);
+    $("wechat-preview-title").textContent = selected?.display_name || "会话预览";
+    box.classList.toggle("empty", wechatState.messages.length === 0);
+    if (!wechatState.messages.length) {
+      box.replaceChildren();
+      box.textContent = wechatState.previewLoading ? "正在读取消息…" : "选择一个会话查看原文。";
+      return;
+    }
+    box.replaceChildren(...wechatState.messages.map((message) => {
+      const item = document.createElement("article"); item.className = `wechat-message${message.is_self ? " mine" : ""}`;
+      const header = document.createElement("header");
+      const sender = document.createElement("strong"); sender.textContent = message.sender_name || (message.is_self ? "我" : "对方");
+      const time = document.createElement("time"); time.textContent = `${wechatTime(message.sent_at)} · ${message.kind || "消息"}`;
+      const text = document.createElement("p"); text.textContent = message.content || `[${message.kind || "非文字消息"}]`;
+      header.append(sender, time); item.append(header, text); return item;
+    }));
+    box.scrollTop = box.scrollHeight;
+  }
+
+  async function loadWechatMessages(conversationId) {
+    const generation = ++wechatState.previewGeneration;
+    wechatState.previewLoading = true; wechatState.messages = []; renderWechatMessages();
+    try {
+      const result = await api("/api/wechat/query", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "messages", conversation_id: conversationId, ...wechatFilters(), limit: 100 }),
+      });
+      if (generation !== wechatState.previewGeneration || conversationId !== wechatState.selectedId) return;
+      wechatState.messages = result.rows || [];
+    } catch (error) {
+      if (generation === wechatState.previewGeneration) note(error.message, true);
+    } finally {
+      if (generation === wechatState.previewGeneration) { wechatState.previewLoading = false; renderWechatMessages(); }
+    }
+  }
+
+  async function loadWechatConversations({ force = false } = {}) {
+    if (wechatState.loading || (!force && wechatState.loaded && model?.wechat?.revision === wechatState.revision)) return;
+    wechatState.loading = true; wechatState.error = ""; renderWechatConversations();
+    try {
+      const result = await api("/api/wechat/query", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "conversations", ...wechatFilters(), limit: 200, offset: 0 }),
+      });
+      wechatState.rows = result.rows || [];
+      const available = new Set(wechatState.rows.map((row) => row.conversation_id));
+      wechatState.selected = new Set([...wechatState.selected].filter((id) => available.has(id)));
+      if (!available.has(wechatState.selectedId)) { wechatState.selectedId = ""; wechatState.messages = []; }
+      wechatState.loaded = true;
+      wechatState.revision = model?.wechat?.revision || wechatState.revision;
+    } catch (error) {
+      wechatState.rows = []; wechatState.error = error.message;
+    } finally {
+      wechatState.loading = false; renderWechatConversations(); renderWechatMessages(); renderWechatSummary();
+    }
+  }
+
+  async function createWechatReview({ today = false } = {}) {
+    if (!$("wechat-model-sharing").checked) throw new Error("请先确认允许当前任务使用所选会话文字。");
+    const todayText = formatDate(new Date());
+    const filters = today ? { date_from: todayText, date_to: todayText, query: "" } : wechatFilters();
+    if (!filters.date_from || !filters.date_to) throw new Error("请选择开始和结束日期。");
+    const conversationIds = today ? [] : [...wechatState.selected];
+    if (!today && !conversationIds.length) throw new Error("请至少选择一个会话。");
+    const runtime = taskRuntimeSelection();
+    const modelName = displayModelName(runtime.requested_model || model?.model?.selected_model || "智能核心默认模型");
+    const confirmed = await confirmAction({
+      title: "确认整理微信会话",
+      message: today
+        ? `将把今天全部有消息的会话交给“${modelName}”整理。`
+        : `将把 ${conversationIds.length} 个会话在 ${filters.date_from} 至 ${filters.date_to} 的所选内容交给“${modelName}”整理。`,
+      detail: "如果该模型由云端提供，会话文字会离开本机；任务只读取本次冻结的范围，不会自动更新销售台账或对外发送。",
+      confirmText: "确认并开始",
+    });
+    if (!confirmed) return;
+    const scope = await api("/api/wechat/scopes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: selectedProject,
+        conversation_ids: conversationIds,
+        all_in_period: today,
+        date_from: filters.date_from,
+        date_to: filters.date_to,
+        query: filters.query || "",
+        model_sharing_confirmed: true,
+      }),
+    });
+    const request = [
+      "【微信会话整理】",
+      `授权范围编号：${scope.scope_id}`,
+      `整理范围：${scope.title}`,
+      `日期范围：${scope.date_from} 至 ${scope.date_to}`,
+      `会话数量：${scope.conversation_count}；消息数量：${scope.message_count}`,
+      "请只读取该授权范围，按人员与群聊整理关键进展、明确承诺、客户异议、风险和下一步；每个重要判断保留 wechat://message/ 消息定位。不要自动更新销售台账，不要对外发送。",
+    ].join("\n");
+    const task = await api("/api/task-requests", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: "sales-director", service_id: "wechat-review", project_id: selectedProject, request, ...runtime }),
+    });
+    note(`微信会话整理任务已登记（${task.request_id}）。`);
+    await load(); switchView("tasks");
+  }
+
   function reimbursementMaterialRow(item) {
     const row = document.createElement("div"); row.className = "reimbursement-material-row";
     const copy = document.createElement("div");
@@ -2915,7 +3134,7 @@
 
   function render() {
     renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
-    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderCustomerOperations(); renderAttention(); renderBidding(); switchView(currentView);
+    renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderWechatSummary(); renderToolPanels(); renderCustomerOperations(); renderAttention(); renderBidding(); switchView(currentView);
   }
 
   async function createTask(request) {
@@ -3007,6 +3226,9 @@
     if (model.library_revision !== libraryState.expectedRevision || libraryState.error || !libraryState.version) await loadLibrary();
     render();
     restoreTaskComposerFocus(composerFocus);
+    if (currentView === "tools" && activeTool === "wechat" && model?.wechat?.configured && model.wechat.revision !== wechatState.revision) {
+      loadWechatConversations({ force: true });
+    }
     if (currentView === "sales" && !customerState.loaded && !customerState.loading) loadCustomers();
     if (!customerState.attentionLoaded) loadAttention();
   }
@@ -3674,6 +3896,88 @@
       note(`本周销售汇报已登记（${response.request_id}），助手将自动汇总本周记录。`);
     } catch (error) { note(error.message, true); }
   };
+
+  document.querySelectorAll("[data-tool]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeTool = button.dataset.tool || "wechat";
+      renderToolPanels();
+      if (activeTool === "wechat" && model?.wechat?.configured && !wechatState.loaded) loadWechatConversations();
+    });
+  });
+  $("choose-wechat-export").onclick = () => {
+    if (!$("wechat-ownership").checked) { note("请先确认这是本人账号且有权处理的聊天内容。", true); return; }
+    $("wechat-file-input").click();
+  };
+  $("wechat-file-input").onchange = async () => {
+    const file = $("wechat-file-input").files?.[0];
+    if (!file) return;
+    if (!/\.(json|jsonl|csv)$/iu.test(file.name)) { note("请选择 JSON、JSONL 或 CSV 结构化导出文件。", true); $("wechat-file-input").value = ""; return; }
+    if (file.size <= 0 || file.size > 64 * 1024 * 1024) { note("微信导出文件必须为 1 字节至 64 兆字节。", true); $("wechat-file-input").value = ""; return; }
+    const button = $("choose-wechat-export"); button.disabled = true; button.textContent = "正在本机导入…";
+    try {
+      const response = await fetch("/api/wechat/import", {
+        method: "POST",
+        headers: {
+          "X-Director-Token": requestToken || "",
+          "Content-Type": "application/octet-stream",
+          "X-File-Name": encodeURIComponent(file.name),
+          "X-Wechat-Ownership": "confirmed",
+          "X-Wechat-Auto-Cleanup": "true",
+          "X-Wechat-Retention-Days": "7",
+          "X-Wechat-Account": encodeURIComponent($("wechat-account").value.trim() || "本机微信"),
+        },
+        body: file,
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "微信会话导入失败");
+      note(result.message);
+      wechatState.loaded = false; wechatState.revision = ""; wechatState.selected.clear(); wechatState.selectedId = ""; wechatState.messages = [];
+      await load();
+    } catch (error) { note(error.message, true); }
+    finally { button.disabled = false; button.textContent = "选择导出文件"; $("wechat-file-input").value = ""; }
+  };
+  let wechatFilterTimer = null;
+  const refreshWechatFilters = () => {
+    clearTimeout(wechatFilterTimer);
+    wechatFilterTimer = setTimeout(() => { wechatState.loaded = false; loadWechatConversations({ force: true }); }, 280);
+  };
+  $("wechat-query").addEventListener("input", refreshWechatFilters);
+  $("wechat-chat-type").addEventListener("change", refreshWechatFilters);
+  $("wechat-date-from").addEventListener("change", refreshWechatFilters);
+  $("wechat-date-to").addEventListener("change", refreshWechatFilters);
+  $("refresh-wechat").onclick = () => loadWechatConversations({ force: true });
+  $("wechat-select-all").onchange = () => {
+    wechatState.rows.forEach((row) => {
+      if ($("wechat-select-all").checked) wechatState.selected.add(row.conversation_id);
+      else wechatState.selected.delete(row.conversation_id);
+    });
+    renderWechatConversations(); renderWechatSummary();
+  };
+  $("review-selected-wechat").onclick = async () => {
+    wechatState.creating = true; renderWechatSummary();
+    try { await createWechatReview(); } catch (error) { note(error.message, true); }
+    finally { wechatState.creating = false; renderWechatSummary(); }
+  };
+  $("review-today-wechat").onclick = async () => {
+    wechatState.creating = true; renderWechatSummary();
+    try { await createWechatReview({ today: true }); } catch (error) { note(error.message, true); }
+    finally { wechatState.creating = false; renderWechatSummary(); }
+  };
+  $("cleanup-wechat").onclick = async () => {
+    const confirmed = await confirmAction({ title: "清理已到期微信原文", message: "只会删除已经超过 7 天保留期的应用副本和索引原文，不会触碰微信原始数据，也不会删除已生成报告。", confirmText: "清理到期内容" });
+    if (!confirmed) return;
+    try {
+      const result = await api("/api/wechat/cleanup", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      note(`${result.message} 本次清理 ${result.purged_messages || 0} 条到期消息。`);
+      wechatState.loaded = false; wechatState.revision = ""; await load();
+    } catch (error) { note(error.message, true); }
+  };
+
+  const wechatToday = new Date();
+  const wechatStart = new Date(); wechatStart.setDate(wechatToday.getDate() - 6);
+  $("wechat-date-from").value = formatDate(wechatStart);
+  $("wechat-date-to").value = formatDate(wechatToday);
+  renderToolPanels();
 
   const reimbursementToday = new Date();
   const reimbursementStart = new Date(); reimbursementStart.setDate(reimbursementToday.getDate() - 30);

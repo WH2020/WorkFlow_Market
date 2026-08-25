@@ -1,0 +1,13 @@
+{
+  "id": "market.wechat.conversation-review",
+  "plugin": "market.wechat",
+  "display_name": "微信会话读取与整理",
+  "entry_nodes": ["read_scope"],
+  "output_nodes": ["validate_report"],
+  "nodes": [
+    {"id": "read_scope", "type": "tool", "tool": "wechat.read", "depends_on": [], "permissions": ["wechat.read"]},
+    {"id": "read_accounts", "type": "tool", "tool": "sales.read", "depends_on": ["read_scope"], "permissions": ["sales.read"]},
+    {"id": "organize_conversations", "type": "agent", "skill": "review-wechat-conversations", "depends_on": ["read_accounts"], "permissions": ["artifact.write"]},
+    {"id": "validate_report", "type": "validator", "check": "wechat_report_has_message_evidence_and_no_invented_commitments", "depends_on": ["organize_conversations"], "permissions": []}
+  ]
+}

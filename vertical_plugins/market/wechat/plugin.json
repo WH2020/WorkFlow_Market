@@ -1,0 +1,14 @@
+{
+  "api_version": "1.0",
+  "id": "market.wechat",
+  "version": "1.0.0",
+  "display_name": "微信会话整理",
+  "description": "读取用户主动导入并明确授权的本地微信会话范围，形成带消息定位的销售整理报告。",
+  "category": "market",
+  "permissions": ["wechat.read", "sales.read", "artifact.write"],
+  "dependencies": [
+    {"id": "market.sales", "version": ">=1.0.0"}
+  ],
+  "skills": ["review-wechat-conversations"],
+  "workflows": ["workflows/conversation-review.json"]
+}

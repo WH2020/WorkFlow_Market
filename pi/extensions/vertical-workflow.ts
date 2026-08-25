@@ -124,6 +124,7 @@ const LOGICAL_TOOL_PERMISSIONS = new Map<string, readonly string[]>([
   ["knowledge.write", ["knowledge.write"]],
   ["sales.read", ["sales.read"]],
   ["sales.write", ["sales.write"]],
+  ["wechat.read", ["wechat.read"]],
   ["bid.read", ["bid.read"]],
   ["bid.write", ["bid.write"]],
   ["account.search", ["sales.read"]],
@@ -329,10 +330,18 @@ function loadProfiles(): Map<string, Profile> {
     const path = join(profilesRoot, entry.name, "profile.json");
     try {
       const profile = JSON.parse(readFileSync(path, "utf8")) as Profile;
-      if (!profile.id || !Array.isArray(profile.services)) continue;
+      if (!profile.id || !Array.isArray(profile.services) || !Array.isArray(profile.plugins)) continue;
       const serialized = JSON.stringify(profile).toLowerCase();
-      if (serialized.includes("wechat") || serialized.includes("weflow") || serialized.includes("微信")) {
-        throw new Error(`Profile ${profile.id} contains a disabled chat integration`);
+      if (serialized.includes("weflow")) throw new Error(`Profile ${profile.id} contains disabled WeFlow integration`);
+      const containsWechat = serialized.includes("wechat") || serialized.includes("微信");
+      if (containsWechat && profile.id !== "sales-director") {
+        throw new Error(`Profile ${profile.id} is not permitted to use the local WeChat import`);
+      }
+      if (containsWechat && !profile.plugins.includes("market.wechat")) {
+        throw new Error(`Profile ${profile.id} uses WeChat without market.wechat`);
+      }
+      if (profile.id !== "sales-director" && profile.plugins.includes("market.wechat")) {
+        throw new Error(`Profile ${profile.id} is not permitted to load market.wechat`);
       }
       profiles.set(profile.id, profile);
     } catch (error) {
@@ -505,8 +514,14 @@ function loadPluginBundle(): PluginBundle {
     }
     semanticVersion(manifest.version);
     const serializedManifest = JSON.stringify(manifest).toLowerCase();
-    if (serializedManifest.includes("wechat") || serializedManifest.includes("weflow") || serializedManifest.includes("微信")) {
-      throw new Error(`Plugin ${manifest.id} contains a disabled chat integration`);
+    if (serializedManifest.includes("weflow")) throw new Error(`Plugin ${manifest.id} contains disabled WeFlow integration`);
+    const manifestContainsWechat = serializedManifest.includes("wechat") || serializedManifest.includes("微信");
+    if (manifestContainsWechat && manifest.id !== "market.wechat") {
+      throw new Error(`Plugin ${manifest.id} is not permitted to use the local WeChat import`);
+    }
+    const wechatPermissions = manifest.permissions.filter((permission) => permission.startsWith("wechat."));
+    if (manifest.id === "market.wechat" && (wechatPermissions.length !== 1 || wechatPermissions[0] !== "wechat.read")) {
+      throw new Error("Plugin market.wechat must declare only wechat.read");
     }
     if (plugins.has(manifest.id)) throw new Error(`Duplicate plugin ${manifest.id}`);
     plugins.set(manifest.id, manifest);
@@ -522,8 +537,10 @@ function loadPluginBundle(): PluginBundle {
       ) as Workflow;
       if (workflows.has(workflow.id)) throw new Error(`Duplicate workflow ${workflow.id}`);
       const serializedWorkflow = JSON.stringify(workflow).toLowerCase();
-      if (serializedWorkflow.includes("wechat") || serializedWorkflow.includes("weflow") || serializedWorkflow.includes("微信")) {
-        throw new Error(`Workflow ${workflow.id} contains a disabled chat integration`);
+      if (serializedWorkflow.includes("weflow")) throw new Error(`Workflow ${workflow.id} contains disabled WeFlow integration`);
+      const workflowContainsWechat = serializedWorkflow.includes("wechat") || serializedWorkflow.includes("微信");
+      if (workflowContainsWechat && manifest.id !== "market.wechat") {
+        throw new Error(`Workflow ${workflow.id} is not permitted to use the local WeChat import`);
       }
       validateRuntimeWorkflow(workflow, manifest);
       workflows.set(workflow.id, workflow);
@@ -676,7 +693,7 @@ function profileContext(profile: Profile): string {
     "启动任务时使用逐项核对：一次只提出一个会显著改变方向、范围、接口、风险或交付物的问题；记录已确认、暂定和待确认项，发现矛盾时直接指出并继续核对。信息已足够时不要机械追问。",
     "DAG 中的 tool 字段是逻辑能力 ID。使用当前已安装的 Pi 工具和对应 Skill 实现；若没有可用适配器，停在该节点并明确报告，不得声称已调用不存在的工具。",
     "信息必须区分已证实事实、分析判断、待验证假设和未知信息。缺失信息只有会显著改变方向、接口、风险或交付物时才提问。",
-    "当前版本不接入微信或 WeFlow，也不得自行恢复此类入口。",
+    "微信仅可由销售总监在本机主动导入结构化文件，并通过明确选择的会话范围读取；不得扫描微信目录、提取密钥、修改微信原库或自动外发。当前版本不接入 WeFlow。",
     "可用服务：",
     services,
   ].join("\n");
@@ -693,6 +710,7 @@ const ADAPTER_TO_LOGICAL_TOOL = new Map([
   ["director_knowledge_write", "knowledge.write"],
   ["director_sales_read", "sales.read"],
   ["director_sales_write", "sales.write"],
+  ["director_wechat_read", "wechat.read"],
   ["director_bid_read", "bid.read"],
   ["director_bid_write", "bid.write"],
   ["director_account_search", "account.search"],
@@ -765,6 +783,10 @@ function authorizedUrlsFromRequest(request: string): string[] {
       })
       .filter(Boolean),
   )].sort();
+}
+
+function authorizedWechatScopesFromRequest(request: string): string[] {
+  return [...new Set(request.match(/\bwechat-scope-[a-f0-9]{20}\b/giu) ?? [])].sort();
 }
 
 function subagentRoleForNode(node: WorkflowNode): GovernedSubagentRole {
@@ -1324,6 +1346,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       "pdf.read": ["collecting", "正在提取 PDF 正文、页码和来源信息。"],
       "knowledge.search": ["collecting", "正在读取当前项目和资料库。"],
       "sales.read": ["collecting", "正在汇总客户、跟进和资源记录。"],
+      "wechat.read": ["collecting", "正在读取你明确选择的本地微信会话范围。"],
       "weekly.snapshot": ["collecting", "正在汇总本周销售记录与任务变化。"],
       "knowledge.write": ["delivering", "正在写入已批准的资料记录。"],
       "sales.write": ["delivering", "正在提交已批准的销售台账变更。"],
@@ -1758,12 +1781,20 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           task_id: state.task_id,
           session_id: stableTaskSessionId(state),
           profile_id: state.profile_id,
+          project_id: state.project_id,
           authorized_urls: authorizedUrls,
+          authorized_wechat_scopes: authorizedWechatScopesFromRequest(state.request),
           revision_base_payload: intent.revision_base_payload,
           ...(storageBinding ? { storage_binding: storageBinding } : {}),
         };
       }
-      return { task_id: state.task_id, profile_id: state.profile_id, authorized_urls: authorizedUrls };
+      return {
+        task_id: state.task_id,
+        profile_id: state.profile_id,
+        project_id: state.project_id,
+        authorized_urls: authorizedUrls,
+        authorized_wechat_scopes: authorizedWechatScopesFromRequest(state.request),
+      };
     },
     afterLogicalTool: (logicalTool, params, details) => {
       const { state, workflow } = requireLogicalTool(logicalTool);

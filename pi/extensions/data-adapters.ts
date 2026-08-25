@@ -21,6 +21,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { Type } from "typebox";
 import { normalizePublicUrl, openWebSource, readLocalPdf } from "./source-readers.ts";
 import { searchPublicWeb } from "./web-search.ts";
@@ -43,7 +44,9 @@ export type AdapterHooks = {
     task_id?: string;
     session_id?: string;
     profile_id?: string;
+    project_id?: string;
     authorized_urls?: string[];
+    authorized_wechat_scopes?: string[];
     revision_base_payload?: string;
     storage_binding?: { backend: "csv" | "sqlite"; binding_id: string };
   } | void;
@@ -83,6 +86,7 @@ type CsvTable = {
 
 const MAX_CSV_BYTES = 16 * 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES = 2 * 1024 * 1024;
+const MAX_WECHAT_DATABASE_BYTES = 512 * 1024 * 1024;
 const MAX_DECK_BYTES = 100 * 1024 * 1024;
 const MAX_WEEKLY_PERIOD_DAYS = 31;
 const MAX_WEEKLY_TASK_FILES = 500;
@@ -1521,6 +1525,161 @@ function assertResultSize(value: unknown): void {
   }
 }
 
+function resolveWechatDatabase(projectRoot: string): string {
+  const root = realpathSync.native(resolve(projectRoot));
+  const dataRoot = resolve(root, "data");
+  const wechatRoot = resolve(dataRoot, "wechat");
+  const configured = resolve(wechatRoot, "chat-index.sqlite3");
+  for (const [path, label] of [[dataRoot, "data"], [wechatRoot, "data/wechat"]] as const) {
+    if (!existsSync(path)) throw new Error("尚未导入微信会话；请先在工具栏选择结构化导出文件");
+    const metadata = lstatSync(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(`${label} 必须是应用内普通目录`);
+  }
+  if (!existsSync(configured)) throw new Error("尚未导入微信会话；请先在工具栏选择结构化导出文件");
+  const metadata = lstatSync(configured);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("微信会话索引必须是普通文件");
+  if (metadata.size <= 0 || metadata.size > MAX_WECHAT_DATABASE_BYTES) throw new Error("微信会话索引大小超出安全范围");
+  const canonicalRoot = realpathSync.native(wechatRoot);
+  const canonical = realpathSync.native(configured);
+  if (!isContained(root, canonical) || !isContained(canonicalRoot, canonical)) {
+    throw new Error("微信会话索引越出应用数据目录");
+  }
+  return canonical;
+}
+
+function escapeSqlLike(value: string): string {
+  return `%${value.replace(/\\/gu, "\\\\").replace(/%/gu, "\\%").replace(/_/gu, "\\_")}%`;
+}
+
+function readAuthorizedWechatScope(projectRoot: string, scopeId: string): Record<string, unknown> {
+  const database = new DatabaseSync(resolveWechatDatabase(projectRoot), {
+    allowExtension: false,
+    defensive: true,
+    enableDoubleQuotedStringLiterals: false,
+    enableForeignKeyConstraints: true,
+    readBigInts: false,
+    readOnly: true,
+    returnArrays: false,
+    timeout: 5000,
+  });
+  try {
+    database.exec("PRAGMA query_only = ON");
+    database.exec("PRAGMA busy_timeout = 5000");
+    const version = database.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
+    if (Number(version?.user_version) !== 1) throw new Error("微信会话索引版本不受支持");
+    const scope = database.prepare(
+      `SELECT scope_id,project_id,title,date_from,date_to,query,conversation_ids_json,message_count,
+              selection_sha256,model_sharing_confirmed,created_at,expires_at,status
+         FROM review_scopes WHERE scope_id=?`,
+    ).get(scopeId) as Record<string, unknown> | undefined;
+    if (!scope) throw new Error("微信会话授权范围不存在或已被清理");
+    if (scope.status !== "active" || Number(scope.model_sharing_confirmed) !== 1) {
+      throw new Error("微信会话授权范围已经失效");
+    }
+    const expiresAt = Date.parse(String(scope.expires_at ?? ""));
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) throw new Error("微信会话授权范围已经到期，请重新选择会话");
+    const parsedIds = JSON.parse(String(scope.conversation_ids_json ?? "[]")) as unknown;
+    if (
+      !Array.isArray(parsedIds) || parsedIds.length < 1 || parsedIds.length > 50 ||
+      parsedIds.some((value) => typeof value !== "string" || !/^wxconv-[a-f0-9]{24}$/u.test(value))
+    ) throw new Error("微信会话授权范围内容无效");
+    const conversationIds = [...new Set(parsedIds as string[])];
+    if (conversationIds.length !== parsedIds.length) throw new Error("微信会话授权范围包含重复会话");
+    const dateFrom = String(scope.date_from ?? "");
+    const dateTo = String(scope.date_to ?? "");
+    const query = String(scope.query ?? "");
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/u.test(dateTo) || query.length > 100) {
+      throw new Error("微信会话授权范围筛选条件无效");
+    }
+    const placeholders = conversationIds.map(() => "?").join(",");
+    const conversationRows = database.prepare(
+      `SELECT conversation_id,display_name,chat_type,last_sent_at
+         FROM conversations WHERE conversation_id IN (${placeholders})
+         ORDER BY display_name COLLATE NOCASE,conversation_id`,
+    ).all(...conversationIds) as Record<string, unknown>[];
+    if (conversationRows.length !== conversationIds.length) throw new Error("授权范围中的部分会话已经不可用");
+    const clauses = [
+      `m.conversation_id IN (${placeholders})`,
+      "(CASE WHEN m.epoch>0 THEN date(m.epoch,'unixepoch','localtime') ELSE substr(m.sent_at,1,10) END)>=?",
+      "(CASE WHEN m.epoch>0 THEN date(m.epoch,'unixepoch','localtime') ELSE substr(m.sent_at,1,10) END)<=?",
+    ];
+    const parameters: Array<string | number | null> = [...conversationIds, dateFrom, dateTo];
+    if (query) {
+      clauses.push("(m.content LIKE ? ESCAPE '\\' OR m.sender_name LIKE ? ESCAPE '\\')");
+      const escaped = escapeSqlLike(query);
+      parameters.push(escaped, escaped);
+    }
+    const messages = database.prepare(
+      `SELECT m.message_id,m.conversation_id,c.display_name AS conversation_name,c.chat_type,
+              m.sender_name,m.is_self,m.sent_at,m.epoch,m.kind,m.content,m.source_locator,m.content_sha256
+         FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id
+        WHERE ${clauses.join(" AND ")} ORDER BY m.epoch,m.message_id LIMIT 601`,
+    ).all(...parameters) as Record<string, unknown>[];
+    if (messages.length === 0) throw new Error("授权范围内的消息原文已被清理，请重新导入并选择会话");
+    if (messages.length > 600 || messages.length !== Number(scope.message_count)) {
+      throw new Error("授权范围的消息集合已发生变化，请重新选择会话");
+    }
+    for (const message of messages) {
+      const messageId = String(message.message_id ?? "");
+      const contentSha256 = String(message.content_sha256 ?? "");
+      if (
+        !/^wxmsg-[a-f0-9]{24}$/u.test(messageId) ||
+        message.source_locator !== `wechat://message/${messageId}` ||
+        !/^[a-f0-9]{64}$/u.test(contentSha256) ||
+        createHash("sha256").update(String(message.content ?? ""), "utf8").digest("hex") !== contentSha256
+      ) throw new Error("微信会话消息证据校验失败，请重新导入并选择范围");
+    }
+    const canonical = JSON.stringify({
+      conversation_ids: [...conversationIds].sort(),
+      conversations: conversationRows
+        .map((conversation) => ({
+          chat_type: conversation.chat_type,
+          conversation_id: conversation.conversation_id,
+          display_name: conversation.display_name,
+        }))
+        .sort((left, right) => String(left.conversation_id).localeCompare(String(right.conversation_id), "en")),
+      date_from: dateFrom,
+      date_to: dateTo,
+      messages: messages.map((message) => ({
+        content_sha256: message.content_sha256,
+        conversation_id: message.conversation_id,
+        epoch: message.epoch,
+        is_self: message.is_self,
+        kind: message.kind,
+        message_id: message.message_id,
+        sent_at: message.sent_at,
+        sender_name: message.sender_name,
+        source_locator: message.source_locator,
+      })),
+      query,
+    });
+    if (createHash("sha256").update(canonical, "utf8").digest("hex") !== scope.selection_sha256) {
+      throw new Error("微信会话授权范围指纹校验失败");
+    }
+    return {
+      snapshot_at: new Date().toISOString(),
+      scope: {
+        scope_id: scope.scope_id,
+        project_id: scope.project_id,
+        title: scope.title,
+        date_from: dateFrom,
+        date_to: dateTo,
+        query,
+        conversation_count: conversationRows.length,
+        message_count: messages.length,
+        selection_sha256: scope.selection_sha256,
+        expires_at: scope.expires_at,
+      },
+      conversations: conversationRows,
+      messages,
+      evidence_scheme: "wechat://message/{message_id}",
+      privacy_notice: "该结果仅来自用户在本机明确选择的授权范围；不得扩大到其他会话。",
+    };
+  } finally {
+    database.close();
+  }
+}
+
 function assertDistinctQueries(queries: string[]): void {
   const normalized = queries.map((query) => query.trim().toLocaleLowerCase("zh-CN"));
   if (normalized.some((query) => !query)) throw new Error("查询词不能为空");
@@ -2444,6 +2603,35 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
       return sources.length;
     },
   };
+
+  pi.registerTool({
+    name: "director_wechat_read",
+    label: "读取已授权微信会话",
+    description: "只读打开用户在工作台明确选择并确认交给当前模型处理的微信会话范围；不能扩大日期、会话或关键词。",
+    parameters: Type.Object({
+      scope_id: Type.String({ pattern: "^wechat-scope-[a-f0-9]{20}$" }),
+    }, { additionalProperties: false }),
+    async execute(_toolCallId, params) {
+      const context = hooks.beforeLogicalTool("wechat.read", params);
+      if (context?.profile_id !== "sales-director") throw new Error("微信会话只允许销售总监角色读取");
+      if (!context.task_id) throw new Error("微信会话读取缺少受管任务上下文");
+      if (!(context.authorized_wechat_scopes ?? []).includes(params.scope_id)) {
+        throw new Error("该微信会话授权范围未绑定到当前用户任务");
+      }
+      const result = readAuthorizedWechatScope(hooks.projectRoot(), params.scope_id);
+      const scopeProjectId = String((result.scope as Record<string, unknown>).project_id ?? "");
+      if (!context.project_id || scopeProjectId !== context.project_id) {
+        throw new Error("微信会话授权范围与当前项目空间不一致");
+      }
+      assertResultSize(result);
+      hooks.afterLogicalTool("wechat.read", params, {
+        scope_id: params.scope_id,
+        selection_sha256: (result.scope as Record<string, unknown>).selection_sha256,
+        message_count: (result.scope as Record<string, unknown>).message_count,
+      });
+      return { content: content(result), details: result };
+    },
+  });
 
   pi.registerTool({
     name: "director_weekly_snapshot",

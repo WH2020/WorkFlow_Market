@@ -32,6 +32,7 @@ backups/
 inputs/*
 !inputs/.gitkeep
 data/weflow/
+data/wechat/
 outputs/
 library/templates/office-template-catalog.json
 library/templates/company/

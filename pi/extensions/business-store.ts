@@ -7,7 +7,7 @@ import { backup, DatabaseSync } from "node:sqlite";
 import { LocalBusinessStoreError } from "./local-business-store.ts";
 
 export const BUSINESS_SCHEMA_VERSION = 1;
-export const BUSINESS_STORE_APPLICATION_VERSION = "0.17.0";
+export const BUSINESS_STORE_APPLICATION_VERSION = "0.18.0";
 export const BUSINESS_STORE_MAX_MUTATIONS = 100;
 
 type SqlValue = string | number | null;
