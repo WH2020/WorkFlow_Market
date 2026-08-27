@@ -1,6 +1,6 @@
 ---
 name: plan-director-presentations
-description: 规划市场总监或产品总监的行业、政府、管理和自定义 PPT；用于先澄清 brief、绑定任务证据、编排大纲与逐页策划，再经审批生成可编辑 PPTX。周报沿用 build-director-decks 预设。
+description: 规划销售总监、市场总监或产品总监的行业、政府、管理和自定义 PPT；用于先澄清 brief、绑定任务证据、编排大纲与逐页策划，再经审批生成可编辑 PPTX。周报沿用 build-director-decks 预设。
 ---
 
 # PPT 工作室

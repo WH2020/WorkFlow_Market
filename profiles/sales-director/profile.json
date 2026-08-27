@@ -21,7 +21,7 @@
     {"id": "government-proposal", "display_name": "政府合作方案", "description": "结合地方条件、公开政策与项目资源形成政府合作方案。", "workflow": "market.government.proposal", "skill": "draft-government-program"},
     {"id": "office-document", "display_name": "销售文件与方案", "description": "编写销售方案、客户材料和常见办公文件。", "workflow": "shared.documents.create", "skill": "create-director-documents"},
     {"id": "presentation-studio", "display_name": "销售演示文稿工作室", "description": "从需求、客户证据、大纲和逐页策划生成经确认的演示文稿。", "workflow": "shared.presentation.studio", "skill": "plan-director-presentations"},
-    {"id": "weekly-deck", "display_name": "周五销售汇报", "description": "汇总客户进展、资源需求、风险和下周动作，生成经确认的演示文稿。", "workflow": "shared.reporting.weekly-deck-v2", "skill": "build-director-decks"},
+    {"id": "weekly-deck", "display_name": "个性化销售行动简报", "description": "按销售人员生成客户行动卡，并汇总待分配客户、资源需求、风险和销售总监汇报。", "workflow": "shared.reporting.weekly-deck-v2", "skill": "build-director-decks"},
     {"id": "bid-discovery", "display_name": "采购机会发现", "description": "检索并核验公开采购机会，判断是否值得建立投标项目。", "workflow": "market.bidding.opportunity-discovery", "skill": "manage-intelligent-bidding"},
     {"id": "bid-interpretation", "display_name": "招标文件解读", "description": "从已上传原件提取时间、强制要求、评分点与递交规则。", "workflow": "market.bidding.tender-interpretation", "skill": "manage-intelligent-bidding"},
     {"id": "bid-decision", "display_name": "参投决策", "description": "评估资格、交付、资源、商务和竞争风险，形成 Go/No-Go 建议。", "workflow": "market.bidding.go-no-go", "skill": "manage-intelligent-bidding"},

@@ -17,7 +17,7 @@
         <button class="nav-item" data-view="sales"><span>♙</span>客户经营</button>
         <button class="nav-item" data-view="bids"><span>◆</span>智能招投标</button>
         <button class="nav-item" data-view="knowledge"><span>▣</span>资料库</button>
-        <button class="nav-item" data-view="weekly"><span>▤</span>周报中心</button>
+        <button class="nav-item" data-view="weekly"><span>▤</span>销售行动简报</button>
         <button class="nav-item" data-view="outputs"><span>⇩</span>输出中心</button>
         <div class="nav-divider"></div>
         <button class="nav-item" data-view="projects"><span>□</span>项目空间</button>
@@ -55,12 +55,12 @@
                   <button data-service="sales-review"><span>♙</span>客户销售复盘<small>风险与行动建议</small></button>
                   <button data-service="wechat-review"><span>微</span>微信会话整理<small>本地导入并选择范围</small></button>
                   <button data-service="presentation-studio"><span>▥</span>PPT 工作室<small>主题必填，其余自动</small></button>
-                  <button data-service="weekly-deck"><span>▨</span>生成即时周报<small>自动汇总本周记录</small></button>
+                  <button data-service="weekly-deck"><span>▨</span>生成销售行动简报<small>个人行动卡＋总监汇总</small></button>
                 </div>
               </section>
               <section class="panel dashboard-panel attention-panel"><div class="panel-heading"><div><h2>今日关注</h2><p class="hint">仅显示有明确来源、需优先处理的客户事项。</p></div><div class="panel-heading-actions"><button id="refresh-attention" class="text-button" type="button">刷新</button><button class="text-button" data-view="sales">查看客户经营 →</button></div></div><div id="home-attention" class="attention-list empty">正在读取今日关注…</div></section>
               <div class="two-column">
-                <section class="panel dashboard-panel"><div class="panel-heading"><h2>本周进度</h2><span id="week-label" class="muted"></span></div><div class="progress-copy"><strong id="week-progress-label">0%</strong><span>任务完成率</span></div><div class="progress-track"><i id="week-progress-bar"></i></div><div class="inline-actions"><button class="primary" data-view="tasks">继续处理</button><button class="secondary" data-service="weekly-deck">生成周报</button></div></section>
+                <section class="panel dashboard-panel"><div class="panel-heading"><h2>本周进度</h2><span id="week-label" class="muted"></span></div><div class="progress-copy"><strong id="week-progress-label">0%</strong><span>任务完成率</span></div><div class="progress-track"><i id="week-progress-bar"></i></div><div class="inline-actions"><button class="primary" data-view="tasks">继续处理</button><button class="secondary" data-service="weekly-deck">生成行动简报</button></div></section>
                 <section class="panel dashboard-panel"><div class="panel-heading"><h2>最近任务</h2><button class="text-button" data-view="tasks">查看全部 →</button></div><div id="home-recent" class="compact-list empty">暂无任务</div></section>
               </div>
             </div>
@@ -163,7 +163,24 @@
             <aside class="panel library-preview-panel" aria-live="polite"><div id="library-preview-empty" class="library-preview-empty"><span>▣</span><h2>选择一份资料</h2><p>查看来源、业务关联、版本和可执行操作。</p></div><div id="library-preview" hidden></div></aside>
           </div>
         </section>
-        <section class="page" data-page="weekly"><div class="page-heading"><div><p class="section-kicker">WEEKLY REPORT</p><h1>周报中心</h1><p>自动汇总本周销售记录，只需补充一个重点。</p></div></div><section id="weekly-task-form" class="panel task-form weekly-form"><div class="form-heading"><div><h2>生成周五销售汇报</h2><p class="hint">客户进展、资源需求、风险和下周行动会自动汇总。</p></div><span id="weekly-period" class="period-badge"></span></div><div class="weekly-summary"><strong>自动读取本周已有记录</strong><ul><li>重点客户进展与停滞机会</li><li>资源需求、风险和待确认事项</li><li>本周完成情况与下周行动</li></ul></div><label>本周特别想强调什么？（可选）<textarea id="weekly-focus" maxlength="120" placeholder="例如：重点突出 A 客户停滞原因，以及需要技术团队支持的事项。"></textarea></label><div class="form-actions"><button id="create-weekly" class="primary">一键生成本周汇报</button><span class="hint">正式 PPT 生成前仍会让你确认。</span></div></section></section>
+        <section class="page" data-page="weekly">
+          <div class="page-heading"><div><p class="section-kicker">销售行动</p><h1>个性化销售行动简报</h1><p>系统先按销售人员与客户关系自动整理，再生成每位销售的行动卡和销售总监汇总。</p></div><button id="refresh-weekly-preview" class="secondary">刷新本周数据</button></div>
+          <section id="weekly-task-form" class="panel task-form weekly-form">
+            <div class="form-heading"><div><h2>生成个人简报＋总监汇报</h2><p class="hint">不用逐项填写。系统自动读取本周客户、跟进、资源申请和已授权销售资料。</p></div><span id="weekly-period" class="period-badge"></span></div>
+            <div class="weekly-summary"><strong>自动完成四件事</strong><ul><li>按明确归属拆分每位销售的客户与跟进</li><li>为每位销售提炼最多 3 个优先动作</li><li>只推荐已授权且有真实来源路径的销售资料</li><li>汇总待分配客户、资源阻塞和销售总监关注项</li></ul></div>
+            <label>本周特别想强调什么？（可选）<textarea id="weekly-focus" maxlength="120" placeholder="例如：重点突出 A 客户停滞原因，以及需要技术团队支持的事项。"></textarea></label>
+            <div class="form-actions"><button id="create-weekly" class="primary">生成个人简报＋总监汇报</button><span class="hint">正式演示文稿生成前仍会让你确认，不会自动发给销售。</span></div>
+          </section>
+          <section class="weekly-preview" aria-live="polite">
+            <div class="weekly-preview-heading"><div><h2>本周数据预览</h2><p id="weekly-preview-status" class="hint">进入页面后自动读取本地资料。</p></div><span id="weekly-validation-badge" class="period-badge">正在读取</span></div>
+            <div id="weekly-manager-rollup" class="weekly-metric-grid"></div>
+            <div class="weekly-preview-grid">
+              <section class="panel weekly-seller-panel"><div class="panel-heading"><div><h2>销售个人行动卡</h2><p class="hint">每张卡只显示可追溯的客户、动作、跟进和资料。</p></div><span id="weekly-seller-count" class="count-pill">0</span></div><div id="weekly-seller-briefs" class="weekly-seller-list empty">正在整理销售人员与客户关系…</div></section>
+              <aside class="panel weekly-check-panel"><div class="panel-heading"><div><h2>数据检查</h2><p class="hint">无法确认的关系不会被系统猜测。</p></div></div><div id="weekly-validation-messages" class="weekly-validation-list"></div><div id="weekly-unassigned-accounts" class="weekly-unassigned-list"></div></aside>
+            </div>
+            <p class="safety-note">这里显示的是当前本地数据预览；点击生成后，正式任务会重新读取同一周期并保存不可覆盖的证据快照与校验值。</p>
+          </section>
+        </section>
         <section class="page" data-page="outputs"><div class="page-heading"><div><p class="section-kicker">OUTPUT CENTRE</p><h1>输出中心</h1><p>查看通过受控流程生成的方案、报告和 PPT。</p></div></div><section class="panel"><div id="outputs" class="empty">暂无可显示的产物。</div></section></section>
 
         <section class="page" data-page="projects"><div class="page-heading"><div><p class="section-kicker">PROJECT SPACE</p><h1>项目空间</h1><p>把任务、资料和产物按客户或机会归在一起。</p></div><div class="page-heading-actions"><button id="project-quick-upload" class="secondary">上传资料</button><button id="open-data-directory" class="secondary">打开数据目录</button><button id="show-project-form" class="primary">新建项目</button></div></div><section id="project-create-panel" class="panel compact-form" hidden><div class="guided-grid"><label>项目名称<input id="project-name" maxlength="80" placeholder="例如：江苏具身智能合作项目"></label><label>项目说明<input id="project-description" maxlength="500" placeholder="客户、目标和当前阶段"></label></div><div class="form-actions"><button id="create-project" class="primary">创建项目</button><button id="cancel-project" class="secondary">取消</button></div></section><div id="project-list" class="project-grid empty">暂无项目</div><div class="two-column"><section class="panel"><div class="panel-heading"><h2>项目资料</h2><button id="project-upload" class="secondary">上传资料</button></div><div id="project-files" class="file-list empty">暂无资料</div></section><section class="panel"><div class="panel-heading"><h2>项目产物</h2><button class="text-button" data-view="outputs">查看全部 →</button></div><div id="project-outputs" class="file-list empty">暂无产物</div></section></div></section>

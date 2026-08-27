@@ -53,6 +53,9 @@
     query: "", statuses: "", listController: null, detailController: null, generation: 0,
     detailGeneration: 0, renderedKey: "", detailRenderedKey: "", editingId: "",
   };
+  const weeklyState = {
+    data: null, periodKey: "", loading: false, error: "", generation: 0,
+  };
   let customerRenderedKey = "";
   let customerDetailRenderedKey = "";
   let attentionRenderedKey = "";
@@ -198,7 +201,7 @@
 
   const viewTitles = {
     home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
-    bids: "智能招投标", knowledge: "资料库", weekly: "周报中心", outputs: "输出中心", projects: "项目空间",
+    bids: "智能招投标", knowledge: "资料库", weekly: "销售行动简报", outputs: "输出中心", projects: "项目空间",
     schedules: "每日定时任务", search: "自定义操作", tools: "工具栏", settings: "设置",
   };
   if (viewTitles[window.location.hash.slice(1)]) currentView = window.location.hash.slice(1);
@@ -427,6 +430,7 @@
       const service = serviceById("weekly-deck");
       if (service) selectedService = service.id;
       renderTaskForm();
+      loadWeeklyBriefing();
     }
     if (view === "work") renderServices();
     if (view === "bids" && !bidState.loaded && !bidState.loading) loadBids();
@@ -824,6 +828,130 @@
     const monday = new Date(today); monday.setHours(0, 0, 0, 0); monday.setDate(today.getDate() - weekday + 1);
     const friday = new Date(monday); friday.setDate(monday.getDate() + 4);
     return { start: formatDate(monday), end: formatDate(friday) };
+  }
+
+  function weeklyEmpty(text) {
+    const empty = document.createElement("div");
+    empty.className = "weekly-empty";
+    empty.textContent = text;
+    return empty;
+  }
+
+  function weeklyEvidence(item) {
+    const evidence = item?.evidence;
+    if (!evidence?.type || !evidence?.id) return "";
+    const types = { activity: "跟进", resource_request: "资源申请", action: "行动", account: "客户", risk: "风险", sales_asset: "销售资料" };
+    return `${types[evidence.type] || "来源"} ${evidence.id}`;
+  }
+
+  function weeklyItemList(title, rows, formatter, emptyText) {
+    const section = document.createElement("section");
+    section.className = "weekly-card-section";
+    const heading = document.createElement("h4"); heading.textContent = title; section.append(heading);
+    if (!rows?.length) { const hint = document.createElement("p"); hint.className = "hint"; hint.textContent = emptyText; section.append(hint); return section; }
+    const list = document.createElement("ul");
+    rows.forEach((row) => {
+      const item = document.createElement("li");
+      const main = document.createElement("span"); main.textContent = formatter(row); item.append(main);
+      const source = weeklyEvidence(row);
+      const meta = [row.account_name, row.due_at || row.deadline, source].filter(Boolean).join(" · ");
+      if (meta) { const small = document.createElement("small"); small.textContent = meta; item.append(small); }
+      list.append(item);
+    });
+    section.append(list); return section;
+  }
+
+  function renderWeeklyBriefing() {
+    const data = weeklyState.data;
+    const badge = $("weekly-validation-badge");
+    const status = $("weekly-preview-status");
+    const metrics = $("weekly-manager-rollup");
+    const sellerList = $("weekly-seller-briefs");
+    const validationList = $("weekly-validation-messages");
+    const unassignedList = $("weekly-unassigned-accounts");
+    if (weeklyState.loading) {
+      badge.textContent = "正在读取"; badge.className = "period-badge loading";
+      status.textContent = "正在按销售人员、客户和来源记录整理本周数据…";
+      metrics.replaceChildren(); sellerList.replaceChildren(weeklyEmpty("正在生成本地预览…"));
+      validationList.replaceChildren(); unassignedList.replaceChildren(); return;
+    }
+    if (weeklyState.error || !data) {
+      badge.textContent = "读取失败"; badge.className = "period-badge error";
+      status.textContent = weeklyState.error || "暂时无法读取本周数据。";
+      metrics.replaceChildren(); sellerList.replaceChildren(weeklyEmpty("请检查本地销售资料后重试。"));
+      validationList.replaceChildren(); unassignedList.replaceChildren(); return;
+    }
+    const rollup = data.manager_rollup || {};
+    const validation = data.validation || {};
+    const badgeLabels = { ready: "数据就绪", limited: "部分可用", empty: "等待数据" };
+    badge.textContent = badgeLabels[validation.status] || "已读取";
+    badge.className = `period-badge ${validation.status || ""}`;
+    status.textContent = `${data.period?.start || ""} 至 ${data.period?.end || ""} · ${data.source?.note || "本地只读预览"}`;
+    const metricDefinitions = [
+      ["销售人员", rollup.seller_count || 0, "已生成个人卡"],
+      ["本周相关客户", rollup.account_count || 0, "按周期记录筛选"],
+      ["有跟进客户", rollup.touched_account_count || 0, "存在明确跟进证据"],
+      ["待推进资源", rollup.open_resource_count || 0, "未关闭的资源事项"],
+    ];
+    metrics.replaceChildren(...metricDefinitions.map(([labelText, count, description]) => {
+      const card = document.createElement("article");
+      const labelNode = document.createElement("span"); labelNode.textContent = labelText;
+      const countNode = document.createElement("strong"); countNode.textContent = String(count);
+      const descriptionNode = document.createElement("small"); descriptionNode.textContent = description;
+      card.append(labelNode, countNode, descriptionNode); return card;
+    }));
+    const briefs = data.seller_briefs || [];
+    $("weekly-seller-count").textContent = String(briefs.length);
+    sellerList.classList.toggle("empty", briefs.length === 0);
+    sellerList.replaceChildren(...(briefs.length ? briefs.map((brief) => {
+      const card = document.createElement("details"); card.className = "weekly-seller-card"; card.open = briefs.length <= 3;
+      const summary = document.createElement("summary");
+      const identity = document.createElement("div");
+      const avatar = document.createElement("span"); avatar.className = "weekly-avatar"; avatar.textContent = (brief.name || brief.salesperson_id || "销").slice(0, 1);
+      const copy = document.createElement("div"); const name = document.createElement("strong"); name.textContent = brief.name || brief.salesperson_id;
+      const meta = document.createElement("small"); meta.textContent = `${brief.account_count || 0} 个客户 · ${(brief.top_actions || []).length} 个优先动作 · ${(brief.account_updates || []).length} 条跟进`;
+      copy.append(name, meta); identity.append(avatar, copy);
+      const expand = document.createElement("b"); expand.textContent = "查看行动";
+      summary.append(identity, expand); card.append(summary);
+      const body = document.createElement("div"); body.className = "weekly-seller-body";
+      if (brief.welcome_note) { const welcome = document.createElement("p"); welcome.className = "weekly-welcome"; welcome.textContent = brief.welcome_note; body.append(welcome); }
+      body.append(
+        weeklyItemList("本周优先动作", brief.top_actions, (row) => row.text, "本周没有已确认的待办动作。"),
+        weeklyItemList("客户进展", (brief.account_updates || []).slice(0, 5), (row) => row.summary, "本周没有已记录的客户跟进。"),
+        weeklyItemList("资源需求", (brief.resource_needs || []).slice(0, 5), (row) => row.summary, "没有待推进的资源申请。"),
+        weeklyItemList("可用销售资料", brief.recommended_assets, (row) => `${row.title}${row.source_path ? `（${row.source_path}）` : ""}`, "没有通过授权和来源校验的推荐资料。"),
+      );
+      card.append(body); return card;
+    }) : [weeklyEmpty("暂无可生成个人简报的销售人员。请先在销售人员名单或跟进记录中补充销售人员编号。")]));
+
+    validationList.replaceChildren(...(validation.messages || []).map((message) => {
+      const item = document.createElement("p"); item.textContent = message; return item;
+    }));
+    const unassigned = rollup.unassigned_accounts || [];
+    if (unassigned.length) {
+      const heading = document.createElement("h3"); heading.textContent = `待分配客户（${unassigned.length}）`;
+      const list = document.createElement("ul");
+      unassigned.forEach((row) => { const item = document.createElement("li"); item.textContent = `${row.name || row.account_id}${row.owner ? ` · 当前负责人字段：${row.owner}` : " · 未填写负责人"}`; list.append(item); });
+      unassignedList.replaceChildren(heading, list);
+    } else unassignedList.replaceChildren();
+  }
+
+  async function loadWeeklyBriefing({ force = false } = {}) {
+    const period = currentWeek();
+    const periodKey = `${period.start}:${period.end}`;
+    if (weeklyState.loading || (!force && weeklyState.data && weeklyState.periodKey === periodKey)) return;
+    const generation = ++weeklyState.generation;
+    weeklyState.loading = true; weeklyState.error = ""; weeklyState.periodKey = periodKey; renderWeeklyBriefing();
+    try {
+      const data = await api(`/api/weekly-briefing?start=${encodeURIComponent(period.start)}&end=${encodeURIComponent(period.end)}`);
+      if (generation !== weeklyState.generation) return;
+      weeklyState.data = data;
+    } catch (error) {
+      if (generation !== weeklyState.generation) return;
+      weeklyState.data = null; weeklyState.error = error.message;
+    } finally {
+      if (generation === weeklyState.generation) { weeklyState.loading = false; renderWeeklyBriefing(); }
+    }
   }
 
   function renderTaskForm() {
@@ -3208,11 +3336,11 @@
     const focusText = focus ? ` 特别关注：${focus}` : "";
     return {
       schema_version: "1.0", scene: "weekly", mode: "quick",
-      topic: `${period.start} 至 ${period.end} 销售周报：自动汇总重点客户进展、资源需求、风险和下周行动。${focusText}`,
-      audience: "销售管理层", purpose: "复盘本周销售推进并确认下周资源配置", occasion: "周五销售例会", language: "zh-CN",
+      topic: `${period.start} 至 ${period.end} 个性化销售行动简报：为每位销售生成优先动作，并汇总客户进展、资源需求、风险和待分配事项。${focusText}`,
+      audience: "销售人员与销售管理层", purpose: "让每位销售明确下周动作，并帮助销售总监确认优先级与资源配置", occasion: "周五销售复盘与下周行动对齐", language: "zh-CN",
       duration_minutes: 15, target_slides: 6, design_system: { token_id: "management-report" },
-      source_scope: "public-web-and-profile-knowledge", confidentiality: "internal",
-      expected_decision: "确认重点客户优先级、资源配置和下周行动", output_name: autoOutputName("sales-weekly", false),
+      source_scope: "local-sales-records-and-authorized-assets", confidentiality: "internal",
+      expected_decision: "确认每位销售的优先动作、待分配客户、资源配置和管理层关注项", output_name: autoOutputName("sales-action-brief", false),
     };
   }
 
@@ -3893,8 +4021,13 @@
     try {
       const response = await createTask(`[PRESENTATION_BRIEF]\n${JSON.stringify(weeklyBrief(), null, 2)}\n[/PRESENTATION_BRIEF]`);
       $("weekly-focus").value = "";
-      note(`本周销售汇报已登记（${response.request_id}），助手将自动汇总本周记录。`);
+      note(`销售行动简报已登记（${response.request_id}），助手将冻结本周证据并生成个人简报与总监汇总。`);
     } catch (error) { note(error.message, true); }
+  };
+  $("refresh-weekly-preview").onclick = async () => {
+    const button = $("refresh-weekly-preview"); button.disabled = true;
+    try { await loadWeeklyBriefing({ force: true }); }
+    finally { button.disabled = false; }
   };
 
   document.querySelectorAll("[data-tool]").forEach((button) => {

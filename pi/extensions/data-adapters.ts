@@ -27,6 +27,7 @@ import { normalizePublicUrl, openWebSource, readLocalPdf } from "./source-reader
 import { searchPublicWeb } from "./web-search.ts";
 import { openBusinessStore, resolveBusinessBackend } from "./business-backend.ts";
 import type { BusinessMutation, BusinessTable, SalesBusinessStore } from "./business-store.ts";
+import { buildPersonalizedWeeklyBriefing } from "./weekly-briefing.ts";
 import { bidDocumentSnapshotSha256, bidSnapshotSha256, openBiddingStore } from "./bid-store.ts";
 import type { BidMutation } from "./bid-store.ts";
 import {
@@ -92,6 +93,7 @@ const MAX_WEEKLY_PERIOD_DAYS = 31;
 const MAX_WEEKLY_TASK_FILES = 500;
 const MAX_WEEKLY_OUTPUT_FILES = 200;
 const MAX_WEEKLY_SOURCE_BYTES = 32 * 1024 * 1024;
+const MAX_WEEKLY_ARCHIVE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
@@ -555,6 +557,7 @@ export function collectWeeklySnapshot(
   }
 
   const sales: Record<string, Record<string, string>[]> = {};
+  let salespeople: Record<string, unknown>[] = [];
   const dateFields: Record<string, string[]> = {
     customers: ["updated_at", "last_evidence_date", "next_action_due"],
     activities: ["occurred_at", "created_at", "next_action_due"],
@@ -581,7 +584,7 @@ export function collectWeeklySnapshot(
       }
       account(pointerSnapshot.source);
     }
-    if (profileId === "market-director" || profileId === undefined) {
+    if (profileId === "market-director" || profileId === "sales-director" || profileId === undefined) {
       for (const tableName of ["customers", "activities", "resource_requests"] as const) {
         const definition = SALES_TABLES[tableName];
         let matchingRows: Record<string, string>[];
@@ -612,6 +615,52 @@ export function collectWeeklySnapshot(
           matched: matchedTotal,
           returned: sales[tableName].length,
           truncated: matchedTotal > sales[tableName].length,
+        };
+      }
+      const rosterPath = resolve(root, "data", "sales", "salespeople.json");
+      if (existsSync(rosterPath)) {
+        const rosterSnapshot = weeklyTextSnapshot(root, rosterPath, "sales:salespeople", 1024 * 1024);
+        const roster = JSON.parse(rosterSnapshot.text) as Record<string, unknown>;
+        if (!Array.isArray(roster.salespeople) || roster.salespeople.length > 1000 || roster.salespeople.some((row) => (
+          !row || typeof row !== "object" || Array.isArray(row) ||
+          typeof (row as Record<string, unknown>).salesperson_id !== "string" ||
+          typeof (row as Record<string, unknown>).name !== "string" ||
+          ![true, false].includes((row as Record<string, unknown>).active as boolean)
+        ))) throw new Error("销售人员名单格式无效");
+        account(rosterSnapshot.source);
+        salespeople = roster.salespeople as Record<string, unknown>[];
+      }
+
+      if (businessStore) {
+        const assetRows = businessStore.readBusinessTable("sales_assets", "", 1001);
+        sales.sales_assets = assetRows.slice(0, 1000).map((row) => projectSqliteSalesRow("sales_assets", row));
+        truncation.sales.sales_assets = {
+          matched: assetRows.length,
+          returned: sales.sales_assets.length,
+          truncated: assetRows.length > sales.sales_assets.length,
+        };
+        for (const tableName of ["actions", "risks"] as const) {
+          const rows = businessStore.readBusinessTable(tableName, "", 1001);
+          sales[tableName] = rows.slice(0, 1000).map((row) => Object.fromEntries(
+            Object.entries(row).filter(([key]) => key !== "deleted_at").map(([key, child]) => [key, child === null || child === undefined ? "" : String(child)]),
+          ));
+          truncation.sales[tableName] = {
+            matched: rows.length,
+            returned: sales[tableName].length,
+            truncated: rows.length > sales[tableName].length,
+          };
+        }
+      } else {
+        const definition = SALES_TABLES.sales_assets;
+        const path = resolveDataFile(root, "sales", definition.file);
+        const tableSnapshot = weeklyTextSnapshot(root, path, "sales:sales_assets", MAX_CSV_BYTES);
+        const table = parseTableContent(tableSnapshot.text, path, definition);
+        account(tableSnapshot.source);
+        sales.sales_assets = publicRows(table, table.rows).slice(0, 1000);
+        truncation.sales.sales_assets = {
+          matched: table.rows.length,
+          returned: sales.sales_assets.length,
+          truncated: table.rows.length > sales.sales_assets.length,
         };
       }
     }
@@ -684,12 +733,58 @@ export function collectWeeklySnapshot(
     generated_at: new Date().toISOString(),
     tasks,
     sales,
+    sales_briefing: buildPersonalizedWeeklyBriefing({
+      period: { start: period.start, end: period.end },
+      salespeople,
+      customers: sales.customers ?? [],
+      activities: sales.activities ?? [],
+      resource_requests: sales.resource_requests ?? [],
+      sales_assets: sales.sales_assets ?? [],
+      actions: sales.actions ?? [],
+      risks: sales.risks ?? [],
+    }),
     outputs,
     knowledge,
     truncation,
     source_versions: sources,
   };
   return { ...snapshotBase, snapshot_sha256: createHash("sha256").update(JSON.stringify(snapshotBase), "utf8").digest("hex") };
+}
+
+export function archiveWeeklySnapshot(projectRoot: string, taskId: string, snapshot: Record<string, unknown>): string {
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(taskId)) throw new Error("周报快照归档的 task_id 无效");
+  const digest = snapshot.snapshot_sha256;
+  if (typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest)) throw new Error("周报快照归档缺少有效 SHA-256");
+  const root = realpathSync.native(resolve(projectRoot));
+  const requested = resolve(root, ".pi", "director-runtime", "weekly-snapshots");
+  mkdirSync(requested, { recursive: true });
+  const meta = lstatSync(requested);
+  const directory = realpathSync.native(requested);
+  if (!meta.isDirectory() || meta.isSymbolicLink() || !isContained(root, directory)) throw new Error("周报快照归档目录无效");
+  const content = `${JSON.stringify(snapshot, null, 2)}\n`;
+  if (Buffer.byteLength(content, "utf8") > MAX_WEEKLY_ARCHIVE_BYTES) throw new Error("周报快照归档超过 2 MiB 安全上限");
+  const target = join(directory, `${taskId}-${digest}.json`);
+  if (existsSync(target)) {
+    const existing = lstatSync(target);
+    if (!existing.isFile() || existing.isSymbolicLink() || readFileSync(target, "utf8") !== content) {
+      throw new Error("同名周报快照归档已存在但内容不一致");
+    }
+    return relative(root, target).replaceAll("\\", "/");
+  }
+  const temporary = join(directory, `.${taskId}-${randomUUID()}.tmp`);
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(temporary, "wx", 0o600);
+    writeFileSync(descriptor, content, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    linkSync(temporary, target);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+  return relative(root, target).replaceAll("\\", "/");
 }
 
 function matchesQuery(row: Record<string, string>, query: string): boolean {
@@ -951,7 +1046,7 @@ export type DeckPayload = {
   snapshot_sha256: string;
   plan_sha256?: string;
   output_name: string;
-  profile_id: "market-director" | "product-director";
+  profile_id: "market-director" | "product-director" | "sales-director";
   template_id: "ceo-weekly" | "management-report" | "government-program" | "technology-research";
   period: { start: string; end: string };
   slides: Array<{
@@ -979,7 +1074,7 @@ export function assertDeckPayload(value: DeckPayload): void {
   if (value.plan_sha256 !== undefined && !/^[a-f0-9]{64}$/u.test(value.plan_sha256)) {
     throw new Error("PPT plan_sha256 无效");
   }
-  if (!new Set(["market-director", "product-director"]).has(value.profile_id)) throw new Error("PPT Profile 无效");
+  if (!new Set(["market-director", "product-director", "sales-director"]).has(value.profile_id)) throw new Error("PPT Profile 无效");
   parsePeriod(value.period);
   if (!Array.isArray(value.slides) || value.slides.length < 4 || value.slides.length > 10) {
     throw new Error("PPT 必须包含 4-10 页");
@@ -1768,7 +1863,8 @@ function projectSqliteSalesRow(table: SalesTableName, row: Record<string, unknow
     audience_role: text("audience_role"), sales_stage: text("sales_stage"), use_case: text("use_case"), owner: text("owner"), status: text("status"),
     authorization_status: text("authorization_status"), deidentification_status: text("deidentification_status"), version: text("version"),
     source_path: text("source_path"), evidence_refs: text("legacy_evidence_refs"), last_validated_at: text("last_validated_at"),
-    next_review_at: text("next_review_at"), usage_feedback: text("usage_feedback"), updated_at: text("updated_at"), _record_version: sqliteVersion(row.version),
+    next_review_at: text("next_review_at"), usage_feedback: text("usage_feedback"), source_status: text("source_status"),
+    updated_at: text("updated_at"), _record_version: sqliteVersion(row.version),
   };
 }
 
@@ -2064,7 +2160,7 @@ function writeTaskEvidence(projectRoot: string, state: TaskEvidenceState): void 
 type PresentationPlanInput = {
   schema_version: "1.0";
   project_id: string;
-  profile_id: "market-director" | "product-director";
+  profile_id: "market-director" | "product-director" | "sales-director";
   scene: "weekly" | "industry" | "government" | "custom";
   mode: "quick" | "standard" | "strict";
   phase: "outline" | "final";
@@ -2225,7 +2321,7 @@ function validatePresentationPlan(
 ): { sources: PresentationEvidenceSource[]; contextSha256: string; normalized: Omit<PresentationPlanInput, "expected_plan_sha256" | "expected_context_snapshot_sha256"> } {
   if (value.schema_version !== "1.0") throw new Error("PPT plan schema_version 必须为 1.0");
   assertPlanId(value.project_id, "PPT project_id");
-  if (value.profile_id !== profileId || !new Set(["market-director", "product-director"]).has(value.profile_id)) {
+  if (value.profile_id !== profileId || !new Set(["market-director", "product-director", "sales-director"]).has(value.profile_id)) {
     throw new Error("PPT plan Profile 必须与当前受管任务一致");
   }
   if (!new Set(["weekly", "industry", "government", "custom"]).has(value.scene)) throw new Error("PPT scene 无效");
@@ -2642,7 +2738,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
         start: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
         end: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
       }),
-      profile_id: Type.Optional(Type.Union([Type.Literal("market-director"), Type.Literal("product-director")])),
+      profile_id: Type.Optional(Type.Union([Type.Literal("market-director"), Type.Literal("product-director"), Type.Literal("sales-director")])),
     }),
     async execute(_toolCallId, params) {
       const context = hooks.beforeLogicalTool("weekly.snapshot", params);
@@ -2651,9 +2747,10 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
       }
       const profileId = context?.profile_id ?? params.profile_id;
       if (!profileId) throw new Error("周报快照缺少受管 Profile 上下文");
-      const result = collectWeeklySnapshot(hooks.projectRoot(), params.period, profileId);
+      const collected = collectWeeklySnapshot(hooks.projectRoot(), params.period, profileId);
       if (!context?.task_id) throw new Error("周报快照缺少受管任务上下文");
-      const snapshot = result as {
+      const snapshotArchivePath = archiveWeeklySnapshot(hooks.projectRoot(), context.task_id, collected);
+      const snapshot = collected as {
         snapshot_sha256: string;
         period: { start: string; end: string };
         knowledge: Array<Record<string, unknown>>;
@@ -2664,8 +2761,10 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
         try { return [normalizePublicUrl(row.url).toString()]; } catch { return []; }
       });
       const loaded = loadEvidence(context);
+      const presentationEvidenceRefs: Array<{ source_id: string; path: string; sha256: string }> = [];
       for (const source of snapshot.source_versions) {
         const sourceId = `snapshot-${createHash("sha256").update(`${source.path}\n${source.sha256}`, "utf8").digest("hex").slice(0, 20)}`;
+        presentationEvidenceRefs.push({ source_id: sourceId, path: source.path, sha256: source.sha256 });
         loaded.sources.set(sourceId, {
           source_id: sourceId,
           title: source.path,
@@ -2709,6 +2808,11 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
         allowed_urls: [...new Set(allowedUrls)].sort(),
         source_versions: snapshot.source_versions.map((source) => ({ path: source.path, sha256: source.sha256 })),
       });
+      const result = {
+        ...collected,
+        snapshot_archive_path: snapshotArchivePath,
+        presentation_evidence_refs: presentationEvidenceRefs,
+      };
       saveEvidence(context);
       assertResultSize(result);
       hooks.afterLogicalTool("weekly.snapshot", params, result);
@@ -2859,7 +2963,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
     parameters: Type.Object({
       schema_version: Type.Literal("1.0"),
       project_id: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" }),
-      profile_id: Type.Union([Type.Literal("market-director"), Type.Literal("product-director")]),
+      profile_id: Type.Union([Type.Literal("market-director"), Type.Literal("product-director"), Type.Literal("sales-director")]),
       scene: Type.Union([Type.Literal("weekly"), Type.Literal("industry"), Type.Literal("government"), Type.Literal("custom")]),
       mode: Type.Union([Type.Literal("quick"), Type.Literal("standard"), Type.Literal("strict")]),
       phase: Type.Union([Type.Literal("outline"), Type.Literal("final")]),
@@ -2963,7 +3067,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
       snapshot_sha256: Type.String({ pattern: "^[a-f0-9]{64}$", description: "当前 weekly.snapshot 或 final plan 的证据上下文 SHA-256" }),
       plan_sha256: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
       output_name: Type.String({ minLength: 6, maxLength: 125, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.pptx$" }),
-      profile_id: Type.Union([Type.Literal("market-director"), Type.Literal("product-director")]),
+      profile_id: Type.Union([Type.Literal("market-director"), Type.Literal("product-director"), Type.Literal("sales-director")]),
       template_id: Type.Union([Type.Literal("ceo-weekly"), Type.Literal("management-report"), Type.Literal("government-program"), Type.Literal("technology-research")]),
       period: Type.Object({
         start: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),

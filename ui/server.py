@@ -76,6 +76,7 @@ from agent_platform.business_backend import (  # noqa: E402
     search_accounts,
     search_business_records,
 )
+from agent_platform.weekly_briefing import build_weekly_briefing  # noqa: E402
 from agent_platform.library_store import (  # noqa: E402
     CATEGORIES as LIBRARY_CATEGORIES,
     LibraryStoreError,
@@ -3108,6 +3109,15 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=5)
                 result = read_today_focus(ROOT, limit=int(query.get("limit", ["20"])[0]))
                 self.send_json(HTTPStatus.OK, result)
+            except (BusinessBackendError, ValueError) as error:
+                self.send_business_error(error)
+            return
+        if route == "/api/weekly-briefing":
+            try:
+                query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=5)
+                start = query.get("start", [""])[0]
+                end = query.get("end", [""])[0]
+                self.send_json(HTTPStatus.OK, build_weekly_briefing(ROOT, start, end))
             except (BusinessBackendError, ValueError) as error:
                 self.send_business_error(error)
             return

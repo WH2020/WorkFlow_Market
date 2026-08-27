@@ -129,6 +129,11 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('id="ai-core-log"', html)
         self.assertIn('id="weekly-task-form"', html)
         self.assertIn('id="create-weekly"', html)
+        self.assertIn('id="refresh-weekly-preview"', html)
+        self.assertIn('id="weekly-manager-rollup"', html)
+        self.assertIn('id="weekly-seller-briefs"', html)
+        self.assertIn('id="weekly-validation-messages"', html)
+        self.assertIn("生成个人简报＋总监汇报", html)
         self.assertIn('id="wechat-tool-panel"', html)
         self.assertIn('id="wechat-file-input"', html)
         self.assertIn('id="wechat-model-sharing"', html)
@@ -143,6 +148,9 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn('"government-proposal":', javascript)
         self.assertIn('"office-document":', javascript)
         self.assertIn("function weeklyBrief()", javascript)
+        self.assertIn("function loadWeeklyBriefing", javascript)
+        self.assertIn("function renderWeeklyBriefing", javascript)
+        self.assertIn('api(`/api/weekly-briefing?start=', javascript)
         self.assertIn("function guidedRequest()", javascript)
         self.assertIn("function renderModelSettings", javascript)
         self.assertIn("function renderSearchSettings", javascript)
@@ -153,6 +161,7 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("免密公共检索已就绪", javascript)
         self.assertIn("function localizeStaticInterface", javascript)
         self.assertIn('item.textContent = node.display_name || "处理阶段"', javascript)
+
         self.assertNotIn("item.textContent = node.id", javascript)
         self.assertIn("task.waiting_node_display_name", javascript)
         self.assertIn("function displayTaskRequest", javascript)
@@ -311,6 +320,18 @@ class ControlCentreTests(unittest.TestCase):
         self.assertNotRegex(javascript, r"(?<![A-Za-z])confirm\(")
         self.assertIn('redirect.textContent = "调整当前方向"', javascript)
         self.assertIn("/messages`,", javascript)
+
+    def test_weekly_briefing_endpoint_forwards_a_bounded_period(self):
+        handler = object.__new__(server.ControlHandler)
+        handler.path = "/api/weekly-briefing?start=2026-08-24&end=2026-08-28"
+        handler.local_host = lambda: True
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        expected = {"schema_version": "1.0", "seller_briefs": []}
+        with patch("ui.server.build_weekly_briefing", return_value=expected) as briefing:
+            handler.do_GET()
+        briefing.assert_called_once_with(server.ROOT, "2026-08-24", "2026-08-28")
+        self.assertEqual(replies, [(HTTPStatus.OK, expected)])
 
     def test_write_card_edit_is_version_bound_and_reapproval_does_not_leak_payload_in_summary(self):
         handler = server.ControlHandler.__new__(server.ControlHandler)
