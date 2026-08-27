@@ -72,6 +72,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('const PROFILE_ID: &str = "sales-director"', desktop_source)
         self.assertIn('start_workbench(&root, false)', desktop_source)
         self.assertIn('arguments.push("--disable-scheduler".into())', desktop_source)
+        self.assertIn("node_modules/@earendil-works/pi-coding-agent/dist/cli.js", desktop_source)
         self.assertNotIn("OpenBrowser", desktop_source)
 
     def test_desktop_embeds_the_ai_core_by_default_with_optional_visible_diagnostics(self) -> None:

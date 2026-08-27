@@ -284,40 +284,28 @@ fn wait_for_workbench(child: &mut Child) -> bool {
     false
 }
 
-#[cfg(windows)]
 fn pi_version_ok(root: &Path) -> bool {
-    Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &root.join("scripts/start-windows.ps1").to_string_lossy(),
-            "--version",
-        ])
+    // Packaging self-tests must not depend on a user's saved model/provider
+    // configuration. Exercise the reviewed project-local Pi CLI directly;
+    // the Python launch wrapper is covered independently and runs again when
+    // the user starts the embedded AI core.
+    let pi_cli = root.join("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+    if !pi_cli.is_file() {
+        return false;
+    }
+    let mut command = Command::new("node");
+    command
+        .arg(pi_cli)
+        .arg("--version")
         .current_dir(root)
-        .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID)
-        .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .is_ok_and(|output| output.status.success())
-}
-
-#[cfg(not(windows))]
-fn pi_version_ok(root: &Path) -> bool {
-    Command::new("bash")
-        .args([
-            root.join("scripts/start-macos.sh")
-                .to_string_lossy()
-                .as_ref(),
-            "--version",
-        ])
-        .current_dir(root)
-        .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID)
-        .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
-        .output()
-        .is_ok_and(|output| output.status.success())
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.output().is_ok_and(|output| {
+        output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+    })
 }
 
 #[cfg(windows)]
