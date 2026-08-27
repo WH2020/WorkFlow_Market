@@ -50,6 +50,12 @@ class MacOSDistributionTests(unittest.TestCase):
         self.assertIn("Library/Application Support/Agent4Market/install-root", runtime)
         self.assertIn("metadata.file_type().is_symlink()", runtime)
 
+    def test_setup_retries_transient_libreoffice_download_failures(self):
+        setup = (ROOT / "scripts/setup-macos.sh").read_text(encoding="utf-8")
+        self.assertIn("for ATTEMPT in 1 2 3", setup)
+        self.assertIn("if brew install --cask libreoffice; then", setup)
+        self.assertIn("LibreOffice installation failed after 3 attempts.", setup)
+
     def test_main_push_uploads_all_macos_artifacts(self):
         workflow = (ROOT / ".github/workflows/cross-platform.yml").read_text(encoding="utf-8")
         self.assertIn("actions/upload-artifact@v4", workflow)

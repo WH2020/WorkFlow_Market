@@ -84,7 +84,18 @@ if [ -z "$LIBREOFFICE_PATH" ]; then
     exit 2
   fi
   command -v brew >/dev/null 2>&1 || { printf 'Homebrew is required to install LibreOffice automatically. Install LibreOffice from libreoffice.org and retry.\n' >&2; exit 2; }
-  brew install --cask libreoffice
+  LIBREOFFICE_INSTALLED=0
+  for ATTEMPT in 1 2 3; do
+    if brew install --cask libreoffice; then
+      LIBREOFFICE_INSTALLED=1
+      break
+    fi
+    if [ "$ATTEMPT" -lt 3 ]; then
+      printf 'LibreOffice download failed (attempt %s/3); retrying shortly.\n' "$ATTEMPT" >&2
+      sleep $((ATTEMPT * 10))
+    fi
+  done
+  [ "$LIBREOFFICE_INSTALLED" -eq 1 ] || { printf 'LibreOffice installation failed after 3 attempts.\n' >&2; exit 2; }
   LIBREOFFICE_PATH="/Applications/LibreOffice.app/Contents/MacOS/soffice"
 fi
 [ -x "$LIBREOFFICE_PATH" ] || { printf 'LibreOffice installation completed but soffice was not found.\n' >&2; exit 2; }
