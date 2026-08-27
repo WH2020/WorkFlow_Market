@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -196,6 +198,18 @@ class BidStoreTests(unittest.TestCase):
             with bid_connection(self.root):
                 pass
         self.assertEqual(corrupted.exception.code, "SCHEMA_UNSUPPORTED")
+
+    def test_bid_migration_hash_and_windows_checkout_policy_are_aligned(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        manifest = json.loads(
+            (repository / "agent_platform" / "bid_migrations" / "manifest.json").read_text(encoding="utf-8")
+        )
+        migration = manifest["migrations"][0]
+        script = (repository / "agent_platform" / "bid_migrations" / migration["file"]).read_bytes()
+        self.assertNotIn(b"\r\n", script)
+        self.assertEqual(hashlib.sha256(script).hexdigest(), migration["sha256"])
+        attributes = (repository / ".gitattributes").read_text(encoding="utf-8")
+        self.assertIn("agent_platform/bid_migrations/*.sql text eol=lf", attributes)
 
 
 if __name__ == "__main__":
