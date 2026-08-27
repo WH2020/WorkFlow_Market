@@ -89,10 +89,16 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: bash scripts/build-macos-desktop.sh
-      - name: Validate platform and runtime
+      - name: Configure governed runtime and validate project
         run: |
+          python -m agent_platform configure-subagents
           python -m agent_platform validate
+      - name: Report installer-provided host tools
+        continue-on-error: true
+        run: |
           python -m agent_platform doctor
+      - name: Check TypeScript and governed runtime
+        run: |
           pnpm check:types
           pnpm test:runtime
       - name: Validate PPT rendering when LibreOffice is available on Windows
