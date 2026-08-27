@@ -60,6 +60,8 @@ class MacOSDistributionTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/cross-platform.yml").read_text(encoding="utf-8")
         self.assertIn("actions/upload-artifact@v4", workflow)
         self.assertIn("Agent4Market-macOS-universal-${{ github.sha }}", workflow)
+        self.assertIn("bash scripts/build-macos-desktop.sh", workflow)
+        self.assertIn("./scripts/build-windows-desktop.ps1", workflow)
         for artifact in (
             "Agent4Market-universal-apple-darwin.dmg",
             "Agent4Market-universal-apple-darwin-app.zip",

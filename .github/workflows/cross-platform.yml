@@ -73,29 +73,56 @@ jobs:
           cache: pnpm
       - name: Install reviewed dependencies
         run: pnpm install --frozen-lockfile
-      - name: Exercise Windows installer
+      - name: Build Windows desktop
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           try {
-            ./scripts/setup-windows.ps1 -SkipDependencies -SkipPiInstall
-            if ($LASTEXITCODE -ne 0) { throw "setup-windows.ps1 exited with code $LASTEXITCODE" }
+            ./scripts/build-windows-desktop.ps1
+            if ($LASTEXITCODE -ne 0) { throw "build-windows-desktop.ps1 exited with code $LASTEXITCODE" }
           } catch {
             $message = $_.Exception.Message -replace "`r?`n", " "
-            Write-Output "::error title=Windows setup failed::$message"
+            Write-Output "::error title=Windows desktop build failed::$message"
             throw
           }
-      - name: Exercise macOS installer
+      - name: Build universal macOS desktop
         if: runner.os == 'macOS'
         shell: bash
-        run: bash scripts/setup-macos.sh --skip-dependencies --skip-pi-install
+        run: bash scripts/build-macos-desktop.sh
       - name: Validate platform and runtime
         run: |
           python -m agent_platform validate
           python -m agent_platform doctor
           pnpm check:types
           pnpm test:runtime
-          pnpm test:ppt-e2e
+      - name: Validate PPT rendering when LibreOffice is available on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $Candidates = @(
+            (Join-Path ${env:ProgramFiles} "LibreOffice\program\soffice.com"),
+            (Join-Path ${env:ProgramFiles} "LibreOffice\program\soffice.exe")
+          )
+          $LibreOffice = $Candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if ($LibreOffice) {
+            $env:WORKFLOW_LIBREOFFICE_PATH = $LibreOffice
+            pnpm test:ppt-e2e
+          } else {
+            Write-Output "::notice title=PPT render test skipped::LibreOffice is not preinstalled on this runner; deterministic deck tests still run in pnpm test:runtime."
+          }
+      - name: Validate PPT rendering when LibreOffice is available on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          LIBREOFFICE_PATH=""
+          for candidate in "/Applications/LibreOffice.app/Contents/MacOS/soffice" "/opt/homebrew/bin/soffice" "/usr/local/bin/soffice"; do
+            if [ -x "$candidate" ]; then LIBREOFFICE_PATH="$candidate"; break; fi
+          done
+          if [ -n "$LIBREOFFICE_PATH" ]; then
+            WORKFLOW_LIBREOFFICE_PATH="$LIBREOFFICE_PATH" pnpm test:ppt-e2e
+          else
+            printf '%s\n' '::notice title=PPT render test skipped::LibreOffice is not preinstalled on this runner; deterministic deck tests still run in pnpm test:runtime.'
+          fi
       - name: Run Python and workbench tests
         run: |
           python -m unittest discover -s tests -v
