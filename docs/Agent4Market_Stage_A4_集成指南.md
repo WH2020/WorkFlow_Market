@@ -150,6 +150,36 @@ elif result["status"] == "no_match":
 
 ---
 
+### 3.5 建议持久化 (`a4_store.py`)
+
+**功能**：把建议的工作状态存到本机 SQLite，进程重启后恢复
+
+**为什么是独立数据库**：建议在用户接受之前属于待审批工作状态，不是已确认的业务记录。
+主库 `sales_store` 的 `signals` / `action_suggestions` 表要求 `account_id` 外键指向真实
+`accounts` 行，且 `signal_type`、`status` 的 CHECK 取值与 A4 词表不一致。写入那些表等于
+替用户提前落业务库，违反审批边界。因此 A4 使用独立存储文件，也不需要改动主 schema
+迁移清单的哈希。
+
+**默认路径**：`.pi/director-runtime/a4-recommendations.db`（已被 `.gitignore` 覆盖）
+
+**使用示例**：
+
+```python
+from agent_platform.a4_store import create_store
+from agent_platform.a4_api import create_api_handler
+
+# 不传 store：纯内存，重启丢失（默认，适合测试）
+handler = create_api_handler()
+
+# 传 store：写穿模式，重启后恢复
+handler = create_api_handler(store=create_store())
+```
+
+`ActionRecommender` / `WorkflowIntegration` / `A4ApiHandler` 都接受可选的 `store` 参数。
+启用后，生成、接受、编辑、忽略都会同步落盘，采纳率统计直接从 SQL 聚合。
+
+---
+
 ### 4. 工作流集成器 (`workflow_integration.py`)
 
 **功能**：连接 A4 组件到现有 DAG 工作流系统
@@ -369,6 +399,7 @@ python -m pytest tests/test_action_recommender.py -v
 python -m pytest tests/test_play_matcher.py -v
 python -m pytest tests/test_workflow_integration.py -v
 python -m pytest tests/test_a4_api.py -v
+python -m pytest tests/test_a4_store.py -v
 
 # 运行全部测试
 python -m pytest tests/ -v
@@ -380,7 +411,8 @@ python -m pytest tests/ -v
 - Play匹配：21个测试
 - 工作流集成：13个测试
 - API层：14个测试
-- **总计：74个新增测试，100%通过**
+- 持久化存储：19个测试
+- **总计：93个新增测试，100%通过**
 
 ---
 
@@ -436,7 +468,7 @@ self.plays["new_play"] = Play(
 
 - **信号评估**：O(n) 复杂度，n=规则数量，单个客户评估 < 10ms
 - **批量评估**：支持并行处理多个客户
-- **建议生成**：内存存储，建议重启时持久化到文件
+- **建议生成**：内存读缓存 + SQLite 写穿，重启后自动恢复
 - **API响应时间**：P95 < 100ms（不含工作流执行）
 
 ---
@@ -450,6 +482,9 @@ Stage A4 遵守 Agent4Market 的核心安全约束：
 3. **用户确认**：建议生成后必须由用户明确接受/忽略
 4. **可追溯性**：所有操作记录到采纳率统计
 5. **幂等性**：相同数据多次评估返回相同结果
+6. **不代替用户写业务库**：A4 存储只保存待审批的工作状态，不写 `sales_store` 的
+   `accounts` / `signals` / `action_suggestions` / `actions` 表。正式落库仍需用户在
+   工作台确认后由主流程执行
 
 ---
 
@@ -458,6 +493,10 @@ Stage A4 遵守 Agent4Market 的核心安全约束：
 Stage A4 的**核心逻辑层和 API 层**已完成。接下来的工作：
 
 ### 剩余 A4 工作（预估2-3周）
+
+0. **接入 UI 路由**
+   - `ui/server.py` 目前没有 `/api/a4/*` 路由，8 个处理器尚未挂到 HTTP 分发表
+   - 挂载时传入 `store=create_store()` 启用持久化
 
 1. **UI 组件实现**
    - 信号面板
@@ -494,4 +533,4 @@ Stage A4 的**核心逻辑层和 API 层**已完成。接下来的工作：
 ---
 
 *最后更新：2026-09-01*
-*Stage A4 核心组件完成，准备进入 UI 开发阶段*
+*Stage A4 核心逻辑、API 与持久化完成，准备进入 UI 开发阶段*

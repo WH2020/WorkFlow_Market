@@ -9,14 +9,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from agent_platform.a4_store import A4Store
 from agent_platform.workflow_integration import create_integration
 
 
 class A4ApiHandler:
     """Stage A4 API 处理器"""
 
-    def __init__(self):
-        self.integration = create_integration()
+    def __init__(self, store: A4Store | None = None):
+        self.integration = create_integration(store=store)
 
     def handle_match_play(self, request_data: dict[str, Any]) -> dict[str, Any]:
         """
@@ -273,6 +274,6 @@ class A4ApiHandler:
             }
 
 
-def create_api_handler() -> A4ApiHandler:
+def create_api_handler(store: A4Store | None = None) -> A4ApiHandler:
     """创建API处理器"""
-    return A4ApiHandler()
+    return A4ApiHandler(store=store)

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_platform.a4_store import A4Store
 from agent_platform.signal_engine import SignalEngine, create_engine
 from agent_platform.action_recommender import ActionRecommender
 from agent_platform.play_matcher import PlayMatcher, Play
@@ -34,10 +35,11 @@ class WorkflowIntegration:
         self,
         signal_engine: SignalEngine | None = None,
         recommender: ActionRecommender | None = None,
-        play_matcher: PlayMatcher | None = None
+        play_matcher: PlayMatcher | None = None,
+        store: A4Store | None = None
     ):
         self.signal_engine = signal_engine or create_engine()
-        self.recommender = recommender or ActionRecommender()
+        self.recommender = recommender or ActionRecommender(store=store)
         self.play_matcher = play_matcher or PlayMatcher()
 
     def prepare_workflow_context(
@@ -225,6 +227,10 @@ class WorkflowIntegration:
         }
 
 
-def create_integration() -> WorkflowIntegration:
-    """创建工作流集成器"""
-    return WorkflowIntegration()
+def create_integration(store: A4Store | None = None) -> WorkflowIntegration:
+    """创建工作流集成器
+
+    Args:
+        store: 可选的持久化存储。传入时建议在进程重启后可恢复。
+    """
+    return WorkflowIntegration(store=store)

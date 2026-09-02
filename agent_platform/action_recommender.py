@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from agent_platform.a4_store import A4Store
 from agent_platform.signal_engine import Signal, SignalType
 
 ActionStatus = Literal["pending", "accepted", "edited", "ignored"]
@@ -89,10 +90,43 @@ class AcceptedAction:
 
 
 class ActionRecommender:
-    """行动建议生成器"""
+    """行动建议生成器
 
-    def __init__(self):
+    默认使用内存存储。传入 store 时改为写穿模式：内存作为读缓存，
+    每次状态变更同步落盘，进程重启后从磁盘恢复。
+    """
+
+    def __init__(self, store: A4Store | None = None):
         self.recommendations: dict[str, ActionRecommendation] = {}
+        self.store = store
+        if store is not None:
+            self._load_from_store()
+
+    def _load_from_store(self) -> None:
+        """从存储恢复建议到内存缓存"""
+        assert self.store is not None
+        for row in self.store.load_all_recommendations():
+            self.recommendations[row["recommendation_id"]] = ActionRecommendation(
+                recommendation_id=row["recommendation_id"],
+                account_id=row["account_id"],
+                account_name=row["account_name"],
+                signal_id=row["signal_id"],
+                signal_type=row["signal_type"],
+                title=row["title"],
+                description=row["description"],
+                priority=row["priority"],
+                suggested_actions=row["suggested_actions"],
+                context=row["context"],
+                created_at=row["created_at"],
+                status=row["status"],
+                user_feedback=row["user_feedback"],
+                accepted_at=row["accepted_at"],
+            )
+
+    def _persist(self, recommendation: ActionRecommendation) -> None:
+        """写穿到存储（未配置 store 时为空操作）"""
+        if self.store is not None:
+            self.store.save_recommendation(recommendation.to_dict())
 
     def generate_from_signal(self, signal: Signal, account_context: dict[str, Any]) -> ActionRecommendation:
         """
@@ -163,6 +197,7 @@ class ActionRecommender:
         )
 
         self.recommendations[recommendation_id] = recommendation
+        self._persist(recommendation)
         return recommendation
 
     def generate_proactive_recommendation(
@@ -206,6 +241,7 @@ class ActionRecommender:
                 )
 
                 self.recommendations[recommendation_id] = recommendation
+                self._persist(recommendation)
                 return recommendation
 
         return None
@@ -261,6 +297,10 @@ class ActionRecommender:
             accepted_at=now,
         )
 
+        self._persist(recommendation)
+        if self.store is not None:
+            self.store.save_accepted_action(action.to_dict())
+
         return action
 
     def ignore_recommendation(
@@ -281,6 +321,7 @@ class ActionRecommender:
 
         recommendation.status = "ignored"
         recommendation.user_feedback = reason
+        self._persist(recommendation)
 
     def get_pending_recommendations(
         self,
@@ -313,6 +354,9 @@ class ActionRecommender:
         Returns:
             采纳率统计
         """
+        if self.store is not None:
+            return self.store.get_adoption_stats()
+
         total = len(self.recommendations)
         if total == 0:
             return {
