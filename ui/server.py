@@ -116,6 +116,8 @@ from agent_platform.wechat_store import (  # noqa: E402
     read_messages as read_wechat_messages,
     review_scope_summary as wechat_review_scope_summary,
 )
+from agent_platform.a4_api import create_api_handler  # noqa: E402
+from agent_platform.a4_store import create_store as create_a4_store  # noqa: E402
 
 
 UI_ROOT = Path(__file__).resolve().parent
@@ -139,6 +141,8 @@ REIMBURSEMENT_BATCHES = RUNTIME / "reimbursement-batches"
 FILE_TRASH = RUNTIME / "file-trash"
 LIBRARY_INPUTS = INPUTS / "library"
 SERVER_TOKEN = secrets.token_urlsafe(32)
+ACTIVE_PROFILE_ID: str | None = None
+A4_API_HANDLER = None  # Initialized after profile is set
 ACTIVE_PROFILE_ID: str | None = None
 
 DEFAULT_PROJECT_ID = "project-default"
@@ -3136,6 +3140,26 @@ class ControlHandler(SimpleHTTPRequestHandler):
             except (BusinessBackendError, ValueError) as error:
                 self.send_business_error(error)
             return
+        if route == "/api/a4/recommendations":
+            query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=5)
+            response = A4_API_HANDLER.handle_get_recommendations(
+                {"account_id": query.get("account_id", [None])[0]}
+            )
+            self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
+            return
+        if route == "/api/a4/adoption-rate":
+            response = A4_API_HANDLER.handle_get_adoption_rate({})
+            self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
+            return
+        if route == "/api/a4/workflow-summary":
+            query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=5)
+            workflow_id = query.get("workflow_id", [None])[0]
+            if not workflow_id:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "workflow_id is required"})
+                return
+            response = A4_API_HANDLER.handle_get_workflow_summary({"workflow_id": workflow_id})
+            self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
+            return
         if route == "/api/bids":
             try:
                 query = parse_qs(parsed_request.query, keep_blank_values=True, max_num_fields=20)
@@ -3239,6 +3263,26 @@ class ControlHandler(SimpleHTTPRequestHandler):
             payload = self.body()
             if route == "/api/task-requests":
                 self.create_request(payload)
+            elif route == "/api/a4/match-play":
+                response = A4_API_HANDLER.handle_match_play(payload)
+                status = HTTPStatus.OK if response.get("success") else response.get("status", 500)
+                self.send_json(status, response)
+            elif route == "/api/a4/evaluate-signals":
+                response = A4_API_HANDLER.handle_evaluate_signals(payload)
+                status = HTTPStatus.OK if response.get("success") else response.get("status", 500)
+                self.send_json(status, response)
+            elif route == "/api/a4/recommendations/accept":
+                response = A4_API_HANDLER.handle_accept_recommendation(payload)
+                status = HTTPStatus.OK if response.get("success") else response.get("status", 500)
+                self.send_json(status, response)
+            elif route == "/api/a4/recommendations/ignore":
+                response = A4_API_HANDLER.handle_ignore_recommendation(payload)
+                status = HTTPStatus.OK if response.get("success") else response.get("status", 500)
+                self.send_json(status, response)
+            elif route == "/api/a4/validate-workflow-input":
+                response = A4_API_HANDLER.handle_validate_workflow_input(payload)
+                status = HTTPStatus.OK if response.get("success") else response.get("status", 500)
+                self.send_json(status, response)
             elif route == "/api/bids":
                 self.send_json(HTTPStatus.CREATED, create_bid_project(ROOT, payload))
             elif route.startswith("/api/bids/") and route.endswith("/transition"):
@@ -4112,10 +4156,19 @@ def main() -> None:
     parser.add_argument("--profile", default=os.environ.get("WORKFLOW_AGENT_EDITION_PROFILE", "sales-director"))
     parser.add_argument("--disable-scheduler", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    global ACTIVE_PROFILE_ID
+    global ACTIVE_PROFILE_ID, A4_API_HANDLER
     ACTIVE_PROFILE_ID = safe_id(args.profile)
     if not (PROFILES / ACTIVE_PROFILE_ID / "profile.json").is_file():
         parser.error(f"未知发行版角色：{ACTIVE_PROFILE_ID}")
+    try:
+        a4_store = create_a4_store(ROOT)
+        A4_API_HANDLER = create_api_handler(store=a4_store)
+    except Exception as error:
+        console_message(
+            f"警告：A4 持久化初始化失败：{error}",
+            f"Warning: A4 persistence initialization failed: {error}",
+        )
+        A4_API_HANDLER = create_api_handler()  # Fallback to in-memory
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ControlHandler)
     schedule_stop = threading.Event()
     schedule_thread = None
