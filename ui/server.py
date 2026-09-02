@@ -3443,6 +3443,21 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, move_reimbursement_to_project(payload))
             elif route == "/api/reimbursements/migrate-legacy":
                 self.send_json(HTTPStatus.OK, migrate_legacy_reimbursements())
+            elif route == "/api/a4/match-play":
+                response = A4_API_HANDLER.handle_match_play(payload)
+                self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
+            elif route == "/api/a4/evaluate-signals":
+                response = A4_API_HANDLER.handle_evaluate_signals(payload)
+                self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
+            elif route == "/api/a4/recommendations/accept":
+                response = A4_API_HANDLER.handle_accept_recommendation(payload)
+                self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
+            elif route == "/api/a4/recommendations/ignore":
+                response = A4_API_HANDLER.handle_ignore_recommendation(payload)
+                self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
+            elif route == "/api/a4/workflow/validate":
+                response = A4_API_HANDLER.handle_validate_workflow_input(payload)
+                self.send_json(HTTPStatus.OK if response.get("success") else response.get("status", 500), response)
             elif route.startswith("/api/file-trash/") and route.endswith("/restore"):
                 self.send_json(HTTPStatus.OK, restore_trash(route.split("/")[3]))
             elif route == "/api/desktop-settings":
