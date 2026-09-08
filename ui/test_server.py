@@ -31,6 +31,9 @@ class ControlCentreTests(unittest.TestCase):
         server.REIMBURSEMENT_BATCHES = server.RUNTIME / "reimbursement-batches"
         server.FILE_TRASH = server.RUNTIME / "file-trash"
         server.ACTIVE_PROFILE_ID = None
+        model_settings = patch("ui.server.model_settings_summary", return_value={"configured": True, "status": "configured", "has_api_key": True, "provider_id": "agent4market-fixture", "models": [{"id": "fixture"}]})
+        model_settings.start()
+        self.addCleanup(model_settings.stop)
 
     def write_plan(self, task_id="task-ppt", **changes):
         plan = {
@@ -495,6 +498,51 @@ class ControlCentreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             handler.create_request({**payload, "requested_thinking_level": "unlimited"})
 
+    def test_multi_provider_task_selection_freezes_the_full_key_without_fallback(self):
+        providers = [{"id": f"agent4market-{name}", "status": "configured", "has_api_key": True,
+                      "models": [{"id": "same-model"}]} for name in ("a", "b")]
+        settings = {"status": "configured", "providers": providers, "default_model": "agent4market-a/same-model"}
+        with patch("ui.server.model_settings_summary", return_value=settings):
+            self.assertEqual("agent4market-a/same-model", server.task_runtime_selection({})["requested_model"])
+            self.assertEqual("agent4market-b/same-model", server.task_runtime_selection({"requested_model": "agent4market-b/same-model"})["requested_model"])
+            providers[0]["status"] = "disabled"
+            with self.assertRaises(ValueError):
+                server.task_runtime_selection({})
+
+    def test_model_boundary_error_leaves_task_restart_controls_available(self):
+        task = {"task_id": "blocked", "status": "running", "profile_id": "sales-director", "session_key": "session-a"}
+        lease = {"task_id": "blocked", "task_status": "running", "profile_id": "sales-director", "session_key": "session-a", "model_error": "旧任务未绑定接收方"}
+        self.assertEqual(("interrupted", "interrupted"), server.task_display_state(task, {"blocked": lease}))
+        self.assertEqual(("interrupted", "interrupted"), server.task_display_state({**task, "status": "waiting_approval"}, {"blocked": lease}))
+        with patch("ui.server.model_settings_summary", return_value={"status": "unconfigured", "providers": []}):
+            with self.assertRaises(ValueError):
+                server.task_runtime_selection({})
+
+    def test_new_readonly_and_quick_routes_leave_legacy_dags_unchanged(self):
+        profile = next(p for p in server.profiles() if p["id"] == "sales-director")
+        self.assertEqual("sales-review-readonly", server.route_new_service(profile, "sales-review", "仅分析客户")['id'])
+        self.assertEqual("sales-review", server.route_new_service(profile, "sales-review", "整理并申请更新")['id'])
+        self.assertEqual("industry-research-readonly", server.route_new_service(profile, "industry-research", "研究", True)['id'])
+        brief = {"schema_version": "1.0", "scene": "industry", "mode": "quick", "topic": "已有材料",
+                 "audience": "管理层", "purpose": "形成判断", "occasion": "专题会", "language": "zh-CN",
+                 "duration_minutes": 15, "target_slides": 6, "design_system": {"token_id": "technology-research"},
+                 "source_scope": "profile-knowledge-only", "confidentiality": "internal",
+                 "expected_decision": "确认下一步", "output_name": "quick.pptx"}
+        encode = lambda value: f"[PRESENTATION_BRIEF]\n{json.dumps(value, ensure_ascii=False)}\n[/PRESENTATION_BRIEF]"
+        self.assertEqual("presentation-studio-quick", server.route_new_service(profile, "presentation-studio", encode(brief))["id"])
+        for change in ({"scene": "government"}, {"confidentiality": "public"}, {"mode": "strict"}, {"source_scope": "public-web-and-profile-knowledge"}):
+            with self.assertRaises(ValueError):
+                server.route_new_service(profile, "presentation-studio-quick", encode({**brief, **change}))
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append(value)
+        with patch("ui.server.search_settings_summary", side_effect=AssertionError("quick route must not require web search")):
+            handler.create_request({"profile_id": "sales-director", "service_id": "presentation-studio", "request": encode(brief)})
+        self.assertEqual("shared.presentation.studio-quick-v2", replies[-1]["workflow_id"])
+        with self.assertRaisesRegex(ValueError, "工作流不匹配"):
+            handler.create_request({"profile_id": "sales-director", "service_id": "presentation-studio", "request": encode(brief), "workflow_id": "shared.presentation.studio"})
+        self.assertEqual(2, sum(node["type"] == "approval" for node in server.workflows()["shared.presentation.studio"]["nodes"]))
+
     def test_wechat_task_request_requires_one_live_scope_in_the_same_project(self):
         root = Path(self.temporary.name)
         source = root / "wechat.json"
@@ -505,7 +553,13 @@ class ControlCentreTests(unittest.TestCase):
         handler = object.__new__(server.ControlHandler)
         replies = []
         handler.send_json = lambda status, value: replies.append((status, value))
-        with patch.object(server, "ROOT", root):
+        recipient = {"provider_id": "agent4market-test", "base_url": "https://example.com", "api": "openai-responses", "model_id": "test"}
+        settings = {"configured": True, "status": "configured", "default_model": "agent4market-test/test", "providers": [
+            {"id": "agent4market-test", "status": "configured", "has_api_key": True, "models": [{"id": "test"}]}
+        ]}
+        with (patch.object(server, "ROOT", root),
+              patch("agent_platform.model_registry.available_models", return_value={"agent4market-test/test": recipient}),
+              patch("ui.server.model_settings_summary", return_value=settings)):
             server.import_wechat_export(
                 root, source, source_name=source.name, retention_days=7,
                 auto_cleanup=True, ownership_confirmed=True,
@@ -516,6 +570,7 @@ class ControlCentreTests(unittest.TestCase):
                 "conversation_ids": [conversation["conversation_id"]],
                 "date_from": "2026-08-25", "date_to": "2026-08-25", "query": "",
                 "model_sharing_confirmed": True,
+                "model_recipient": recipient,
             })
             request = f"【微信会话整理】\n授权范围编号：{scope['scope_id']}\n整理范围：客户甲\n日期范围：2026-08-25 至 2026-08-25"
             handler.create_request({

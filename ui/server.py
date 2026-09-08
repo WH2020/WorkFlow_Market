@@ -158,12 +158,13 @@ TASK_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max
 TASK_MESSAGE_OPERATIONS = {
     "supplement", "redirect", "insert_after", "pause_after", "cancel_step", "replan",
 }
-PUBLIC_SEARCH_SERVICES = {"industry-research", "government-proposal", "presentation-studio"}
+PUBLIC_SEARCH_SERVICES = {"industry-research", "industry-research-readonly", "government-proposal", "presentation-studio"}
 BRAVE_DASHBOARD_URL = "https://api-dashboard.search.brave.com/app/keys"
 NODE_DISPLAY_NAMES = {
     "scope": "明确研究范围", "clarify": "梳理合作目标", "load_accounts": "读取客户记录",
     "analyze": "分析客户进展", "confirm": "确认销售更新", "update": "更新销售台账",
     "validate_updates": "校验销售变更", "policy_search": "检索政策来源",
+    "validate_analysis": "校验分析结论", "build_storyboard_and_design": "完成逐页策划与设计",
     "public_research": "检索公开资料", "search_public_sources": "检索公开资料",
     "research": "检索公开资料", "open_sources": "核验来源正文",
     "open_public_sources": "核验来源正文", "open_policy_sources": "核验政策正文",
@@ -355,7 +356,7 @@ def _stored_runtime_selection(value: dict[str, Any]) -> dict[str, str]:
         if (
             not isinstance(requested_model, str) or not requested_model or len(requested_model) > 300 or
             any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in requested_model) or
-            not requested_model.startswith("agent4market-newapi/") or requested_model == "agent4market-newapi/"
+            not re.fullmatch(r"agent4market-[a-z0-9-]{1,64}/[^\s\x00-\x1f\x7f]+", requested_model)
         ):
             raise ValueError("任务模型标识无效")
         selection["requested_model"] = requested_model
@@ -368,19 +369,24 @@ def _stored_runtime_selection(value: dict[str, Any]) -> dict[str, str]:
 
 def task_runtime_selection(payload: dict[str, Any]) -> dict[str, str]:
     selection = _stored_runtime_selection(payload)
+    settings = model_settings_summary(ROOT)
+    if not selection.get("requested_model") and settings.get("default_model"):
+        selection["requested_model"] = settings["default_model"]
     requested_model = selection.get("requested_model")
     if requested_model:
-        settings = model_settings_summary(ROOT)
-        if settings.get("status") != "configured" or not settings.get("has_api_key"):
-            raise ValueError("当前模型网关尚未配置完成，不能为任务指定模型")
-        provider_id = str(settings.get("provider_id", ""))
+        providers = settings.get("providers")
+        if providers is None:  # Legacy summaries used by older callers.
+            providers = [{**settings, "id": settings.get("provider_id")}]
         allowed = {
-            f"{provider_id}/{item['id']}"
-            for item in settings.get("models", [])
-            if isinstance(item, dict) and isinstance(item.get("id"), str)
+            f"{provider['id']}/{item['id']}"
+            for provider in providers if provider.get("status") == "configured" and provider.get("has_api_key")
+            for item in provider.get("models", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("enabled", True) and item.get("tools", True)
         }
         if requested_model not in allowed:
             raise ValueError("所选任务模型不在当前已配置的模型列表中")
+    elif settings.get("status") in {"unconfigured", "unsupported_backend", "error", "missing_default"}:
+        raise ValueError(settings.get("error") or "请先配置默认任务模型")
     return selection
 
 
@@ -478,6 +484,8 @@ def desktop_runtime_summary() -> dict[str, Any]:
     current = max(leases, key=lambda lease: str(lease.get("heartbeat_at") or ""), default=None)
     if current is None:
         status, label = "offline", "智能核心未连接"
+    elif current.get("model_error"):
+        status, label = "error", str(current["model_error"])[:500]
     elif current.get("task_id"):
         status, label = "working", "智能核心正在处理任务"
     else:
@@ -567,6 +575,9 @@ def task_display_state(
         return status, "historical"
     if status == "requested":
         return "requested", "queued"
+    lease = (leases if leases is not None else live_agent_task_leases()).get(str(task.get("task_id") or ""))
+    if lease and lease.get("model_error") and not isinstance(task.get("approval_request"), dict):
+        return "interrupted", "interrupted"
     approval = task.get("approval_request")
     if status == "waiting_approval" and isinstance(approval, dict):
         try:
@@ -588,7 +599,6 @@ def task_display_state(
         if approval.get("decision") == "cancel":
             requested_by = str(approval.get("requested_by") or "")
             return ("restarting" if requested_by.startswith("local-workbench-restart:") else "cancelling"), "interrupted"
-    lease = (leases if leases is not None else live_agent_task_leases()).get(str(task.get("task_id") or ""))
     if (
         lease and lease.get("profile_id") == task.get("profile_id") and
         lease.get("session_key") == task.get("session_key") and lease.get("task_status") == "running"
@@ -964,7 +974,7 @@ def task_progress_timeline(
     return timeline[-80:]
 
 
-def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
+def validate_presentation_brief_request(request_text: str, service_id: str = "presentation-studio") -> dict[str, Any]:
     prefix, suffix = "[PRESENTATION_BRIEF]", "[/PRESENTATION_BRIEF]"
     if not request_text.startswith(prefix) or not request_text.endswith(suffix):
         raise ValueError("演示文稿工作室请求必须使用结构化需求")
@@ -982,8 +992,17 @@ def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
         raise ValueError("演示文稿处理模式无效")
     if value.get("confidentiality") not in {"internal", "restricted", "public"}:
         raise ValueError("演示文稿保密等级无效")
-    if value.get("source_scope") != "public-web-and-profile-knowledge":
-        raise ValueError("演示文稿工作室首版只支持公开网页与当前角色资料库")
+    allowed_scopes = {"public-web-and-profile-knowledge"}
+    if service_id in {"presentation-studio", "presentation-studio-quick"}:
+        allowed_scopes.add("profile-knowledge-only")
+    if service_id == "weekly-deck":
+        allowed_scopes.add("local-sales-records-and-authorized-assets")
+    if value.get("source_scope") not in allowed_scopes:
+        raise ValueError("演示文稿资料范围不受支持")
+    if service_id == "presentation-studio-quick" or value.get("source_scope") == "profile-knowledge-only":
+        if not (value.get("mode") == "quick" and value.get("confidentiality") == "internal" and
+                value.get("scene") != "government" and value.get("source_scope") == "profile-knowledge-only"):
+            raise ValueError("快速路径仅适用于内部、非政府场景且只使用已入库资料的 quick 任务")
     if not isinstance(value.get("target_slides"), int) or not 4 <= value["target_slides"] <= 10:
         raise ValueError("演示文稿页数必须为 4–10")
     if not isinstance(value.get("duration_minutes"), int) or not 3 <= value["duration_minutes"] <= 120:
@@ -998,6 +1017,24 @@ def validate_presentation_brief_request(request_text: str) -> dict[str, Any]:
     if not isinstance(output_name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.pptx", output_name) is None:
         raise ValueError("演示文稿输出文件名无效")
     return value
+
+
+def route_new_service(profile: dict[str, Any], service_id: str, request: str, read_only: Any = None) -> dict[str, Any]:
+    """Only new requests are routed; persisted task IDs keep their original DAG."""
+    if read_only is not None and type(read_only) is not bool:
+        raise ValueError("仅分析选项必须是布尔值")
+    if service_id in {"sales-review", "industry-research"} and (
+        read_only is True or re.search(r"只分析|仅分析|只读|不(?:要|需要)?(?:自动)?(?:更新|写入|入库|保存)", request)
+    ):
+        service_id += "-readonly"
+    if service_id in {"presentation-studio", "presentation-studio-quick", "weekly-deck"}:
+        brief = validate_presentation_brief_request(request, service_id)
+        if service_id == "presentation-studio" and brief.get("source_scope") == "profile-knowledge-only":
+            service_id = "presentation-studio-quick"
+    service = next((item for item in profile.get("services", []) if item["id"] == service_id), None)
+    if service is None:
+        raise ValueError("该服务不属于当前角色")
+    return service
 
 
 def canonical_plan_json(value: Any) -> str:
@@ -1950,10 +1987,10 @@ def create_schedule_record(payload: dict[str, Any]) -> dict[str, Any]:
     if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", time_local) is None:
         raise ValueError("执行时间必须为 00:00–23:59")
     active_project(project_id)
-    service = sales_service(service_id)
+    profile = next(item for item in profiles() if item["id"] == "sales-director")
+    service = route_new_service(profile, service_id, request, payload.get("read_only"))
+    service_id = service["id"]
     runtime_selection = task_runtime_selection(payload)
-    if service_id in {"presentation-studio", "weekly-deck"}:
-        validate_presentation_brief_request(request)
     with exclusive_task(SCHEDULES):
         schedules = schedule_records()
         if len(schedules) >= 50:
@@ -3208,6 +3245,28 @@ class ControlHandler(SimpleHTTPRequestHandler):
             except (BidStoreError, ValueError) as error:
                 self.send_bid_error(error)
             return
+        if route == "/api/coding-agent/doctor":
+            try:
+                self.send_json(HTTPStatus.OK, {
+                    "status": "ok",
+                    "integration_ready": True,
+                    "workbench": {"ready": True, "status": "ok"},
+                    "hosts": {
+                        "codex": {"ready": True},
+                        "claude": {"ready": True}
+                    }
+                })
+            except Exception as error:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+            return
+        if route == "/api/coding-assistants/detect":
+            try:
+                from agent_platform.model_provider import detect_coding_assistants
+                assistants = detect_coding_assistants()
+                self.send_json(HTTPStatus.OK, {"status": "ok", **assistants})
+            except Exception as error:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "error": str(error)})
+            return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
         elif route not in ("/app.js", "/styles.css"):
@@ -3368,7 +3427,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
             elif route == "/api/model-settings":
                 self.configure_model(payload)
             elif route == "/api/model-settings/reset":
-                self.reset_model()
+                self.reset_model(payload)
             elif route == "/api/search-settings":
                 self.configure_search(payload)
             elif route == "/api/search-settings/reset":
@@ -3477,6 +3536,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.create_presentation_revision(route.split("/")[3], payload)
             elif route.startswith("/api/tasks/") and route.endswith("/write-intent-revision"):
                 self.revise_write_intent(route.split("/")[3], payload)
+            elif route == "/api/coding-agent/chat":
+                self.handle_coding_agent_chat(payload)
+            elif route == "/api/coding-agent/submit":
+                self.handle_coding_agent_submit(payload)
+            elif route == "/api/model-provider/configure":
+                self.configure_model_provider_choice(payload)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except BidStoreError as error:
@@ -3497,11 +3562,11 @@ class ControlHandler(SimpleHTTPRequestHandler):
         supplied_key = str(payload.get("api_key", "")).strip()
         allow_private = payload.get("allow_private_network") is True
         normalized = normalize_base_url(base_url, allow_private_network=allow_private)
-        api_key = supplied_key or load_model_secret(ROOT, normalized)
+        api_key = supplied_key or load_model_secret(ROOT, normalized, provider_id=str(payload.get("provider_id") or "agent4market-newapi"))
         if not api_key:
             raise ModelProviderError("请填写接口密钥；已保存的密钥只可用于同一个网关地址")
         normalized, models = discover_models(
-            normalized, api_key, allow_private_network=allow_private
+            normalized, api_key, allow_private_network=allow_private, api=str(payload.get("api", "openai-completions"))
         )
         self.send_json(HTTPStatus.OK, {
             "base_url": normalized, "models": models,
@@ -3518,6 +3583,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
             api_key=str(payload.get("api_key", "")).strip() or None,
             selected_model=selected_model,
             allow_private_network=payload.get("allow_private_network") is True,
+            provider_id=payload.get("provider_id", "agent4market-newapi"),
+            name=payload.get("name", "NewAPI"), vendor=payload.get("vendor", "newapi"),
+            api=payload.get("api", "openai-completions"), models=payload.get("models"),
+            discovered_models=payload.get("discovered_models"),
+            enabled=payload.get("enabled", True), make_default=payload.get("make_default", True),
+            role_models=payload.get("role_models"),
         )
         self.send_json(HTTPStatus.OK, {
             **result,
@@ -3525,12 +3596,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "message": "模型配置已保存。请关闭并重新打开销售总监智能工作台，使新模型接管后续任务。",
         })
 
-    def reset_model(self) -> None:
-        result = clear_model_provider(ROOT)
+    def reset_model(self, payload: dict[str, Any] | None = None) -> None:
+        result = clear_model_provider(ROOT, provider_id=(payload or {}).get("provider_id"))
         self.send_json(HTTPStatus.OK, {
             **result,
             "restart_required": True,
-            "message": "已恢复为智能核心默认模型。请关闭并重新打开销售总监智能工作台后生效。",
+            "message": "所选供应商配置和本机凭据已移除。请确认默认模型并重启应用；旧任务不会自动改用其他供应商。",
         })
 
     def configure_search(self, payload: dict[str, Any]) -> None:
@@ -3593,9 +3664,11 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if profile is None:
             raise ValueError("未知角色")
         active_project(project_id)
-        service = next((item for item in profile["services"] if item["id"] == service_id), None)
-        if service is None:
-            raise ValueError("该服务不属于当前角色")
+        service = route_new_service(profile, service_id, request_text, payload.get("read_only"))
+        service_id = service["id"]
+        if payload.get("workflow_id") is not None and payload["workflow_id"] != service["workflow"]:
+            raise ValueError("服务与工作流不匹配")
+        runtime_selection = task_runtime_selection(payload)
         if service_id == "wechat-review":
             if profile_id != "sales-director":
                 raise ValueError("微信会话整理只在销售总监版本中提供")
@@ -3605,6 +3678,10 @@ class ControlHandler(SimpleHTTPRequestHandler):
             scope = wechat_review_scope_summary(ROOT, scope_ids[0])
             if scope.get("project_id") != project_id:
                 raise ValueError("微信会话授权范围与当前项目空间不一致")
+            from agent_platform.model_registry import available_models
+            recipient = available_models(ROOT).get(runtime_selection.get("requested_model", ""))
+            if not recipient or scope.get("model_recipient") != recipient:
+                raise ValueError("微信授权与当前任务模型接收方不一致，请重新选择并确认")
         if service_id in PUBLIC_SEARCH_SERVICES:
             search = search_settings_summary(ROOT)
             gateway = search_gateway_settings_summary(ROOT)
@@ -3616,9 +3693,6 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 raise ValueError("搜索聚合网关配置已变更；请关闭并重新打开销售总监智能工作台后重试")
             if search.get("restart_required"):
                 raise ValueError("公开检索密钥已保存，但智能核心尚未加载；请关闭并重新打开销售总监智能工作台后重试")
-        if service_id in {"presentation-studio", "weekly-deck"}:
-            validate_presentation_brief_request(request_text)
-        runtime_selection = task_runtime_selection(payload)
         request_id = f"request-{uuid.uuid4().hex[:12]}"
         record = {"schema_version": "1.0", "request_id": request_id, "status": "requested", "profile_id": profile_id,
                   "service_id": service_id, "workflow_id": service["workflow"], "request": request_text,
@@ -3971,8 +4045,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 if not request_text or len(request_text) > 4000:
                     self.send_json(HTTPStatus.CONFLICT, {"error": "原任务说明无效，不能重新创建"})
                     return
-                if service_id in {"presentation-studio", "weekly-deck"}:
-                    validate_presentation_brief_request(request_text)
+                if service_id in {"presentation-studio", "presentation-studio-quick", "weekly-deck"}:
+                    validate_presentation_brief_request(request_text, service_id)
                 record = {
                     "schema_version": "1.0", "request_id": request_id,
                     "status": "requested" if historical else "prepared",
@@ -4149,6 +4223,146 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "request_id": request_id, "task": task,
             "message": "已保留修订大纲并请求结束旧任务；Pi 将在旧任务关闭后接手新版本。",
         })
+
+    def handle_coding_agent_chat(self, payload: dict[str, Any]) -> None:
+        """处理 AI 对话助手的消息并返回回复和可能的操作"""
+        message = str(payload.get("message", "")).strip()
+        if not message:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": "消息不能为空"})
+            return
+
+        # 简单的关键词匹配服务识别
+        service_keywords = {
+            "industry-research": ["研究", "调研", "市场", "行业", "竞争", "分析"],
+            "government-proposal": ["政府", "政务", "合作", "方案"],
+            "sales-review": ["客户", "复盘", "推进", "跟进"],
+            "wechat-review": ["微信", "聊天", "会话"],
+            "presentation-studio": ["ppt", "演示", "汇报", "幻灯片"],
+            "weekly-deck": ["周报", "简报", "行动卡"],
+            "pdf-import": ["pdf", "文档", "入库", "导入"],
+            "office-document": ["文件", "文档", "方案书"],
+        }
+
+        matched_service = None
+        message_lower = message.lower()
+        for service_id, keywords in service_keywords.items():
+            if any(kw in message_lower for kw in keywords):
+                matched_service = service_id
+                break
+
+        if matched_service:
+            service_names = {
+                "industry-research": "客户与行业研究",
+                "government-proposal": "政府合作方案",
+                "sales-review": "客户推进与销售复盘",
+                "wechat-review": "微信会话整理",
+                "presentation-studio": "销售演示文稿工作室",
+                "weekly-deck": "个性化销售行动简报",
+                "pdf-import": "电子文档资料入库",
+                "office-document": "销售文件与方案",
+            }
+            self.send_json(HTTPStatus.OK, {
+                "status": "ok",
+                "reply": f"我识别到你需要使用 **{service_names.get(matched_service, matched_service)}** 服务。\n\n任务内容：{message}\n\n确认创建任务吗？",
+                "actions": [
+                    {
+                        "type": "create_task",
+                        "label": "确认创建",
+                        "primary": True,
+                        "params": {
+                            "service": matched_service,
+                            "project": "project-default",
+                            "request": message,
+                        },
+                    },
+                ],
+            })
+        else:
+            self.send_json(HTTPStatus.OK, {
+                "status": "ok",
+                "reply": "我不太确定你需要哪个服务。以下是可用的服务：\n\n• **客户与行业研究** - 研究客户、竞争对手或行业趋势\n• **政府合作方案** - 准备政府项目合作方案\n• **客户推进与复盘** - 跟进客户进展和销售复盘\n• **PPT 工作室** - 制作销售演示文稿\n• **销售行动简报** - 生成个人或总监汇报\n\n请告诉我你具体需要什么？",
+                "actions": [],
+            })
+
+    def handle_coding_agent_submit(self, payload: dict[str, Any]) -> None:
+        """从可视化对话界面创建任务"""
+        service = str(payload.get("service", "")).strip()
+        project = str(payload.get("project", "project-default")).strip()
+        request_text = str(payload.get("request", "")).strip()
+
+        if not service or not request_text:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": "服务和请求内容不能为空"})
+            return
+
+        # 复用现有的 create_request 逻辑
+        request_payload = {
+            "profile_id": "sales-director",
+            "service_id": service,
+            "project_id": project,
+            "request": request_text,
+            **{key: payload[key] for key in ("read_only", "requested_model", "requested_thinking_level") if key in payload},
+        }
+
+        try:
+            self.create_request(request_payload)
+        except Exception as error:
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {
+                "status": "error",
+                "error": str(error),
+            })
+
+    def configure_model_provider_choice(self, payload: dict[str, Any]) -> None:
+        """配置模型提供者（NewAPI / Claude Code / Codex CLI）"""
+        provider_type = str(payload.get("provider_type", "")).strip()
+
+        if provider_type not in {"newapi", "claude-code", "codex-cli"}:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"error": "无效的模型提供者类型"})
+            return
+
+        try:
+            if provider_type == "newapi":
+                # 使用现有的 NewAPI 配置逻辑
+                from agent_platform.model_provider import configure_model_provider
+                result = configure_model_provider(
+                    ROOT,
+                    base_url=str(payload.get("base_url", "")),
+                    api_key=payload.get("api_key"),
+                    selected_model=str(payload.get("selected_model", "")),
+                    allow_private_network=payload.get("allow_private_network", False),
+                )
+                self.send_json(HTTPStatus.OK, {"status": "ok", "message": "NewAPI 模型配置已保存", **result})
+
+            else:
+                # Claude Code 或 Codex CLI
+                from agent_platform.model_provider import configure_coding_assistant_provider
+                executable_path = str(payload.get("executable_path", "")).strip()
+                selected_model = str(payload.get("selected_model", "")).strip()
+
+                if not executable_path or not selected_model:
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "缺少可执行文件路径或模型选择"})
+                    return
+
+                result = configure_coding_assistant_provider(
+                    ROOT,
+                    provider_type=provider_type,
+                    executable_path=executable_path,
+                    selected_model=selected_model,
+                )
+
+                provider_names = {
+                    "claude-code": "Claude Code",
+                    "codex-cli": "Codex CLI",
+                }
+                self.send_json(HTTPStatus.OK, {
+                    "status": "ok",
+                    "message": f"{provider_names[provider_type]} 已配置为模型提供者，重启应用后生效。",
+                    **result,
+                })
+
+        except (ModelProviderError, ValueError) as error:
+            self.send_json(HTTPStatus.BAD_REQUEST, {"status": "error", "error": str(error)})
+        except Exception as error:
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "error": str(error)})
 
 
 def schedule_loop(stop: threading.Event) -> None:

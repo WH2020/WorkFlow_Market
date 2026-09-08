@@ -11,5 +11,5 @@
     {"id": "shared.documents", "version": ">=1.0.0"}
   ],
   "skills": ["manage-market-pipeline"],
-  "workflows": ["workflows/pipeline-review.json"]
+  "workflows": ["workflows/pipeline-review.json", "workflows/pipeline-review-readonly-v2.json"]
 }

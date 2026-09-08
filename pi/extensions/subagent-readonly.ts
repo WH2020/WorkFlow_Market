@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import registerModelGuard from "./subagent-model-guard.ts";
 import { normalizePublicUrl, openWebSource } from "./source-readers.ts";
 import { assertSafePublicQuery, searchPublicWeb } from "./web-search.ts";
 import {
@@ -29,6 +30,7 @@ function requireContract(projectRoot: string, contractId: string, logicalTool: "
 }
 
 export default function governedReadonlySubagent(pi: ExtensionAPI): void {
+  registerModelGuard(pi);
   const projectRoot = process.cwd();
 
   pi.registerTool({

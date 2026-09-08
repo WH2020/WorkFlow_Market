@@ -9,9 +9,13 @@ description: 规划销售总监、市场总监或产品总监的行业、政府�
 
 先确认当前 Profile、主题、受众、目的和使用场合。再补充期望决策、演讲时长、4–10 页目标、资料范围、保密等级、语言、输出名和时间范围。已明确的字段不重复询问；受众、目的或场合缺失时，停在 `create_brief`，提出最少的关键问题。
 
-模式写入 plan：`quick` 用于结构稳定的内部汇报，`standard` 用于行业研究和普通方案，`strict` 用于政府或重要客户材料。Phase 1 的 DAG 对三种模式都保留一次大纲确认和一次正式生成硬审批；这是偏安全的统一门槛。当前严格模式不额外增加逐页策划 Approval，而是在正式生成硬审批中展示逐页策划与冻结载荷；独立逐页策划确认留到 Phase 2。
+模式写入 plan：`quick` 用于结构稳定的内部汇报，`standard` 用于行业研究和普通方案，`strict` 用于政府或重要客户材料。以当前任务的工作流 ID 为准：旧 `shared.presentation.studio` 始终保留大纲确认与正式生成两次审批；不得因 mode=quick 改写存量任务。
+
+新 `shared.presentation.studio-quick-v2` 仅用于 `quick`、`internal`、非政府场景、`source_scope=profile-knowledge-only`。只读取当前资料库，不搜索网页；没有可用来源时说明缺口并停止，不编造来源也不自动扩大资料范围。保存 outline 快照后无需大纲 Approval，直接在 `build_storyboard_and_design` 合并逐页策划与设计令牌选择，保存 final 快照并冻结完整渲染载荷。仍须等待唯一的 `approve_render`，再生成并完成原有 QA。快照哈希、版本、证据和不可覆盖约束与标准路径相同。
 
 ## 证据与规划顺序
+
+以下描述标准路径。新快速路径将第 1 步改为仅查询资料库，第 3 步保存后不等待大纲审批，第 4–5 步合并执行；其余快照、冻结、最终审批与 QA 要求不变。
 
 1. 公开资料必须先经 `director_web_search` 发现：行业扫描使用 `broad`/`recent`，技术标准和论文使用 `official`，中国政策与政府项目使用 `chinese_policy`；通常每个查询只取 5–8 条、摘要不超过 600 字。再由 `director_web_open` 读取正文，随后调用 `director_knowledge_search` 补充当前 Profile 可读的内部来源。不要把内部资料拼入外部检索词；搜索摘要和来源类别提示都不能直接进入事实页。
 2. 将外部事实、分析判断、假设和未知分开。事实必须引用当前任务证据 registry 的 `source_id`；分析与假设要明确标记，不能伪装成检索结果。

@@ -36,6 +36,8 @@ import {
   DocumentNotCommittedError,
 } from "./document-artifact.ts";
 import type { BidDocumentPayload, DocumentCommitContext } from "./document-artifact.ts";
+import { sameRecipient } from "./model-selection.ts";
+import type { ModelRecipient } from "./model-selection.ts";
 
 export type AdapterHooks = {
   projectRoot: () => string;
@@ -48,6 +50,7 @@ export type AdapterHooks = {
     project_id?: string;
     authorized_urls?: string[];
     authorized_wechat_scopes?: string[];
+    model_recipient?: ModelRecipient;
     revision_base_payload?: string;
     storage_binding?: { backend: "csv" | "sqlite"; binding_id: string };
   } | void;
@@ -1646,7 +1649,7 @@ function escapeSqlLike(value: string): string {
   return `%${value.replace(/\\/gu, "\\\\").replace(/%/gu, "\\%").replace(/_/gu, "\\_")}%`;
 }
 
-function readAuthorizedWechatScope(projectRoot: string, scopeId: string): Record<string, unknown> {
+function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipient?: ModelRecipient): Record<string, unknown> {
   const database = new DatabaseSync(resolveWechatDatabase(projectRoot), {
     allowExtension: false,
     defensive: true,
@@ -1662,6 +1665,12 @@ function readAuthorizedWechatScope(projectRoot: string, scopeId: string): Record
     database.exec("PRAGMA busy_timeout = 5000");
     const version = database.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
     if (Number(version?.user_version) !== 1) throw new Error("微信会话索引版本不受支持");
+    const table = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scope_recipients'").get();
+    if (!table || !recipient) throw new Error("微信授权尚未绑定当前模型接收方，请在工作台重新确认");
+    const binding = database.prepare("SELECT recipient_json FROM scope_recipients WHERE scope_id=?").get(scopeId) as { recipient_json?: string } | undefined;
+    if (!binding?.recipient_json || !sameRecipient(JSON.parse(binding.recipient_json), recipient)) {
+      throw new Error("微信授权的供应商、接收地址或模型与当前任务不一致，请重新确认");
+    }
     const scope = database.prepare(
       `SELECT scope_id,project_id,title,date_from,date_to,query,conversation_ids_json,message_count,
               selection_sha256,model_sharing_confirmed,created_at,expires_at,status
@@ -2714,7 +2723,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
       if (!(context.authorized_wechat_scopes ?? []).includes(params.scope_id)) {
         throw new Error("该微信会话授权范围未绑定到当前用户任务");
       }
-      const result = readAuthorizedWechatScope(hooks.projectRoot(), params.scope_id);
+      const result = readAuthorizedWechatScope(hooks.projectRoot(), params.scope_id, context.model_recipient);
       const scopeProjectId = String((result.scope as Record<string, unknown>).project_id ?? "");
       if (!context.project_id || scopeProjectId !== context.project_id) {
         throw new Error("微信会话授权范围与当前项目空间不一致");

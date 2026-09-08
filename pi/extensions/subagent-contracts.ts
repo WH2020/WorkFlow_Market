@@ -16,6 +16,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { acquireTaskLock, releaseTaskLock } from "./task-runtime.ts";
+import { sameRecipient, type ModelRecipient } from "./model-selection.ts";
 
 const CONTRACT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
@@ -50,6 +51,8 @@ export type GovernedSubagentContract = {
   task_version: number;
   role: GovernedSubagentRole;
   objective: string;
+  expected_model?: string;
+  model_recipient?: ModelRecipient;
   allowed_tools: string[];
   authorized_urls: string[];
   searched_urls: string[];
@@ -68,6 +71,7 @@ export type GovernedSubagentResult = {
   role: GovernedSubagentRole;
   agent: string;
   model?: string;
+  model_recipient?: ModelRecipient;
   run_id?: string;
   output: string;
   sources: GovernedSubagentSource[];
@@ -182,6 +186,13 @@ function assertContract(value: unknown, expectedId: string): GovernedSubagentCon
     throw new Error("Governed subagent contract has an invalid schema");
   }
   if (new Set(item.allowed_tools).size !== item.allowed_tools.length) throw new Error("Governed subagent tool list contains duplicates");
+  if (item.expected_model !== undefined && (typeof item.expected_model !== "string" || !item.expected_model.includes("/"))) {
+    throw new Error("Governed subagent model binding is invalid");
+  }
+  if (item.model_recipient !== undefined && (!sameRecipient(item.model_recipient, item.model_recipient) ||
+      item.expected_model !== `${item.model_recipient.provider_id}/${item.model_recipient.model_id}`)) {
+    throw new Error("Governed subagent recipient binding is invalid");
+  }
   if (item.role === "readonly-reviewer" && item.allowed_tools.length !== 0) throw new Error("Reviewer subagent cannot receive tools");
   if (item.authorized_urls.some((url) => typeof url !== "string" || url.length > 2048)) throw new Error("Governed subagent authorized URL is invalid");
   if (item.searched_urls.some((url) => typeof url !== "string" || url.length > 2048)) throw new Error("Governed subagent searched URL is invalid");
@@ -280,6 +291,8 @@ export function updateGovernedSubagentContract(
       next.node_id !== current.node_id ||
       next.task_version !== current.task_version ||
       next.role !== current.role ||
+      next.expected_model !== current.expected_model ||
+      canonical(next.model_recipient ?? null) !== canonical(current.model_recipient ?? null) ||
       canonical(next.allowed_tools) !== canonical(current.allowed_tools) ||
       canonical(next.authorized_urls) !== canonical(current.authorized_urls) ||
       next.created_at !== current.created_at ||
@@ -352,6 +365,7 @@ export function writeGovernedSubagentResult(
     role: contract.role,
     agent: input.agent,
     ...(input.model ? { model: input.model } : {}),
+    ...(contract.model_recipient ? { model_recipient: contract.model_recipient } : {}),
     ...(input.run_id ? { run_id: input.run_id } : {}),
     output,
     sources: contract.sources,

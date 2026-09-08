@@ -174,6 +174,12 @@ def _initialize(connection: sqlite3.Connection) -> None:
     if version not in {0, SCHEMA_VERSION}:
         raise WechatStoreError("SCHEMA_MISMATCH", "微信会话索引版本不受支持")
     if version == SCHEMA_VERSION:
+        # Additive v1 extension: existing scopes remain unbound and cannot be sent to a model.
+        connection.execute("""CREATE TABLE IF NOT EXISTS scope_recipients (
+            scope_id TEXT PRIMARY KEY REFERENCES review_scopes(scope_id) ON DELETE CASCADE,
+            recipient_json TEXT NOT NULL CHECK (json_valid(recipient_json))
+        ) STRICT""")
+        connection.commit()
         return
     connection.executescript(
         """
@@ -250,6 +256,10 @@ def _initialize(connection: sqlite3.Connection) -> None:
           created_at TEXT NOT NULL,
           expires_at TEXT NOT NULL,
           status TEXT NOT NULL CHECK (status IN ('active','expired'))
+        ) STRICT;
+        CREATE TABLE scope_recipients (
+          scope_id TEXT PRIMARY KEY REFERENCES review_scopes(scope_id) ON DELETE CASCADE,
+          recipient_json TEXT NOT NULL CHECK (json_valid(recipient_json))
         ) STRICT;
         PRAGMA user_version=1;
         """
@@ -754,6 +764,13 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
             "MODEL_SHARING_REQUIRED",
             "请确认允许将所选会话文字交给当前模型处理；若模型在云端，内容会离开本机",
         )
+    from .model_registry import available_models
+    recipient = payload.get("model_recipient")
+    if not isinstance(recipient, dict) or set(recipient) != {"provider_id", "base_url", "api", "model_id"}:
+        raise WechatStoreError("MODEL_RECIPIENT_REQUIRED", "请先选择并确认具体模型供应商、地址和模型")
+    key = f"{recipient.get('provider_id')}/{recipient.get('model_id')}"
+    if available_models(project_root).get(key) != recipient:
+        raise WechatStoreError("MODEL_RECIPIENT_CHANGED", "模型接收方不可用或已发生变化，请重新确认")
     project_id = _safe_text(payload.get("project_id"), 128, default="project-default") or "project-default"
     if not ID_RE.fullmatch(project_id):
         raise WechatStoreError("INVALID_PROJECT", "项目编号无效")
@@ -867,6 +884,9 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
                 _iso(created_at), _iso(expires_at), "active",
             ),
         )
+        connection.execute("INSERT INTO scope_recipients VALUES(?,?)", (
+            scope_id, json.dumps(recipient, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ))
         connection.commit()
         return {
             "scope_id": scope_id,
@@ -879,6 +899,7 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
             "text_bytes": text_bytes,
             "expires_at": _iso(expires_at),
             "selection_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "model_recipient": recipient,
         }
     finally:
         connection.close()
@@ -898,6 +919,11 @@ def review_scope_summary(project_root: Path | str, scope_id: str) -> dict[str, A
         if not row:
             raise WechatStoreError("NOT_FOUND", "微信会话授权范围不存在")
         summary = dict(row)
+        if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scope_recipients'").fetchone():
+            bound = connection.execute("SELECT recipient_json FROM scope_recipients WHERE scope_id=?", (scope_id,)).fetchone()
+            summary["model_recipient"] = json.loads(bound[0]) if bound else None
+        else:
+            summary["model_recipient"] = None
         try:
             expires_at = datetime.fromisoformat(str(summary["expires_at"]).replace("Z", "+00:00"))
         except ValueError as error:

@@ -1,0 +1,41 @@
+{
+  "id": "market.sales.pipeline-review-readonly-v2",
+  "plugin": "market.sales",
+  "display_name": "销售复盘（只读）",
+  "entry_nodes": [
+    "load_accounts"
+  ],
+  "output_nodes": [
+    "validate_analysis"
+  ],
+  "nodes": [
+    {
+      "id": "load_accounts",
+      "type": "tool",
+      "tool": "sales.read",
+      "depends_on": [],
+      "permissions": [
+        "sales.read",
+        "knowledge.read"
+      ]
+    },
+    {
+      "id": "analyze",
+      "type": "agent",
+      "skill": "manage-market-pipeline",
+      "depends_on": [
+        "load_accounts"
+      ],
+      "permissions": []
+    },
+    {
+      "id": "validate_analysis",
+      "type": "validator",
+      "check": "customer_evidence_fact_labels_and_action_recommendations_only",
+      "depends_on": [
+        "analyze"
+      ],
+      "permissions": []
+    }
+  ]
+}

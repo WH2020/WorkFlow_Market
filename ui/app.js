@@ -5,6 +5,10 @@
   let selectedService = null;
   let guidedRenderedService = null;
   let modelSettingsInitialized = false;
+  let editingModels = new Map();
+  let editingModelId = "";
+  let discoveredModelOptions = [];
+  let providerSettingsInitialized = false;
   let searchSettingsInitialized = false;
   let searchGatewaySettingsInitialized = false;
   let runtimeSettingsInitialized = false;
@@ -33,7 +37,12 @@
   const taskWriteIntentState = {};
   const taskCardExpansion = new Map();
   const reimbursementBatchExpansion = new Map();
-  let activeTool = "wechat";
+  let activeTool = "assistant";
+  const assistantState = {
+    messages: [],
+    currentTaskId: null,
+    isTyping: false,
+  };
   const wechatState = {
     rows: [], selected: new Set(), selectedId: "", messages: [], revision: "", renderedKey: "",
     loading: false, loaded: false, error: "", previewLoading: false, previewGeneration: 0, creating: false,
@@ -46,6 +55,8 @@
     listGeneration: 0, detailGeneration: 0, timelineGeneration: 0,
     attention: [], attentionLoaded: false, attentionLoading: false, attentionError: "", attentionGeneration: 0,
     listController: null, detailController: null, timelineController: null, attentionController: null,
+    recommendations: [], recommendationsLoading: false, recommendationsError: "", recommendationsGeneration: 0,
+    signals: [], signalsLoading: false, signalsError: "", signalsGeneration: 0,
   };
   const bidState = {
     rows: [], dashboard: null, accounts: [], loading: false, loaded: false, error: "", selectedId: "",
@@ -402,7 +413,7 @@
   function isHistoricalTask(task) { return ["completed", "cancelled", "rejected", "failed", "superseded"].includes(displayStatus(task)); }
   function projectById(projectId) { return model?.projects?.find((project) => project.project_id === projectId); }
   function selectedProjectRecord() { return projectById(selectedProject) || model?.projects?.[0]; }
-  function isPresentationStudio(service = currentService()) { return service?.id === "presentation-studio" || service?.workflow === "shared.presentation.studio"; }
+  function isPresentationStudio(service = currentService()) { return ["presentation-studio", "presentation-studio-quick"].includes(service?.id) || service?.workflow === "shared.presentation.studio"; }
   function isWeeklyService(service = currentService()) { return service?.id === "weekly-deck" || service?.workflow?.startsWith("shared.reporting.weekly-deck"); }
 
   function updateBackButton() {
@@ -475,7 +486,7 @@
 
   function renderServices() {
     const box = $("services");
-    const services = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-") && service.id !== "wechat-review");
+    const services = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-") && service.id !== "wechat-review" && !service.id.endsWith("-readonly") && service.id !== "presentation-studio-quick");
     box.replaceChildren(...services.map((service) => {
       const button = choice(service.display_name, service.description, service.id === selectedService);
       button.onclick = () => openService(service.id);
@@ -487,7 +498,7 @@
     const select = $("model-select");
     const options = [];
     if (!Array.isArray(models) || models.length === 0) {
-      const empty = document.createElement("option"); empty.value = ""; empty.textContent = "请先获取模型"; options.push(empty);
+      const empty = document.createElement("option"); empty.value = ""; empty.textContent = "请填写模型 ID 或发现模型"; options.push(empty);
       select.disabled = true; $("save-model-settings").disabled = true;
     } else {
       models.forEach((modelItem) => {
@@ -501,22 +512,174 @@
     if (selectedModel && options.some((option) => option.value === selectedModel)) select.value = selectedModel;
   }
 
+  function modelProviders() {
+    const settings = model?.model || {};
+    return settings.providers || (settings.configured && settings.provider_id ? [{ ...settings, id: settings.provider_id, name: "NewAPI" }] : []);
+  }
+
+  function saveEditedCapabilities() {
+    if (!editingModelId) return;
+    editingModels.set(editingModelId, {
+      ...(editingModels.get(editingModelId) || {}), id: editingModelId, enabled: true,
+      context_window: Number($("model-context-window").value), max_tokens: Number($("model-max-tokens").value),
+      reasoning: $("model-reasoning").checked, image_input: $("model-image-input").checked,
+      tools: $("model-tools").checked, metadata_source: "user",
+    });
+  }
+
+  function showEditedCapabilities() {
+    editingModelId = $("model-select").value;
+    const item = editingModels.get(editingModelId) || {};
+    $("model-context-window").value = item.context_window || 32000;
+    $("model-max-tokens").value = item.max_tokens || 4096;
+    $("model-reasoning").checked = Boolean(item.reasoning);
+    $("model-image-input").checked = Boolean(item.image_input);
+    $("model-tools").checked = item.tools !== false;
+  }
+
+  function enabledModelIds() {
+    return [...new Set($("model-enabled-ids").value.split(/\s+/).map((value) => value.trim()).filter(Boolean))];
+  }
+
+  function refreshEditorModelOptions(preferred = "") {
+    const catalog = new Map(discoveredModelOptions.map((item) => [item.id, item]));
+    enabledModelIds().forEach((id) => catalog.set(id, editingModels.get(id) || { id }));
+    populateModelOptions([...catalog.values()], preferred);
+    showEditedCapabilities();
+  }
+
+  function fillProviderEditor(id) {
+    const settings = model?.model || {};
+    const provider = modelProviders().find((item) => item.id === id);
+    $("model-instance").value = provider?.id || "";
+    $("model-provider-name").value = provider?.name || "NewAPI";
+    $("model-vendor").value = provider?.vendor || "newapi";
+    $("model-base-url").value = provider?.base_url || "";
+    $("model-base-url").readOnly = Boolean(provider);
+    $("model-api").value = provider?.api || "openai-completions";
+    $("model-api").disabled = Boolean(provider);
+    $("model-endpoint-options").open = !provider || !["openai", "anthropic"].includes(provider.vendor);
+    $("model-private-network").checked = Boolean(provider?.allow_private_network);
+    $("model-api-key").value = "";
+    $("model-api-key").placeholder = provider?.has_api_key ? "本实例已保存；留空则继续使用" : "请输入本实例 API Key";
+    $("model-provider-enabled").checked = provider?.enabled !== false;
+    $("model-make-default").checked = !settings.default_model || settings.default_model.startsWith((provider?.id || "") + "/");
+    $("reset-model-settings").disabled = !provider;
+    editingModels = new Map((provider?.models || []).map((item) => [item.id, { ...item }]));
+    discoveredModelOptions = [...(provider?.discovered_models || []), ...(provider?.models || [])];
+    editingModelId = "";
+    $("model-enabled-ids").value = (provider?.models || []).filter((item) => item.enabled !== false).map((item) => item.id).join("\n");
+    const selected = settings.default_model?.startsWith((provider?.id || "") + "/") ? settings.default_model.slice(provider.id.length + 1) : "";
+    refreshEditorModelOptions(selected);
+    for (const [control, role] of [["model-role-scout", "director-research-scout"], ["model-role-reviewer", "director-readonly-reviewer"]]) {
+      const follow = document.createElement("option"); follow.value = ""; follow.textContent = "跟随主任务";
+      const options = [follow];
+      modelProviders().filter((item) => item.status === "configured").forEach((item) => {
+        (item.models || []).filter((entry) => entry.enabled !== false && entry.tools !== false).forEach((entry) => {
+          const option = document.createElement("option"); option.value = item.id + "/" + entry.id;
+          option.textContent = item.name + " · " + entry.id; options.push(option);
+        });
+      });
+      $(control).replaceChildren(...options);
+      $(control).value = settings.role_models?.[role] || "";
+    }
+  }
+
   function renderModelSettings(force = false) {
     const settings = model?.model || { configured: false, status: "unconfigured" };
     const panel = $("model-settings-panel");
-    panel.classList.toggle("configured", settings.configured && settings.status === "configured");
-    panel.classList.toggle("error", settings.status === "error" || settings.status === "missing_key");
-    if (settings.status === "error") $("model-current").textContent = `配置异常：${settings.error}`;
-    else if (settings.status === "missing_key") $("model-current").textContent = `密钥不可用：${displayModelName(settings.selected_model)}，请重新填写并保存`;
-    else if (settings.configured) $("model-current").textContent = `当前模型：${displayModelName(settings.selected_model)} · ${settings.base_url}`;
-    else $("model-current").textContent = "沿用智能核心默认模型；尚未配置自定义模型网关";
+    panel.classList.toggle("configured", settings.status === "configured");
+    panel.classList.toggle("error", ["error", "unsupported_backend", "missing_default"].includes(settings.status));
+    $("model-current").textContent = settings.error || (settings.default_model
+      ? "默认：" + settings.default_model + " · " + modelProviders().length + " 个供应商"
+      : modelProviders().length ? "请选择一个已启用的默认模型" : "尚未添加 API 供应商");
     if (modelSettingsInitialized && !force) return;
     modelSettingsInitialized = true;
-    $("model-base-url").value = settings.base_url || "";
-    $("model-private-network").checked = Boolean(settings.allow_private_network);
-    $("model-api-key").value = "";
-    $("model-api-key").placeholder = settings.has_api_key ? "已保存；留空则继续使用" : "请输入网关接口密钥";
-    populateModelOptions(settings.models || [], settings.selected_model || "");
+    const previous = $("model-instance").value;
+    const empty = document.createElement("option"); empty.value = ""; empty.textContent = "新增供应商";
+    const options = [empty];
+    modelProviders().forEach((item) => {
+      const option = document.createElement("option"); option.value = item.id;
+      option.textContent = item.name + " · " + (item.status === "configured" ? "已配置" : item.status === "disabled" ? "已停用" : "缺少凭据");
+      options.push(option);
+    });
+    $("model-instance").replaceChildren(...options);
+    fillProviderEditor(settings.saved_provider_id || previous || settings.provider_id || "");
+  }
+
+  function renderProviderSettings() {
+    const settings = model?.model || {};
+    $("provider-current").textContent = settings.error || "Pi 模型执行核心 · " + modelProviders().length + " 个 API 供应商";
+    $("model-provider-panel").classList.toggle("configured", settings.status === "configured");
+    $("claude-code-config").hidden = true;
+    $("codex-cli-config").hidden = true;
+    $("newapi-status").textContent = modelProviders().length ? "在下方按实例配置" : "尚未配置";
+  }
+
+  async function detectCodingAssistants() {
+    try {
+      const response = await api("/api/coding-assistants/detect");
+      const claudeStatus = $("claude-code-status");
+      const codexStatus = $("codex-cli-status");
+
+      // 处理 Claude Code 检测结果
+      if (response["claude-code"]?.available) {
+        claudeStatus.textContent = `已安装 (${response["claude-code"].version})`;
+        claudeStatus.classList.remove("unavailable");
+        claudeStatus.classList.add("available");
+        $("claude-code-path").value = response["claude-code"].path;
+
+        // 填充 Claude Code 模型下拉框
+        const claudeModelSelect = $("claude-code-model");
+        claudeModelSelect.innerHTML = "";
+        response["claude-code"].models.forEach((model) => {
+          const option = document.createElement("option");
+          option.value = model.id;
+          option.textContent = model.name;
+          claudeModelSelect.appendChild(option);
+        });
+      } else {
+        claudeStatus.textContent = "未检测到";
+        claudeStatus.classList.remove("available");
+        claudeStatus.classList.add("unavailable");
+        $("claude-code-path").value = "";
+      }
+
+      // 处理 Codex CLI 检测结果
+      if (response["codex-cli"]?.available) {
+        codexStatus.textContent = `已安装 (${response["codex-cli"].version})`;
+        codexStatus.classList.remove("unavailable");
+        codexStatus.classList.add("available");
+        $("codex-cli-path").value = response["codex-cli"].path;
+
+        // 填充 Codex CLI 模型下拉框
+        const codexModelSelect = $("codex-cli-model");
+        codexModelSelect.innerHTML = "";
+        response["codex-cli"].models.forEach((model) => {
+          const option = document.createElement("option");
+          option.value = model.id;
+          option.textContent = model.name;
+          codexModelSelect.appendChild(option);
+        });
+      } else {
+        codexStatus.textContent = "未检测到";
+        codexStatus.classList.remove("available");
+        codexStatus.classList.add("unavailable");
+        $("codex-cli-path").value = "";
+      }
+
+      return response;
+    } catch (error) {
+      $("claude-code-status").textContent = "检测失败";
+      $("codex-cli-status").textContent = "检测失败";
+      throw error;
+    }
+  }
+
+  async function saveProviderSettings() {
+    $("model-settings-panel").open = true;
+    $("model-settings-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("model-instance").focus();
   }
 
   function renderSearchSettings(force = false) {
@@ -656,7 +819,7 @@
   }
 
   function publicSearchReady(serviceId, guide = false) {
-    if (!["industry-research", "government-proposal", "presentation-studio", "bid-discovery"].includes(serviceId)) return true;
+    if (!["industry-research", "industry-research-readonly", "government-proposal", "presentation-studio", "bid-discovery"].includes(serviceId)) return true;
     const settings = model?.search || {};
     const gateway = model?.search_gateway || {};
     const gatewayHealthy = !gateway.status || ["disabled", "configured"].includes(gateway.status);
@@ -671,9 +834,9 @@
 
   function renderTaskRuntimeOptions() {
     const settings = model?.model || { configured: false, status: "unconfigured" };
-    const available = settings.configured && settings.status === "configured" ? (settings.models || []) : [];
-    const provider = settings.provider_id || "";
-    const catalogKey = JSON.stringify([provider, settings.selected_model || "", available.map((item) => item.id)]);
+    const providers = modelProviders().filter((provider) => provider.status === "configured" && provider.has_api_key);
+    const available = providers.flatMap((provider) => (provider.models || []).filter((item) => item.enabled !== false && item.tools !== false).map((item) => ({ ...item, provider })));
+    const catalogKey = JSON.stringify([settings.default_model, available.map((item) => [item.provider.id, item.id])]);
     if (catalogKey !== taskRuntimeCatalogKey) {
       taskRuntimeCatalogKey = catalogKey;
       const previous = $("task-model").value;
@@ -682,19 +845,21 @@
       const options = [];
       const fallback = document.createElement("option");
       fallback.value = "";
-      fallback.textContent = settings.configured && settings.selected_model
-        ? `默认：${settings.selected_model}`
-        : "智能核心默认模型";
+      fallback.textContent = settings.default_model
+        ? `默认：${settings.default_model}`
+        : "尚未设置默认模型，请选择实例模型";
       options.push(fallback);
-      available.forEach((item) => {
-        const option = document.createElement("option");
-        option.value = `${provider}/${item.id}`;
-        option.textContent = item.owned_by ? `${item.id} · ${item.owned_by}` : item.id;
-        options.push(option);
+      providers.forEach((provider) => {
+        const group = document.createElement("optgroup"); group.label = provider.name || provider.id;
+        available.filter((item) => item.provider.id === provider.id).forEach((item) => {
+          const option = document.createElement("option"); option.value = `${provider.id}/${item.id}`;
+          option.textContent = item.id; group.append(option);
+        });
+        if (group.children.length) options.push(group);
       });
       $("task-model").replaceChildren(...options);
       const desired = previous || remembered;
-      if (desired && options.some((option) => option.value === desired)) $("task-model").value = desired;
+      if (desired && [...$("task-model").options].some((option) => option.value === desired)) $("task-model").value = desired;
       $("task-model").disabled = available.length === 0;
     }
     if (!$("task-thinking").dataset.initialized) {
@@ -792,8 +957,10 @@
   }
 
   function renderGuidedForm(force = false) {
-    const config = guidedServices[selectedService];
+    const baseService = selectedService.replace(/-readonly$/u, "");
+    const config = guidedServices[baseService];
     if (!config || (!force && guidedRenderedService === selectedService)) return;
+    $("task-readonly-option").hidden = !["sales-review", "industry-research"].includes(baseService);
     guidedRenderedService = selectedService;
     const draft = guidedDrafts[selectedService] ||= {};
     $("task-form-title").textContent = `2. ${config.title}`;
@@ -955,6 +1122,7 @@
   }
 
   function renderTaskForm() {
+    updatePresentationSourcePolicy();
     const presentation = isPresentationStudio();
     const weekly = isWeeklyService();
     $("generic-task-form").hidden = presentation || weekly;
@@ -2374,6 +2542,106 @@
     } catch (error) { if (error.name !== "AbortError" && generation === customerState.attentionGeneration) { customerState.attentionError = error.message || "今日关注暂时无法读取"; customerState.attentionLoaded = true; } }
     finally { if (generation === customerState.attentionGeneration) { customerState.attentionLoading = false; renderAttention(); } }
   }
+  async function loadGlobalRecommendations({ force = false } = {}) {
+    if (customerState.recommendationsLoading && !force) return;
+    const generation = ++customerState.recommendationsGeneration;
+    customerState.recommendationsLoading = true; customerState.recommendationsError = ""; customerState.recommendations = [];
+    try {
+      const response = await api("/api/a4/recommendations");
+      if (generation !== customerState.recommendationsGeneration) return;
+      if (response.success && Array.isArray(response.data?.recommendations)) {
+        customerState.recommendations = response.data.recommendations.filter((rec) => rec.status === "pending");
+      } else {
+        customerState.recommendationsError = response.error || "建议暂时无法读取";
+      }
+    } catch (error) {
+      if (generation === customerState.recommendationsGeneration) {
+        customerState.recommendationsError = error.message || "建议暂时无法读取";
+      }
+    } finally {
+      if (generation === customerState.recommendationsGeneration) {
+        customerState.recommendationsLoading = false;
+        renderGlobalRecommendations();
+      }
+    }
+  }
+  async function loadCustomerRecommendations(accountId) {
+    if (!accountId || customerState.recommendationsLoading) return;
+    const generation = ++customerState.recommendationsGeneration;
+    customerState.recommendationsLoading = true; customerState.recommendationsError = ""; customerState.recommendations = [];
+    try {
+      const response = await api(`/api/a4/recommendations?account_id=${encodeURIComponent(accountId)}`);
+      if (generation !== customerState.recommendationsGeneration) return;
+      if (response.success && Array.isArray(response.data?.recommendations)) {
+        customerState.recommendations = response.data.recommendations.filter((rec) => rec.status === "pending");
+      } else {
+        customerState.recommendationsError = response.error || "建议暂时无法读取";
+      }
+    } catch (error) {
+      if (generation === customerState.recommendationsGeneration) {
+        customerState.recommendationsError = error.message || "建议暂时无法读取";
+      }
+    } finally {
+      if (generation === customerState.recommendationsGeneration) {
+        customerState.recommendationsLoading = false;
+        renderCustomerDetail();
+      }
+    }
+  }
+  async function acceptRecommendation(recommendationId, userEdits = null) {
+    try {
+      const body = { recommendation_id: recommendationId };
+      if (userEdits) body.user_edits = userEdits;
+      const response = await api("/api/a4/recommendations/accept", { method: "POST", body: JSON.stringify(body) });
+      if (!response.success) throw new Error(response.error || "接受建议失败");
+      await loadCustomerRecommendations(customerState.selectedId);
+      return true;
+    } catch (error) {
+      await confirmAction({ title: "操作失败", message: error.message, confirmText: "知道了", tone: "danger" });
+      return false;
+    }
+  }
+  async function ignoreRecommendation(recommendationId, reason = null) {
+    try {
+      const body = { recommendation_id: recommendationId };
+      if (reason) body.reason = reason;
+      const response = await api("/api/a4/recommendations/ignore", { method: "POST", body: JSON.stringify(body) });
+      if (!response.success) throw new Error(response.error || "忽略建议失败");
+      await loadCustomerRecommendations(customerState.selectedId);
+      return true;
+    } catch (error) {
+      await confirmAction({ title: "操作失败", message: error.message, confirmText: "知道了", tone: "danger" });
+      return false;
+    }
+  }
+  async function loadCustomerSignals(accountId) {
+    if (!accountId || customerState.signalsLoading) return;
+    const generation = ++customerState.signalsGeneration;
+    customerState.signalsLoading = true; customerState.signalsError = ""; customerState.signals = [];
+    try {
+      const accountData = customerState.rows.find((row) => accountId(row) === accountId);
+      if (!accountData) {
+        customerState.signalsError = "客户数据不存在";
+        return;
+      }
+      const response = await api("/api/a4/evaluate-signals", { method: "POST", body: JSON.stringify(accountData) });
+      if (generation !== customerState.signalsGeneration) return;
+      if (response.success && Array.isArray(response.data?.signals)) {
+        customerState.signals = response.data.signals.filter((sig) => sig.severity === "high" || sig.severity === "medium");
+      } else {
+        customerState.signalsError = response.error || "信号暂时无法读取";
+      }
+    } catch (error) {
+      if (generation === customerState.signalsGeneration) {
+        customerState.signalsError = error.message || "信号暂时无法读取";
+      }
+    } finally {
+      if (generation === customerState.signalsGeneration) {
+        customerState.signalsLoading = false;
+        renderCustomerDetail();
+      }
+    }
+  }
   function customerTabFor(section) {
     return ({ activities: "timeline", commitments: "actions", actions: "actions", risks: "signals", resource_requests: "resources", sales_assets: "resources", artifacts: "resources", evidence_refs: "evidence", task_links: "evidence" })[String(section || "")] || (String(section || "") || "overview");
   }
@@ -2383,6 +2651,8 @@
     customerState.detailController?.abort(); const controller = new AbortController(); customerState.detailController = controller; const generation = ++customerState.detailGeneration;
     customerState.timelineController?.abort(); customerState.timelineGeneration += 1;
     renderCustomerOperations(); renderCustomerContext();
+    loadCustomerRecommendations(customerId);
+    loadCustomerSignals(customerId);
     let focusAnchor = null;
     if (focus) queueMicrotask(() => { if (generation === customerState.detailGeneration && customerState.selectedId === customerId) { focusAnchor = $("customer-detail").hidden ? $("customer-detail-empty") : $("customer-detail"); focusAnchor?.focus?.({ preventScroll: true }); } });
     try {
@@ -2522,7 +2792,159 @@
     const sections = customerState.detail?.sections || {}; const primaryOpportunity = sections.opportunities?.[0]; const primaryRisk = (sections.risks || []).find((row) => !["closed", "resolved", "cancelled"].includes(String(row.status || "").toLowerCase())); const primaryAction = (sections.actions || []).find((row) => !["completed", "cancelled"].includes(String(row.status || "").toLowerCase()));
     $("customer-detail-name").textContent = accountName(account); $("customer-detail-meta").textContent = [accountField(primaryOpportunity, "name"), accountField(account, "owner", "owner_name", "负责人"), customerDisplayValue(accountField(primaryOpportunity, "stage") || accountField(account, "lifecycle_stage", "stage", "sales_stage", "阶段")), freshnessText(accountField(account, "updated_at", "last_updated_at"))].filter(Boolean).join(" · ") || "客户信息待补充";
     const status = $("customer-detail-status"); status.textContent = customerState.detailLoading ? "正在更新客户全景…" : customerState.detailError ? `部分信息暂时无法读取：${customerState.detailError}` : customerState.detail?.truncated_sections?.length ? `部分信息已截断：${customerState.detail.truncated_sections.join("、")}` : `主要风险：${accountField(primaryRisk, "risk_text") || "暂无已登记开放风险"} · 首要下一步：${accountField(primaryAction, "action_text") || "暂无已登记开放行动"}`;
-    const actions = $("customer-quick-actions"); actions.replaceChildren(customerQuickAction("sales-review", "客户复盘"), customerQuickAction("bid-create", "创建投标项目"), customerQuickAction("government-proposal", "政府合作"), customerQuickAction("industry-research", "行业研究"), customerQuickAction("office-document", "资源协调/文件", "resources"), customerQuickAction("presentation-studio", "制作演示文稿")); detailTabs();
+    const actions = $("customer-quick-actions"); actions.replaceChildren(customerQuickAction("sales-review", "客户复盘"), customerQuickAction("bid-create", "创建投标项目"), customerQuickAction("government-proposal", "政府合作"), customerQuickAction("industry-research", "行业研究"), customerQuickAction("office-document", "资源协调/文件", "resources"), customerQuickAction("presentation-studio", "制作演示文稿"));
+    renderCustomerSignals();
+    renderCustomerRecommendations();
+    detailTabs();
+  }
+  function renderCustomerSignals() {
+    const container = $("customer-signals");
+    if (!container) return;
+    const signals = customerState.signals;
+    const loading = customerState.signalsLoading;
+    const error = customerState.signalsError;
+    if (loading) {
+      container.innerHTML = '<div class="signals-loading">正在读取信号…</div>';
+      container.hidden = false;
+      return;
+    }
+    if (error) {
+      container.innerHTML = `<div class="signals-error">信号暂时无法读取：${error}</div>`;
+      container.hidden = false;
+      return;
+    }
+    if (!signals.length) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    const severityLabels = { high: "高优先级", medium: "中优先级", low: "低优先级" };
+    container.replaceChildren(...signals.map((sig) => {
+      const card = document.createElement("div");
+      card.className = `signal-card signal-${sig.severity}`;
+      const header = document.createElement("div");
+      header.className = "signal-header";
+      const badge = document.createElement("span");
+      badge.className = `signal-badge signal-${sig.severity}`;
+      badge.textContent = severityLabels[sig.severity] || sig.severity;
+      const typeLabel = document.createElement("span");
+      typeLabel.className = "signal-type";
+      typeLabel.textContent = sig.signal_type;
+      header.append(badge, typeLabel);
+      const title = document.createElement("h3");
+      title.textContent = sig.title;
+      const description = document.createElement("p");
+      description.textContent = sig.description;
+      card.append(header, title, description);
+      if (sig.suggested_actions && sig.suggested_actions.length > 0) {
+        const actionsDiv = document.createElement("div");
+        actionsDiv.className = "signal-actions";
+        const ul = document.createElement("ul");
+        sig.suggested_actions.forEach((action) => {
+          const li = document.createElement("li");
+          li.textContent = action;
+          ul.append(li);
+        });
+        actionsDiv.append(ul);
+        card.append(actionsDiv);
+      }
+      return card;
+    }));
+  }
+  function renderCustomerRecommendations() {
+    const container = $("customer-recommendations");
+    if (!container) return;
+    const recs = customerState.recommendations;
+    const loading = customerState.recommendationsLoading;
+    const error = customerState.recommendationsError;
+    if (loading) {
+      container.innerHTML = '<div class="recommendations-loading">正在读取建议…</div>';
+      container.hidden = false;
+      return;
+    }
+    if (error) {
+      container.innerHTML = `<div class="recommendations-error">建议暂时无法读取：${error}</div>`;
+      container.hidden = false;
+      return;
+    }
+    if (!recs.length) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    const priorityLabels = { high: "高优先级", medium: "中优先级", low: "低优先级" };
+    container.replaceChildren(...recs.slice(0, 3).map((rec) => {
+      const card = document.createElement("div");
+      card.className = `recommendation-card priority-${rec.priority}`;
+      const header = document.createElement("div");
+      header.className = "recommendation-header";
+      const badge = document.createElement("span");
+      badge.className = "recommendation-badge";
+      badge.textContent = priorityLabels[rec.priority] || rec.priority;
+      header.append(badge);
+      const title = document.createElement("h4");
+      title.textContent = rec.title;
+      const description = document.createElement("p");
+      description.textContent = rec.description;
+      const actions = document.createElement("div");
+      actions.className = "recommendation-actions";
+      const acceptBtn = document.createElement("button");
+      acceptBtn.type = "button";
+      acceptBtn.className = "btn-accept";
+      acceptBtn.textContent = "接受";
+      acceptBtn.onclick = async () => {
+        acceptBtn.disabled = true;
+        await acceptRecommendation(rec.recommendation_id);
+      };
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "btn-edit";
+      editBtn.textContent = "编辑";
+      editBtn.onclick = async () => {
+        const title = await confirmAction({
+          title: "编辑建议",
+          message: "请输入行动标题",
+          inputValue: rec.title,
+          inputLabel: "标题",
+          inputMaxLength: 200,
+          confirmText: "下一步",
+        });
+        if (!title) return;
+        const description = await confirmAction({
+          title: "编辑建议",
+          message: "请输入行动描述",
+          inputValue: rec.description,
+          inputLabel: "描述",
+          inputMultiline: true,
+          inputMaxLength: 1000,
+          confirmText: "确认接受",
+        });
+        if (!description) return;
+        editBtn.disabled = true;
+        await acceptRecommendation(rec.recommendation_id, { title, description });
+      };
+      const ignoreBtn = document.createElement("button");
+      ignoreBtn.type = "button";
+      ignoreBtn.className = "btn-ignore";
+      ignoreBtn.textContent = "忽略";
+      ignoreBtn.onclick = async () => {
+        const reason = await confirmAction({
+          title: "忽略建议",
+          message: "请说明忽略原因（可选）",
+          inputValue: "",
+          inputLabel: "原因",
+          inputMaxLength: 200,
+          confirmText: "确认忽略",
+          tone: "danger",
+        });
+        if (reason === false) return;
+        ignoreBtn.disabled = true;
+        await ignoreRecommendation(rec.recommendation_id, reason || null);
+      };
+      actions.append(acceptBtn, editBtn, ignoreBtn);
+      card.append(header, title, description, actions);
+      return card;
+    }));
   }
   function renderCustomerOperations() {
     const list = $("customer-list"); if (!list) return;
@@ -2540,6 +2962,108 @@
     if (!customerState.attention.length) { box.className = "attention-list empty"; box.textContent = "今天没有已识别的优先客户事项。"; return; }
     const targetLabels = { overview: "客户概览", timeline: "时间线", actions: "行动与承诺", signals: "信号与风险", resources: "资源与资料", evidence: "证据" };
     box.className = "attention-list"; customerState.attention.slice(0, 6).forEach((item) => { const id = accountId(item); const targetTab = customerTabFor(item.target_section); const card = document.createElement("button"); card.type = "button"; card.className = `attention-card ${String(item.severity || "") === "high" ? "high" : ""}`; const title = document.createElement("strong"); title.textContent = String(item.account_name || accountName(item)); const reason = document.createElement("p"); reason.textContent = accountField(item, "reason", "summary", "title") || "需要关注的客户事项"; const due = accountField(item, "due_at"); const meta = document.createElement("small"); meta.textContent = `${due ? `截止 ${formatCustomerTime(due)}` : `记录于 ${formatCustomerTime(accountField(item, "event_at", "updated_at"))}`} · 首要操作：查看${targetLabels[targetTab] || "客户信息"}`; card.append(title, reason, meta); card.onclick = async () => { switchView("sales"); await selectCustomer(id, { tab: targetTab, focus: true }); }; box.append(card); });
+  }
+  function renderGlobalRecommendations() {
+    const container = $("home-recommendations");
+    if (!container) return;
+    const recs = customerState.recommendations;
+    const loading = customerState.recommendationsLoading;
+    const error = customerState.recommendationsError;
+    if (loading) {
+      container.innerHTML = '<div class="recommendations-loading">正在读取建议…</div>';
+      container.hidden = false;
+      return;
+    }
+    if (error) {
+      container.innerHTML = `<div class="recommendations-error">建议暂时无法读取：${error}</div>`;
+      container.hidden = false;
+      return;
+    }
+    if (!recs.length) {
+      container.hidden = true;
+      return;
+    }
+    container.hidden = false;
+    const priorityLabels = { high: "高优先级", medium: "中优先级", low: "低优先级" };
+    container.replaceChildren(...recs.slice(0, 5).map((rec) => {
+      const card = document.createElement("div");
+      card.className = `recommendation-card priority-${rec.priority}`;
+      const header = document.createElement("div");
+      header.className = "recommendation-header";
+      const badge = document.createElement("span");
+      badge.className = `recommendation-badge priority-${rec.priority}`;
+      badge.textContent = priorityLabels[rec.priority] || rec.priority;
+      const accountLabel = document.createElement("span");
+      accountLabel.style.fontSize = "11px";
+      accountLabel.style.color = "#6d7788";
+      accountLabel.textContent = rec.account_name;
+      header.append(badge, accountLabel);
+      const title = document.createElement("h4");
+      title.textContent = rec.title;
+      const description = document.createElement("p");
+      description.textContent = rec.description;
+      const actions = document.createElement("div");
+      actions.className = "recommendation-actions";
+      const acceptBtn = document.createElement("button");
+      acceptBtn.type = "button";
+      acceptBtn.className = "btn-accept";
+      acceptBtn.textContent = "接受";
+      acceptBtn.onclick = async () => {
+        acceptBtn.disabled = true;
+        await acceptRecommendation(rec.recommendation_id);
+        await loadGlobalRecommendations({ force: true });
+      };
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "btn-edit";
+      editBtn.textContent = "编辑";
+      editBtn.onclick = async () => {
+        const title = await confirmAction({
+          title: "编辑建议",
+          message: "请输入行动标题",
+          inputValue: rec.title,
+          inputLabel: "标题",
+          inputMaxLength: 200,
+          confirmText: "下一步",
+        });
+        if (!title) return;
+        const description = await confirmAction({
+          title: "编辑建议",
+          message: "请输入行动描述",
+          inputValue: rec.description,
+          inputLabel: "描述",
+          inputMultiline: true,
+          inputMaxLength: 1000,
+          confirmText: "确认接受",
+        });
+        if (!description) return;
+        editBtn.disabled = true;
+        await acceptRecommendation(rec.recommendation_id, { title, description });
+        await loadGlobalRecommendations({ force: true });
+      };
+      const ignoreBtn = document.createElement("button");
+      ignoreBtn.type = "button";
+      ignoreBtn.className = "btn-ignore";
+      ignoreBtn.textContent = "忽略";
+      ignoreBtn.onclick = async () => {
+        const reason = await confirmAction({
+          title: "忽略建议",
+          message: "请说明忽略原因（可选）",
+          inputValue: "",
+          inputLabel: "原因",
+          inputMaxLength: 200,
+          confirmText: "确认忽略",
+          tone: "danger",
+        });
+        if (reason === false) return;
+        ignoreBtn.disabled = true;
+        await ignoreRecommendation(rec.recommendation_id, reason || null);
+        await loadGlobalRecommendations({ force: true });
+      };
+      actions.append(acceptBtn, editBtn, ignoreBtn);
+      card.append(header, title, description, actions);
+      return card;
+    }));
   }
 
   const bidStatusLabels = {
@@ -3021,13 +3545,19 @@
     const conversationIds = today ? [] : [...wechatState.selected];
     if (!today && !conversationIds.length) throw new Error("请至少选择一个会话。");
     const runtime = taskRuntimeSelection();
-    const modelName = displayModelName(runtime.requested_model || model?.model?.selected_model || "智能核心默认模型");
+    const modelKey = runtime.requested_model || model?.model?.default_model;
+    const provider = modelProviders().find((item) => modelKey?.startsWith(item.id + "/") && item.status === "configured");
+    const selectedModel = provider?.models.find((item) => modelKey === provider.id + "/" + item.id && item.enabled !== false && item.tools !== false);
+    if (!provider || !selectedModel) throw new Error("整理微信前，请先配置并选择具体的 API 供应商和模型。");
+    runtime.requested_model = modelKey;
+    const recipient = { provider_id: provider.id, base_url: provider.base_url, api: selectedModel.api || provider.api, model_id: selectedModel.id };
+    const modelName = `${provider.name} · ${selectedModel.id}`;
     const confirmed = await confirmAction({
       title: "确认整理微信会话",
       message: today
         ? `将把今天全部有消息的会话交给“${modelName}”整理。`
         : `将把 ${conversationIds.length} 个会话在 ${filters.date_from} 至 ${filters.date_to} 的所选内容交给“${modelName}”整理。`,
-      detail: "如果该模型由云端提供，会话文字会离开本机；任务只读取本次冻结的范围，不会自动更新销售台账或对外发送。",
+      detail: `接收地址：${recipient.base_url}；协议：${recipient.api}。云端处理会使文字离开本机；仅允许此供应商和模型处理所选范围，不自动更新台账。`,
       confirmText: "确认并开始",
     });
     if (!confirmed) return;
@@ -3041,6 +3571,7 @@
         date_to: filters.date_to,
         query: filters.query || "",
         model_sharing_confirmed: true,
+        model_recipient: recipient,
       }),
     });
     const request = [
@@ -3191,7 +3722,7 @@
   }
 
   function renderSchedules() {
-    const allowed = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-") && !["presentation-studio", "weekly-deck", "pdf-import"].includes(service.id));
+    const allowed = (currentProfile()?.services || []).filter((service) => !service.id.startsWith("bid-") && !["presentation-studio", "presentation-studio-quick", "weekly-deck", "pdf-import"].includes(service.id));
     setSelectOptions($("schedule-service"), allowed.map((service) => ({ value: service.id, label: service.display_name })), $("schedule-service").value || "sales-review");
     const list = $("schedule-list");
     const schedules = model.schedules || [];
@@ -3261,12 +3792,19 @@
   }
 
   function render() {
-    renderModelSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
+    renderModelSettings(); renderProviderSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderWechatSummary(); renderToolPanels(); renderCustomerOperations(); renderAttention(); renderBidding(); switchView(currentView);
   }
 
   async function createTask(request) {
-    if (!publicSearchReady(selectedService, true)) {
+    let serviceId = selectedService;
+    if (["sales-review", "industry-research"].includes(serviceId) && $("task-readonly").checked) serviceId += "-readonly";
+    const structured = request.startsWith("[PRESENTATION_BRIEF]");
+    if (serviceId === "presentation-studio" && structured) {
+      const brief = JSON.parse(request.slice("[PRESENTATION_BRIEF]".length, -"[/PRESENTATION_BRIEF]".length).trim());
+      if (brief.mode === "quick" && brief.confidentiality === "internal" && brief.scene !== "government" && brief.source_scope === "profile-knowledge-only") serviceId = "presentation-studio-quick";
+    }
+    if (!publicSearchReady(serviceId, true)) {
       throw new Error(["error", "missing_token"].includes(model?.search_gateway?.status)
         ? "搜索聚合网关配置异常，请前往“设置 > 搜索聚合网关”修复或停用。"
         : model?.search_gateway?.restart_required
@@ -3277,12 +3815,12 @@
     }
     return api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: selectedProfile, service_id: selectedService, project_id: selectedProject, request: `${request}${selectedCustomerContextText()}`, ...taskRuntimeSelection() }),
+      body: JSON.stringify({ profile_id: selectedProfile, service_id: serviceId, project_id: selectedProject, request: structured ? request : `${request}${selectedCustomerContextText()}`, ...taskRuntimeSelection() }),
     });
   }
 
   function guidedRequest() {
-    const config = guidedServices[selectedService];
+    const config = guidedServices[selectedService.replace(/-readonly$/u, "")];
     if (!config) throw new Error("当前服务尚未配置引导表单。");
     const draft = guidedDrafts[selectedService] || {};
     config.fields.forEach((field) => {
@@ -3296,6 +3834,9 @@
     const notes = String(guidedNotes[selectedService] || "").trim();
     if (notes) lines.push(`补充说明：${notes}`);
     lines.push(`请执行：${config.instruction}`);
+    if (["sales-review", "industry-research", "sales-review-readonly", "industry-research-readonly"].includes(selectedService) && $("task-readonly").checked) {
+      lines.push("本次仅分析，不更新台账、不入库；直接交付结论与证据。需要保存时另行确认并建立写入任务。");
+    }
     return lines.join("\n");
   }
 
@@ -3325,9 +3866,14 @@
       audience: $("ppt-audience").value.trim() || "客户决策人和销售管理层",
       purpose: `推动${expectedDecision}`.slice(0, 180), occasion: occasions[scene], language: $("ppt-language").value,
       duration_minutes: duration, target_slides: pages, design_system: { token_id: $("ppt-style").value },
-      source_scope: "public-web-and-profile-knowledge", confidentiality: $("ppt-confidentiality").value,
+      source_scope: $("ppt-mode").value === "quick" && $("ppt-confidentiality").value === "internal" && scene !== "government" ? "profile-knowledge-only" : "public-web-and-profile-knowledge", confidentiality: $("ppt-confidentiality").value,
       expected_decision: expectedDecision, output_name: outputName,
     };
+  }
+
+  function updatePresentationSourcePolicy() {
+    const localOnly = $("ppt-mode").value === "quick" && $("ppt-confidentiality").value === "internal" && $("ppt-scene").value !== "government";
+    $("ppt-source-policy").textContent = localOnly ? "仅当前销售资料库；不检索网页；一次最终审批" : "公开网页 + 当前销售资料库；大纲与正式生成分别审批";
   }
 
   function weeklyBrief() {
@@ -3359,6 +3905,7 @@
     }
     if (currentView === "sales" && !customerState.loaded && !customerState.loading) loadCustomers();
     if (!customerState.attentionLoaded) loadAttention();
+    if (currentView === "home" && !customerState.recommendations.length && !customerState.recommendationsLoading) loadGlobalRecommendations();
   }
 
   $("create").onclick = async () => {
@@ -3400,6 +3947,103 @@
   $("customer-context-open").onclick = () => { if (customerState.selectedId) { switchView("sales"); $("customer-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }); } };
   $("global-customer-open").onclick = () => { if (customerState.selectedId) { switchView("sales"); $("customer-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }); } };
   $("refresh-attention").onclick = () => loadAttention({ force: true });
+  $("refresh-recommendations").onclick = () => loadGlobalRecommendations({ force: true });
+  $("quick-command-start").onclick = async () => {
+    const input = $("quick-command").value.trim();
+    if (!input) { note("请先输入希望完成的工作。", true); return; }
+    await matchPlayInput(input);
+  };
+  $("quick-command").addEventListener("keypress", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("quick-command-start").click();
+    }
+  });
+  $("close-play-matcher").onclick = () => {
+    $("play-matcher-panel").hidden = true;
+    $("quick-command").value = "";
+  };
+  async function matchPlayInput(userInput) {
+    const panel = $("play-matcher-panel");
+    const result = $("play-matcher-result");
+    panel.hidden = false;
+    result.innerHTML = '<div class="play-loading">正在识别工作意图…</div>';
+    try {
+      const accountId = customerState.selectedId || "";
+      const response = await api("/api/a4/match-play", {
+        method: "POST",
+        body: JSON.stringify({ user_input: userInput, account_id: accountId || null })
+      });
+      if (!response.success) throw new Error(response.error || "意图识别失败");
+      renderPlayResult(response.data, userInput);
+    } catch (error) {
+      result.innerHTML = `<div class="play-error">意图识别失败：${error.message}</div>`;
+    }
+  }
+  function renderPlayResult(data, userInput) {
+    const result = $("play-matcher-result");
+    if (data.status === "no_match") {
+      const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+      result.innerHTML = `
+        <div class="play-no-match">
+          <p>${data.message || "无法匹配到已知工作流程"}</p>
+          ${suggestions.length > 0 ? `
+            <p>您可以尝试：</p>
+            <ul>${suggestions.map(s => `<li>${s}</li>`).join("")}</ul>
+          ` : ""}
+        </div>
+      `;
+      return;
+    }
+    if (data.status === "need_more_info") {
+      const questions = Array.isArray(data.questions) ? data.questions : [];
+      result.innerHTML = `
+        <div class="play-need-info">
+          <h3>已匹配：${data.play || "未知流程"}</h3>
+          <p>请补充以下信息：</p>
+          ${questions.length > 0 ? `<ul>${questions.map(q => `<li>${q}</li>`).join("")}</ul>` : ""}
+        </div>
+      `;
+      return;
+    }
+    if (data.status === "ready") {
+      const signals = Array.isArray(data.signals) ? data.signals : [];
+      const recommendations = Array.isArray(data.recommendations) ? data.recommendations : [];
+      const estimatedDuration = data.execution_plan?.estimated_duration || "未知";
+      result.innerHTML = `
+        <div class="play-ready">
+          <h3>${data.play || "工作流程"}</h3>
+          <p>预计耗时：${estimatedDuration}</p>
+          ${signals.length > 0 ? `
+            <div class="play-context-signals">
+              <strong>检测到 ${signals.length} 个信号</strong>
+            </div>
+          ` : ""}
+          ${recommendations.length > 0 ? `
+            <div class="play-context-recs">
+              <strong>有 ${recommendations.length} 个待处理建议</strong>
+            </div>
+          ` : ""}
+          <button class="btn-start-workflow" data-play-id="${data.play_id || ""}">开始执行</button>
+        </div>
+      `;
+      result.querySelector(".btn-start-workflow")?.addEventListener("click", async () => {
+        const playId = data.play_id;
+        if (!playId) { note("工作流程标识缺失,无法启动。", true); return; }
+        const services = { sales_review: "sales-review", government_proposal: "government-proposal", industry_research: "industry-research", presentation: "presentation-studio", resource_coordination: "office-document" };
+        const service = services[playId];
+        if (!service) { note("此建议暂无可执行的受控服务，请从服务列表选择。", true); return; }
+        const button = result.querySelector(".btn-start-workflow");
+        button.disabled = true;
+        try {
+          await runQuickCommand(userInput, service);
+          $("play-matcher-panel").hidden = true;
+          $("quick-command").value = "";
+        } catch (error) { note(error.message, true); }
+        finally { button.disabled = false; }
+      });
+    }
+  }
   $("show-bid-form").onclick = () => { bidState.editingId = ""; $("create-bid").textContent = "创建并进入项目"; ["bid-name", "bid-buyer", "bid-number", "bid-deadline", "bid-summary"].forEach((id) => { $(id).value = ""; }); updateBidSelectors(); $("bid-create-panel").hidden = false; $("bid-name").focus(); };
   $("cancel-bid").onclick = () => { bidState.editingId = ""; $("create-bid").textContent = "创建并进入项目"; $("bid-create-panel").hidden = true; };
   $("create-bid").onclick = async () => {
@@ -3774,18 +4418,17 @@
     note("已带入公开调研主题；确认用途后即可开始。 ");
   };
 
-  async function runQuickCommand() {
-    const request = $("quick-command").value.trim();
+  async function runQuickCommand(suppliedRequest, forcedService) {
+    const request = String(suppliedRequest || $("quick-command").value).trim();
     if (!request) { note("请先写下希望助手完成的工作。", true); return; }
-    if (/周报|周五|周总结/u.test(request)) { $("weekly-focus").value = request.slice(0, 120); openService("weekly-deck"); return; }
-    if (/PPT|演示|汇报材料/u.test(request)) { $("ppt-topic").value = request.slice(0, 240); openService("presentation-studio"); return; }
-    const serviceId = /政府|园区|政策合作/u.test(request) ? "government-proposal" : /研究|行业|竞品|公开资料|调研/u.test(request) ? "industry-research" : /文件|方案|纪要|邮件/u.test(request) ? "office-document" : "sales-review";
+    if (!forcedService && /周报|周五|周总结/u.test(request)) { $("weekly-focus").value = request.slice(0, 120); openService("weekly-deck"); return; }
+    if (forcedService === "presentation-studio" || (!forcedService && /PPT|演示|汇报材料/u.test(request))) { $("ppt-topic").value = request.slice(0, 240); openService("presentation-studio"); return; }
+    const serviceId = forcedService || (/政府|园区|政策合作/u.test(request) ? "government-proposal" : /研究|行业|竞品|公开资料|调研/u.test(request) ? "industry-research" : /文件|方案|纪要|邮件/u.test(request) ? "office-document" : "sales-review");
+    $("task-readonly").checked = /只分析|仅分析|只读|不(?:要|需要)?(?:自动)?(?:更新|写入|入库|保存)/u.test(request) || !/更新台账|写入|入库|保存到/u.test(request);
     selectedService = serviceId;
     try { const response = await createTask(`【工作台快速指令】\n${request}\n请根据当前项目空间、资料库和销售台账补齐必要背景；涉及写入或正式文件时先等待审批。`); $("quick-command").value = ""; note(`任务已登记（${response.request_id}）。`); await load(); switchView("tasks"); }
     catch (error) { note(error.message, true); }
   }
-  $("quick-command-start").onclick = runQuickCommand;
-  $("quick-command").onkeydown = (event) => { if (event.key === "Enter") runQuickCommand(); };
 
   const presentationPresets = {
     customer: { audience: "客户业务负责人、技术负责人和决策人", decision: "确认方案范围、验证计划和下一步商务安排", scene: "custom", style: "management-report" },
@@ -3797,17 +4440,46 @@
       const preset = presentationPresets[button.dataset.pptPreset];
       $("ppt-audience").value = preset.audience; $("ppt-decision").value = preset.decision;
       $("ppt-scene").value = preset.scene; $("ppt-style").value = preset.style;
+      updatePresentationSourcePolicy();
       $("ppt-topic").focus();
     });
   });
 
   function modelPayload() {
     return {
+      provider_id: $("model-instance").value || null,
+      name: $("model-provider-name").value.trim(), vendor: $("model-vendor").value,
+      api: $("model-api").value,
       base_url: $("model-base-url").value.trim(),
       api_key: $("model-api-key").value.trim(),
       allow_private_network: $("model-private-network").checked,
     };
   }
+
+  ["ppt-mode", "ppt-confidentiality", "ppt-scene"].forEach((id) => $(id).addEventListener("change", updatePresentationSourcePolicy));
+
+  $("model-instance").onchange = () => fillProviderEditor($("model-instance").value);
+  $("add-model-provider").onclick = () => { fillProviderEditor(""); $("model-provider-name").focus(); };
+  $("model-select").onchange = () => { saveEditedCapabilities(); showEditedCapabilities(); };
+  $("model-enabled-ids").oninput = () => { saveEditedCapabilities(); refreshEditorModelOptions(editingModelId); };
+  $("enable-model").onclick = () => {
+    const id = $("model-select").value;
+    if (!id) return;
+    $("model-enabled-ids").value = [...new Set([...enabledModelIds(), id])].join("\n");
+    saveEditedCapabilities(); refreshEditorModelOptions(id);
+  };
+  $("model-vendor").onchange = () => {
+    if ($("model-instance").value) return;
+    const vendor = $("model-vendor").value;
+    $("model-endpoint-options").open = !["openai", "anthropic"].includes(vendor);
+    if (vendor === "openai") {
+      $("model-provider-name").value = "OpenAI"; $("model-base-url").value = "https://api.openai.com"; $("model-api").value = "openai-responses";
+    } else if (vendor === "anthropic") {
+      $("model-provider-name").value = "Anthropic"; $("model-base-url").value = "https://api.anthropic.com"; $("model-api").value = "anthropic-messages";
+    } else {
+      $("model-provider-name").value = vendor === "newapi" ? "NewAPI" : "自定义 API"; $("model-base-url").value = ""; $("model-api").value = "openai-completions";
+    }
+  };
 
   $("discover-models").onclick = async () => {
     const button = $("discover-models");
@@ -3818,27 +4490,38 @@
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(modelPayload()),
       });
       $("model-base-url").value = response.base_url;
-      populateModelOptions(response.models, model?.model?.selected_model || "");
+      saveEditedCapabilities();
+      discoveredModelOptions = response.models;
+      refreshEditorModelOptions(editingModelId);
       $("model-discovery-status").textContent = response.message;
     } catch (error) {
-      populateModelOptions([]);
-      $("model-discovery-status").textContent = error.message;
+      $("model-discovery-status").textContent = error.message + "；保留已配置目录，也可手动填写模型 ID。";
     } finally { button.disabled = false; }
   };
 
   $("save-model-settings").onclick = async () => {
     const selectedModel = $("model-select").value;
-    if (!selectedModel) { $("model-discovery-status").textContent = "请先获取并选择一个模型。"; return; }
+    if (!selectedModel) { $("model-discovery-status").textContent = "请先填写模型 ID，或发现后选择模型。"; return; }
+    saveEditedCapabilities();
+    const enabled = enabledModelIds();
+    if (!enabled.includes(selectedModel)) { $("model-discovery-status").textContent = "请将当前模型加入已启用列表。"; return; }
     const button = $("save-model-settings");
     button.disabled = true;
     $("model-discovery-status").textContent = "正在验证并保存模型配置…";
     try {
       const response = await api("/api/model-settings", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...modelPayload(), selected_model: selectedModel }),
+        body: JSON.stringify({ ...modelPayload(), selected_model: selectedModel,
+          models: enabled.map((id) => ({ ...(editingModels.get(id) || {}), id, enabled: true })),
+          discovered_models: [...new Map(discoveredModelOptions.map((item) => [item.id, { id: item.id, ...(item.owned_by ? { owned_by: item.owned_by } : {}) }])).values()].slice(0, 500),
+          enabled: $("model-provider-enabled").checked, make_default: $("model-make-default").checked,
+          role_models: Object.fromEntries([["director-research-scout", $("model-role-scout").value], ["director-readonly-reviewer", $("model-role-reviewer").value]].filter(([, value]) => value)),
+        }),
       });
       model.model = response;
       renderModelSettings(true);
+      renderProviderSettings(true);
+      renderTaskRuntimeOptions();
       $("model-settings-panel").open = true;
       $("model-discovery-status").textContent = response.message;
       note("模型已保存；关闭并重新打开销售总监智能工作台后，后续任务将使用新模型。");
@@ -3848,24 +4531,53 @@
     }
   };
 
+  $("save-provider-settings").onclick = () => saveProviderSettings();
+
+  $("detect-coding-assistants").onclick = async () => {
+    const button = $("detect-coding-assistants");
+    button.disabled = true;
+    button.textContent = "检测中…";
+    try {
+      await detectCodingAssistants();
+      button.textContent = "重新检测编码助手";
+      note("编码助手检测完成");
+    } catch (error) {
+      note(error.message, "error");
+      button.textContent = "重新检测编码助手";
+    } finally {
+      button.disabled = false;
+    }
+  };
+
+  document.querySelectorAll('input[name="provider-type"]').forEach((radio) => {
+    radio.addEventListener("change", () => {
+      const selected = radio.value;
+      $("claude-code-config").hidden = selected !== "claude-code";
+      $("codex-cli-config").hidden = selected !== "codex-cli";
+    });
+  });
+
   $("reset-model-settings").onclick = async () => {
+    const providerId = $("model-instance").value;
+    if (!providerId) return;
     if (!await confirmAction({
-      title: "恢复默认模型？",
-      message: "已保存的模型网关密钥会从本机删除，关闭并重新打开应用后生效。",
-      confirmText: "恢复默认模型",
+      title: "移除此供应商？",
+      message: `将删除“${$("model-provider-name").value}”的本机配置和凭据，其他供应商不变。旧任务不会自动切换到其他模型。重启后生效。`,
+      confirmText: "移除此供应商",
       tone: "danger",
     })) return;
     const button = $("reset-model-settings");
     button.disabled = true;
     try {
       const response = await api("/api/model-settings/reset", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider_id: providerId }),
       });
       model.model = response;
       renderModelSettings(true);
+      renderProviderSettings(true); renderTaskRuntimeOptions();
       $("model-settings-panel").open = true;
       $("model-discovery-status").textContent = response.message;
-      note("已恢复默认模型；关闭并重新打开销售总监智能工作台后生效。");
+      note("所选供应商配置和凭据已移除；请确认默认模型并重启应用。");
     } catch (error) {
       $("model-discovery-status").textContent = error.message;
     } finally { button.disabled = false; }
@@ -4116,7 +4828,165 @@
   const reimbursementStart = new Date(); reimbursementStart.setDate(reimbursementToday.getDate() - 30);
   $("expense-mail-from").value = formatDate(reimbursementStart);
   $("expense-mail-to").value = formatDate(reimbursementToday);
+
+  async function loadAssistantStatus() {
+    try {
+      const response = await fetch("/api/coding-agent/doctor");
+      const data = await response.json();
+      const badge = $("assistant-status");
+      if (data.integration_ready && data.workbench.ready) {
+        badge.textContent = "集成就绪";
+        badge.className = "period-badge success";
+      } else {
+        badge.textContent = "集成异常";
+        badge.className = "period-badge error";
+      }
+    } catch (error) {
+      $("assistant-status").textContent = "连接失败";
+      $("assistant-status").className = "period-badge error";
+    }
+  }
+
+  function addAssistantMessage(role, content, actions) {
+    const conversation = $("assistant-conversation");
+    const welcome = conversation.querySelector(".assistant-welcome");
+    if (welcome) welcome.remove();
+    const message = document.createElement("div");
+    message.className = `assistant-message ${role}`;
+    const avatar = document.createElement("div");
+    avatar.className = "assistant-message-avatar";
+    avatar.textContent = role === "user" ? "你" : "AI";
+    const messageContent = document.createElement("div");
+    messageContent.className = "assistant-message-content";
+    messageContent.innerHTML = content.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/`(.*?)`/g, "<code>$1</code>").replace(/\n/g, "<br>");
+    if (actions && actions.length > 0) {
+      const actionsDiv = document.createElement("div");
+      actionsDiv.className = "assistant-message-actions";
+      actions.forEach(action => {
+        const btn = document.createElement("button");
+        btn.className = action.primary ? "primary small" : "secondary small";
+        btn.textContent = action.label;
+        btn.onclick = () => handleAssistantAction(action);
+        actionsDiv.appendChild(btn);
+      });
+      messageContent.appendChild(actionsDiv);
+    }
+    message.appendChild(avatar);
+    message.appendChild(messageContent);
+    conversation.appendChild(message);
+    conversation.scrollTop = conversation.scrollHeight;
+    assistantState.messages.push({ role, content, actions, timestamp: Date.now() });
+  }
+
+  function showAssistantTyping() {
+    const conversation = $("assistant-conversation");
+    const typing = document.createElement("div");
+    typing.id = "assistant-typing-indicator";
+    typing.className = "assistant-message assistant";
+    typing.innerHTML = `<div class="assistant-message-avatar">AI</div><div class="assistant-message-content"><div class="assistant-typing"><span></span><span></span><span></span></div></div>`;
+    conversation.appendChild(typing);
+    conversation.scrollTop = conversation.scrollHeight;
+  }
+
+  function hideAssistantTyping() {
+    const typing = $("assistant-typing-indicator");
+    if (typing) typing.remove();
+  }
+
+  async function handleAssistantAction(action) {
+    switch (action.type) {
+      case "create_task":
+        showAssistantTyping();
+        try {
+          const response = await fetch("/api/coding-agent/submit", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(action.params),
+          });
+          const data = await response.json();
+          hideAssistantTyping();
+          if (data.status === "ok") {
+            addAssistantMessage("assistant", `✓ 任务已创建: ${data.task.task_id}\n状态: ${data.task.display_status}`, [
+              { type: "view_task", label: "查看任务详情", task_id: data.task.task_id },
+              { type: "supplement", label: "补充信息", task_id: data.task.task_id },
+            ]);
+            assistantState.currentTaskId = data.task.task_id;
+          } else {
+            addAssistantMessage("assistant", `创建失败：${data.error}`);
+          }
+        } catch (error) {
+          hideAssistantTyping();
+          addAssistantMessage("assistant", `网络错误：${error.message}`);
+        }
+        break;
+      case "view_task":
+        switchView("tasks");
+        const taskCard = document.querySelector(`[data-task-id="${action.task_id}"]`);
+        if (taskCard) taskCard.scrollIntoView({ behavior: "smooth", block: "center" });
+        break;
+      case "supplement":
+        $("assistant-input").value = `补充信息：`;
+        $("assistant-input").focus();
+        break;
+    }
+  }
+
+  $("assistant-send")?.addEventListener("click", async () => {
+    const input = $("assistant-input");
+    const userMessage = input.value.trim();
+    if (!userMessage) return;
+    addAssistantMessage("user", userMessage);
+    input.value = "";
+    input.style.height = "60px";
+    showAssistantTyping();
+    try {
+      const response = await fetch("/api/coding-agent/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userMessage, context: assistantState }),
+      });
+      const data = await response.json();
+      hideAssistantTyping();
+      if (data.status === "ok") {
+        addAssistantMessage("assistant", data.reply, data.actions);
+        if (data.task_id) assistantState.currentTaskId = data.task_id;
+      } else {
+        addAssistantMessage("assistant", `处理失败：${data.error}`, null);
+      }
+    } catch (error) {
+      hideAssistantTyping();
+      addAssistantMessage("assistant", `网络错误：${error.message}`, null);
+    }
+  });
+
+  $("assistant-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      $("assistant-send").click();
+    }
+  });
+
+  document.querySelectorAll(".assistant-shortcut").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const shortcut = btn.dataset.shortcut;
+      switch (shortcut) {
+        case "status":
+          $("assistant-input").value = "查看最近任务状态";
+          $("assistant-send").click();
+          break;
+        case "services":
+          $("assistant-input").value = "列出所有可用服务";
+          $("assistant-send").click();
+          break;
+        case "help":
+          addAssistantMessage("assistant", `<strong>使用帮助</strong><br><br>你可以用自然语言描述需求，助手会自动：<br>1. 匹配合适的服务<br>2. 提取关键信息<br>3. 创建任务<br>4. 跟踪进展<br><br><strong>示例：</strong><br>• "研究华为的云计算战略"<br>• "为某区政府准备智慧城市方案"<br>• "生成本周销售简报"<br><br>需要审批的操作（写入台账、生成正式文件）仍在任务中心确认。`);
+          break;
+      }
+    });
+  });
+
   localizeStaticInterface();
+  detectCodingAssistants().catch(() => {});
   load().catch((error) => note(`无法读取工作台：${error.message}`, true));
   setInterval(() => load().catch(() => {}), 3000);
 })();

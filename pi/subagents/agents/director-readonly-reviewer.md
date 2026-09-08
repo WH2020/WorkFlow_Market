@@ -3,6 +3,7 @@ name: director-readonly-reviewer
 description: 对受管销售或政府方案进行独立只读复核，不编辑文件或批准业务承诺
 tools:
 extensions:
+subagentOnlyExtensions: ./pi/extensions/subagent-model-guard.ts
 systemPromptMode: replace
 inheritProjectContext: false
 inheritSkills: false
@@ -25,4 +26,3 @@ maxSubagentDepth: 1
 2. 重要改进：按影响排序。
 3. 证据缺口：列出需要补证或确认的内容。
 4. 复核结论：仅可写“可进入主 Agent 校验”或“退回补充”，不得代替用户批准。
-

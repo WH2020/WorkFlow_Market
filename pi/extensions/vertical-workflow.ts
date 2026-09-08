@@ -16,6 +16,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { assertDeckMatchesEvidenceContext, registerDataAdapters } from "./data-adapters.ts";
+import { managedModelCatalog, modelRecipient, runtimeModelRecipient, sameRecipient, taskScopedMessages, taskCheckpoint, frozenRoleConfiguration } from "./model-selection.ts";
+import type { ModelRecipient } from "./model-selection.ts";
+import { assertQuickPresentationRequest, routeNewServiceId } from "./service-routing.ts";
 import { assertBidDocumentPayload } from "./document-artifact.ts";
 import { openBusinessStore, resolveBusinessBackend } from "./business-backend.ts";
 import { openBiddingStore } from "./bid-store.ts";
@@ -156,6 +159,7 @@ type AgentRuntimeLease = {
   task_id: string | null;
   task_status: WorkflowTask["status"] | null;
   heartbeat_at: string;
+  model_error?: string;
 };
 
 const TASK_PROGRESS_PHASES = new Set([
@@ -817,6 +821,7 @@ export function buildGovernedSubagentLaunchForTests(input: {
   const context = role === "readonly-reviewer" ? "fork" : "fresh";
   const allowedToolNames = childToolNames(input.node.boundary.allowed_tools);
   const task = [
+    `[DIRECTOR_TASK_CONTEXT ${input.taskId}]`,
     `受管任务：${input.taskId}`,
     `受管节点：${input.node.id}`,
     `contract_id：${input.contractId}`,
@@ -846,6 +851,12 @@ export function validateGovernedSubagentResultForTests(
     throw new Error("Governed Subagent must return exactly one foreground child result");
   }
   const result = value.results[0] as Record<string, unknown>;
+  const normalizeModel = (model: unknown) => model === contract.expected_model ? model : typeof model === "string" ? model.replace(/:(?:off|minimal|low|medium|high|xhigh|max)$/u, "") : undefined;
+  if (contract.expected_model && (normalizeModel(result.model) !== contract.expected_model ||
+      (Array.isArray(result.modelAttempts) && result.modelAttempts.some((attempt: { model?: unknown }) =>
+        normalizeModel(attempt.model) !== contract.expected_model)))) {
+    throw new Error("Subagent result model differs from its frozen contract; fallback is not authorized");
+  }
   if (
     result.agent !== pending.agent ||
     result.context !== pending.context ||
@@ -894,6 +905,7 @@ export function buildGovernedSubagentToolInputForTests(input: {
   context: "fresh" | "fork";
   role: GovernedSubagentRole;
   maxTurns: number;
+  model?: string;
 }): Record<string, unknown> {
   return {
     agent: input.agent,
@@ -908,6 +920,7 @@ export function buildGovernedSubagentToolInputForTests(input: {
     acceptance: { level: "none", reason: "受管只读节点由主 Agent DAG 和本地证据回执验收" },
     suppressRoutineResultIntercom: true,
     share: false,
+    ...(input.model ? { model: input.model } : {}),
     ...(input.role === "research-scout"
       ? {
           toolTimeoutMs: 120_000,
@@ -961,7 +974,7 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
   const safe = (candidate: unknown) => typeof candidate === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(candidate);
   const safeWorkflow = (candidate: unknown) => typeof candidate === "string" && /^[A-Za-z0-9_.-]{1,160}$/.test(candidate);
   const safeModel = (candidate: unknown) =>
-    typeof candidate === "string" && candidate.length <= 300 && /^agent4market-newapi\/[^\s\u0000-\u001f\u007f]+$/u.test(candidate);
+    typeof candidate === "string" && candidate.length <= 300 && /^agent4market-[a-z0-9-]{1,64}\/[^\s\u0000-\u001f\u007f]+$/u.test(candidate);
   const thinkingLevels = new Set<TaskThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   if (
     request.schema_version !== "1.0" ||
@@ -998,6 +1011,7 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
   ) {
     throw new Error("工作台请求字段无效或与文件名不一致");
   }
+  if (request.service_id === "presentation-studio-quick") assertQuickPresentationRequest(request.request!);
   return request as WorkbenchRequest;
 }
 
@@ -1009,7 +1023,7 @@ function isWorkflowTask(value: unknown): value is WorkflowTask {
     typeof candidate === "string" && candidate.length <= 300 && /^[^\s\u0000-\u001f\u007f]+\/.+$/u.test(candidate)
   );
   const optionalRequestedModel = (candidate: unknown) => candidate === undefined || (
-    typeof candidate === "string" && candidate.length <= 300 && /^agent4market-newapi\/[^\s\u0000-\u001f\u007f]+$/u.test(candidate)
+    typeof candidate === "string" && candidate.length <= 300 && /^agent4market-[a-z0-9-]{1,64}\/[^\s\u0000-\u001f\u007f]+$/u.test(candidate)
   );
   const optionalThinking = (candidate: unknown) => candidate === undefined || thinkingLevels.has(candidate as TaskThinkingLevel);
   return (
@@ -1070,6 +1084,9 @@ function sameExternalDecisionBase(memory: WorkflowTask, disk: WorkflowTask): boo
     requested_model: task.requested_model,
     requested_thinking_level: task.requested_thinking_level,
     effective_model: task.effective_model,
+    effective_recipient: task.effective_recipient,
+    role_models: task.role_models,
+    role_recipients: task.role_recipients,
     effective_thinking_level: task.effective_thinking_level,
     status: task.status,
     completed_nodes: task.completed_nodes,
@@ -1212,31 +1229,26 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   let defaultRuntimeModel: RuntimePiModel | undefined;
   let defaultThinkingLevel: TaskThinkingLevel = "off";
   let scopedModelKeys = new Set<string>();
+  let sensitiveRecipient: ModelRecipient | undefined;
+  let unboundSensitiveHistory = false;
+  let modelBoundaryError: string | undefined;
+  let runtimeIsIdle = () => true;
   const pendingSubagentCalls = new Map<string, PendingGovernedSubagent>();
   const inFlightSubagentNodes = new Set<string>();
 
   const modelKey = (model: RuntimePiModel | undefined): string | undefined =>
     model ? `${model.provider}/${model.id}` : undefined;
 
-  const enrichedRuntimeModel = (target: RuntimePiModel): RuntimePiModel => {
-    if (target.reasoning || !runtimeModelRegistry) return target;
-    const peer = runtimeModelRegistry.getAll().find((candidate) =>
-      candidate.provider !== target.provider && candidate.id === target.id && candidate.reasoning,
-    );
-    if (!peer) return target;
-    return {
-      ...target,
-      reasoning: peer.reasoning,
-      input: peer.input,
-      contextWindow: peer.contextWindow,
-      maxTokens: peer.maxTokens,
-      ...(peer.thinkingLevelMap ? { thinkingLevelMap: peer.thinkingLevelMap } : {}),
-      ...(peer.compat ? { compat: { ...peer.compat, ...(target.compat ?? {}) } } : {}),
-    };
-  };
-
   const resolveRequestedModel = (requestedModel: string | undefined): RuntimePiModel | undefined => {
-    if (!requestedModel) return defaultRuntimeModel ? enrichedRuntimeModel(defaultRuntimeModel) : undefined;
+    if (unboundSensitiveHistory) throw new Error("旧会话含未绑定接收方的微信内容，请新建 AI 核心会话并重新授权");
+    if (process.env.AGENT4MARKET_MODEL_ERROR) throw new Error(process.env.AGENT4MARKET_MODEL_ERROR);
+    const key = requestedModel ?? modelKey(defaultRuntimeModel);
+    const catalog = managedModelCatalog();
+    if (catalog && (!key || !catalog[key])) throw new Error("模型已停用、缺少凭据或配置尚未重启生效；不会自动切换供应商");
+    if (sensitiveRecipient && !sameRecipient(sensitiveRecipient, modelRecipient(key))) {
+      throw new Error("此会话已处理绑定接收方的微信内容；请新建 AI 核心会话后再切换模型");
+    }
+    if (!requestedModel) return defaultRuntimeModel;
     if (!runtimeModelRegistry) throw new Error("Pi 模型目录尚未就绪");
     if (scopedModelKeys.size > 0 && !scopedModelKeys.has(requestedModel)) {
       throw new Error(`模型 ${requestedModel} 不在当前会话允许范围内`);
@@ -1246,20 +1258,33 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     const modelId = requestedModel.slice(separator + 1);
     const target = runtimeModelRegistry.find(provider, modelId);
     if (!target) throw new Error(`模型 ${requestedModel} 未安装或当前不可用`);
-    return enrichedRuntimeModel(target);
+    if (catalog && !sameRecipient(catalog[requestedModel], runtimeModelRecipient(target))) {
+      throw new Error("Pi 模型目录的实际接收地址或协议与已配置实例不一致，请重启修复");
+    }
+    return target;
   };
 
   const applyTaskRuntimeSelection = async (selection: {
     requested_model?: string;
     requested_thinking_level?: TaskThinkingLevel;
+    effective_recipient?: ModelRecipient;
+    require_bound_recipient?: boolean;
   }): Promise<{
     effective_model?: string;
+    effective_recipient?: ModelRecipient;
     effective_thinking_level: TaskThinkingLevel;
     rollback: () => Promise<void>;
   }> => {
     const previousModel = currentRuntimeModel;
+    if (selection.require_bound_recipient && managedModelCatalog() && !selection.effective_recipient) {
+      throw new Error("旧任务未记录模型接收地址，不能自动恢复；原审批和产物已保留，请明确重启该任务");
+    }
     const previousThinking = pi.getThinkingLevel() as TaskThinkingLevel;
     const target = resolveRequestedModel(selection.requested_model);
+    const recipient = modelRecipient(modelKey(target));
+    if (selection.effective_recipient && !sameRecipient(selection.effective_recipient, recipient)) {
+      throw new Error("任务冻结的模型接收方已变化，请恢复原供应商；不会改用其他地址");
+    }
     const requestedThinking = selection.requested_thinking_level ?? defaultThinkingLevel;
     try {
       if (target) {
@@ -1273,6 +1298,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       const effectiveThinking = pi.getThinkingLevel() as TaskThinkingLevel;
       return {
         ...(modelKey(currentRuntimeModel) ? { effective_model: modelKey(currentRuntimeModel) } : {}),
+        ...(recipient ? { effective_recipient: recipient } : {}),
         effective_thinking_level: effectiveThinking,
         rollback: async () => {
           if (previousModel) await pi.setModel(previousModel);
@@ -1301,6 +1327,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       session_key: sessionKey,
       task_id: task?.task_id ?? null,
       task_status: task?.status ?? null,
+      ...(modelBoundaryError ? { model_error: modelBoundaryError.slice(0, 500) } : {}),
       heartbeat_at: new Date().toISOString(),
     });
   };
@@ -1399,8 +1426,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow, recoveryNote = "") => {
     pi.sendUserMessage(
-      `/skill:${service.skill} ${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护资料库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
-      { expandPromptTemplates: true },
+      `/skill:${service.skill} [DIRECTOR_TASK_CONTEXT ${task.task_id}]\n${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护资料库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
+      { expandPromptTemplates: true, deliverAs: "followUp" },
     );
   };
 
@@ -1458,7 +1485,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   };
 
   const consumeWorkbenchRequest = async (): Promise<WorkflowTask | undefined> => {
-    if (requestPollBusy || profileSwitchQueued || (activeTask && !isTerminal(activeTask))) return;
+    if (!runtimeIsIdle() || requestPollBusy || profileSwitchQueued || (activeTask && !isTerminal(activeTask))) return;
     requestPollBusy = true;
     try {
       const requestRoot = resolve(projectRoot, ".pi", "director-runtime", "requests");
@@ -1556,6 +1583,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           ? {
               requested_model: existing.effective_model ?? existing.requested_model,
               requested_thinking_level: existing.effective_thinking_level ?? existing.requested_thinking_level,
+              effective_recipient: existing.effective_recipient,
+              require_bound_recipient: true,
             }
           : request);
         let task: WorkflowTask;
@@ -1574,6 +1603,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             requestedModel: request.requested_model,
             requestedThinkingLevel: request.requested_thinking_level,
             effectiveModel: applied.effective_model,
+            effectiveRecipient: applied.effective_recipient,
+            ...frozenRoleConfiguration(),
             effectiveThinkingLevel: applied.effective_thinking_level,
           });
           if (!existing) persistNew(task);
@@ -1619,6 +1650,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     const workflow = workflowFor(disk);
     const next = consumeApprovalRequest(disk, workflow as RuntimeWorkflow);
     persistTransition(disk, next);
+    if (isTerminal(next)) modelBoundaryError = undefined;
     return next;
   };
 
@@ -1662,6 +1694,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           const applied = await applyTaskRuntimeSelection({
             requested_model: next.effective_model ?? next.requested_model,
             requested_thinking_level: next.effective_thinking_level ?? next.requested_thinking_level,
+            effective_recipient: next.effective_recipient,
+            require_bound_recipient: true,
           });
           try {
             persistTransition(task, next);
@@ -1689,7 +1723,12 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         const service = activeProfile.services.find((item) => item.id === task.service_id);
         if (!service || service.workflow !== workflow.id) continue;
         const next = consumeResumeRequest(task, workflow as RuntimeWorkflow, sessionKey);
-        taskStore.save(next, task.version);
+        const applied = await applyTaskRuntimeSelection({
+          requested_model: next.effective_model ?? next.requested_model,
+          requested_thinking_level: next.effective_thinking_level ?? next.requested_thinking_level,
+          effective_recipient: next.effective_recipient, require_bound_recipient: true,
+        });
+        try { taskStore.save(next, task.version); } catch (error) { await applied.rollback(); throw error; }
         activeTask = next;
         pi.appendEntry("director-task-state", next);
         updateRuntimeLease();
@@ -1725,6 +1764,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   const requireLogicalTool = (logicalTool: string): { state: WorkflowTask; workflow: Workflow } => {
     consumeExternalDecision();
+    assertRuntimeModelBoundary();
     if (!activeTask || isTerminal(activeTask)) throw new Error("当前会话没有运行中的受管任务");
     if (activeTask.status === "waiting_approval") throw new Error("任务正在等待用户审批");
     const workflow = workflowFor(activeTask);
@@ -1741,6 +1781,12 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     projectRoot: () => projectRoot,
     beforeLogicalTool: (logicalTool, params) => {
       const { state, workflow } = requireLogicalTool(logicalTool);
+      if (state.workflow_id === "shared.presentation.studio-quick-v2" && logicalTool === "presentation.plan.write") {
+        const plan = params as { mode?: string; scene?: string; brief?: { confidentiality?: string } };
+        if (plan.mode !== "quick" || plan.brief?.confidentiality !== "internal" || plan.scene === "government") {
+          throw new Error("快速 PPT 的策划必须保持内部、非政府的 quick 范围；扩大范围请新建标准任务");
+        }
+      }
       const authorizedUrls = authorizedUrlsFromRequest(state.request);
       if (
         logicalTool === "knowledge.write" || logicalTool === "sales.write" || logicalTool === "bid.write" ||
@@ -1794,10 +1840,15 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         project_id: state.project_id,
         authorized_urls: authorizedUrls,
         authorized_wechat_scopes: authorizedWechatScopesFromRequest(state.request),
+        model_recipient: modelRecipient(state.effective_model),
       };
     },
     afterLogicalTool: (logicalTool, params, details) => {
       const { state, workflow } = requireLogicalTool(logicalTool);
+      if (logicalTool === "wechat.read") {
+        sensitiveRecipient = modelRecipient(state.effective_model);
+        pi.appendEntry("director-sensitive-recipient", sensitiveRecipient);
+      }
       const artifactNote = (logicalTool === "artifact.deck.write" || logicalTool === "artifact.document.write") && details && typeof details === "object"
         ? JSON.stringify({
             path: (details as Record<string, unknown>).path,
@@ -1868,6 +1919,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     runtimeLeaseNonce = randomUUID();
     profileSwitchQueued = false;
     projectRoot = resolve(ctx.cwd);
+    runtimeIsIdle = () => typeof ctx.isIdle !== "function" || ctx.isIdle();
     runtimeModelRegistry = ctx.modelRegistry;
     currentRuntimeModel = ctx.model;
     defaultRuntimeModel = ctx.model;
@@ -1878,6 +1930,13 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     cleanupExpiredSubagentContracts(projectRoot);
     taskStore = new TaskStore(projectRoot);
     const entries = ctx.sessionManager.getEntries() as StoredEntry[];
+    sensitiveRecipient = [...entries].reverse().find((entry) =>
+      entry.type === "custom" && entry.customType === "director-sensitive-recipient")?.data as ModelRecipient | undefined;
+    modelBoundaryError = undefined;
+    unboundSensitiveHistory = !sensitiveRecipient && entries.some((entry) => {
+      const message = (entry as StoredEntry & { message?: { role?: string; toolName?: string } }).message;
+      return message?.role === "toolResult" && message.toolName === "director_wechat_read";
+    });
     const storedSessionKey = [...entries]
       .reverse()
       .find((entry) => entry.type === "custom" && entry.customType === "director-session-key")?.data;
@@ -1924,15 +1983,23 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       if (!recoveredProfile) throw new Error(`Recovered task references unknown Profile ${activeTask.profile_id}`);
       activeProfile = recoveredProfile;
       process.env.WORKFLOW_AGENT_PROFILE = recoveredProfile.id;
-      await applyTaskRuntimeSelection({
-        requested_model: activeTask.effective_model ?? activeTask.requested_model,
-        requested_thinking_level: activeTask.effective_thinking_level ?? activeTask.requested_thinking_level,
-      });
+      try {
+        await applyTaskRuntimeSelection({
+          requested_model: activeTask.effective_model ?? activeTask.requested_model,
+          requested_thinking_level: activeTask.effective_thinking_level ?? activeTask.requested_thinking_level,
+          effective_recipient: activeTask.effective_recipient,
+          require_bound_recipient: true,
+        });
+      } catch (error) {
+        // Keep cancellation/restart controls alive without sending an unbound historical task.
+        modelBoundaryError = (error as Error).message;
+        try { ctx.ui.notify(modelBoundaryError, "error"); } catch { /* Lease also reports the error. */ }
+      }
     }
     updateRuntimeLease();
     const taskStatus = activeTask && !isTerminal(activeTask) ? `｜任务：${activeTask.status}` : "";
     ctx.ui.setStatus("vertical-workflow", `角色：${activeProfile.display_name}${taskStatus}`);
-    if (recoveredAcrossSession && activeTask && !isTerminal(activeTask)) {
+    if (recoveredAcrossSession && activeTask && !isTerminal(activeTask) && !modelBoundaryError) {
       const service = activeProfile.services.find((item) => item.id === activeTask!.service_id);
       const workflow = workflows.get(activeTask.workflow_id);
       if (!service || !workflow || service.workflow !== workflow.id) {
@@ -1983,6 +2050,73 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event) => ({
     systemPrompt: `${event.systemPrompt}\n\n${profileContext(activeProfile)}`,
   }));
+
+  pi.on("model_select", (event) => { currentRuntimeModel = event.model; });
+  const assertRuntimeModelBoundary = () => {
+    if (unboundSensitiveHistory) throw new Error("旧会话含未绑定接收方的微信内容，请新建 AI 核心会话并重新授权");
+    if (process.env.AGENT4MARKET_MODEL_ERROR) throw new Error(process.env.AGENT4MARKET_MODEL_ERROR);
+    const currentKey = modelKey(currentRuntimeModel);
+    const catalog = managedModelCatalog();
+    if (catalog && (!currentKey || !sameRecipient(catalog[currentKey], runtimeModelRecipient(currentRuntimeModel)))) {
+      throw new Error("当前模型的接收方与受管配置不一致");
+    }
+    if (sensitiveRecipient && !sameRecipient(sensitiveRecipient, modelRecipient(currentKey))) {
+      throw new Error("微信会话接收方与当前模型不一致；未发送会话内容");
+    }
+    if (activeTask && catalog) {
+      if (activeTask.effective_model !== currentKey) throw new Error("任务模型已冻结，请勿在执行中切换模型");
+      if (!sameRecipient(activeTask.effective_recipient, catalog[currentKey!])) {
+        throw new Error("任务冻结接收方与运行配置不一致");
+      }
+    }
+  };
+  pi.on("context", (event, ctx) => {
+    try {
+      assertRuntimeModelBoundary();
+      const messages = activeTask && managedModelCatalog() ? taskScopedMessages(event.messages, activeTask.task_id, {
+        entries: ctx.sessionManager.buildContextEntries(), model: activeTask.effective_model, recipient: activeTask.effective_recipient,
+        taskVersion: activeTask.version,
+      }) : event.messages;
+      modelBoundaryError = undefined;
+      return { messages };
+    } catch (error) {
+      // Pi catches extension exceptions and otherwise keeps the original messages.
+      // Abort explicitly AND redact the context, including if cancellation is delayed.
+      modelBoundaryError = (error as Error).message;
+      try { ctx.abort(); } catch { /* Returning an empty context remains mandatory. */ }
+      try { ctx.ui.notify(modelBoundaryError, "error"); } catch { /* UI failure must not restore private context. */ }
+      return { messages: [] };
+    }
+  });
+  pi.on("before_provider_request", (_event, ctx) => {
+    try {
+      if (modelBoundaryError) throw new Error(modelBoundaryError);
+      assertRuntimeModelBoundary();
+    } catch (error) {
+      modelBoundaryError = (error as Error).message;
+      try { ctx.abort(); } catch { /* Never retain the original payload on failure. */ }
+      return {};
+    }
+  });
+  pi.on("session_before_compact", (event, ctx) => {
+    try {
+      if (!managedModelCatalog() && !sensitiveRecipient && !unboundSensitiveHistory) return;
+      assertRuntimeModelBoundary();
+      if (!activeTask) return { cancel: true };
+      return { compaction: { ...taskCheckpoint(activeTask), firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore } };
+    } catch {
+      try { ctx.abort(); } catch { /* The cancel result must survive a broken UI/abort hook. */ }
+      return { cancel: true };
+    }
+  });
+  pi.on("session_before_tree", () => {
+    try {
+      if (managedModelCatalog() || sensitiveRecipient || unboundSensitiveHistory || (activeTask && !isTerminal(activeTask))) {
+        return { cancel: true };
+      }
+    } catch { return { cancel: true }; }
+  });
 
   pi.registerTool({
     name: "get_vertical_workflow_plan",
@@ -2149,6 +2283,20 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       let createdContractId: string | undefined;
       try {
         const role = subagentRoleForNode(node);
+        const selected = activeTask.role_models?.[SUBAGENT_AGENT_NAMES[role]] || activeTask.effective_model;
+        const parent = modelRecipient(activeTask.effective_model);
+        const child = modelRecipient(selected);
+        if (managedModelCatalog() && !child) throw new Error("只读角色模型不可用；请检查配置并重启");
+        const frozenChild = activeTask.role_models?.[SUBAGENT_AGENT_NAMES[role]]
+          ? activeTask.role_recipients?.[SUBAGENT_AGENT_NAMES[role]] : activeTask.effective_recipient;
+        if (managedModelCatalog() && !sameRecipient(frozenChild, child)) throw new Error("只读角色接收方与任务创建时的授权不一致");
+        if (sensitiveRecipient && !sameRecipient(sensitiveRecipient, child)) {
+          throw new Error("只读角色模型不在本会话微信授权接收方内");
+        }
+        if (role === "readonly-reviewer" && parent && child &&
+            (parent.provider_id !== child.provider_id || parent.base_url !== child.base_url || parent.api !== child.api)) {
+          throw new Error("分叉复核会读取父会话，只能使用同一供应商与端点的模型");
+        }
         const contract = createGovernedSubagentContract(projectRoot, {
           task_id: activeTask.task_id,
           profile_id: activeTask.profile_id,
@@ -2156,6 +2304,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           task_version: activeTask.version,
           role,
           objective: node.boundary.objective,
+          ...(selected ? { expected_model: selected } : {}),
+          ...(child ? { model_recipient: child } : {}),
           allowed_tools: node.boundary.allowed_tools,
           authorized_urls: authorizedUrlsFromRequest(activeTask.request),
         });
@@ -2180,15 +2330,16 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           task_prompt: launch.task,
           allowed_tool_names: launch.allowedToolNames,
         };
-        pendingSubagentCalls.set(event.toolCallId, pending);
-        inFlightSubagentNodes.add(nodeKey);
         const controlledInput = buildGovernedSubagentToolInputForTests({
           agent: launch.agent,
           task: launch.task,
           context: launch.context,
           role,
           maxTurns: node.boundary.max_turns,
+          model: selected,
         });
+        pendingSubagentCalls.set(event.toolCallId, pending);
+        inFlightSubagentNodes.add(nodeKey);
         replaceToolInput(event.input as Record<string, unknown>, controlledInput);
         return;
       } catch (error) {
@@ -2414,7 +2565,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       const separator = trimmed.indexOf(" ");
       const serviceId = separator < 0 ? trimmed : trimmed.slice(0, separator);
       let request = separator < 0 ? "" : trimmed.slice(separator + 1).trim();
-      const service = activeProfile.services.find((item) => item.id === serviceId);
+      let service = activeProfile.services.find((item) => item.id === serviceId);
       if (!service) {
         ctx.ui.notify(
           `请先给出有效服务 ID。可用服务：${activeProfile.services.map((item) => item.id).join(", ")}`,
@@ -2429,6 +2580,15 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         ctx.ui.notify("任务内容不能为空。", "error");
         return;
       }
+      try {
+        const routedId = routeNewServiceId(service.id, request);
+        service = activeProfile.services.find((item) => item.id === routedId);
+        if (!service) throw new Error("当前角色未安装该任务路径");
+        resolveRequestedModel(modelKey(currentRuntimeModel));
+      } catch (error) {
+        ctx.ui.notify((error as Error).message, "error");
+        return;
+      }
       const workflow = workflows.get(service.workflow);
       if (!workflow) {
         ctx.ui.notify(`工作流未安装：${service.workflow}`, "error");
@@ -2441,6 +2601,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         workflow: workflow as RuntimeWorkflow,
         request,
         effectiveModel: modelKey(currentRuntimeModel),
+        effectiveRecipient: modelRecipient(modelKey(currentRuntimeModel)),
+        ...frozenRoleConfiguration(),
         effectiveThinkingLevel: pi.getThinkingLevel() as TaskThinkingLevel,
       });
       try {

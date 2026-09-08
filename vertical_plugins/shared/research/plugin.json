@@ -11,6 +11,7 @@
   "workflows": [
     "workflows/frontier-research.json",
     "workflows/frontier-research-subagent.json",
+    "workflows/frontier-readonly-v2.json",
     "workflows/pdf-import.json"
   ]
 }

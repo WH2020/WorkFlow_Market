@@ -303,12 +303,15 @@ def launch_pi(
     except SearchGatewayError as error:
         raise RuntimeError(f"Search gateway configuration is invalid: {error}") from error
     try:
-        model_runtime = model_runtime_configuration(root)
-    except (ModelProviderError, OSError):
+        model_runtime = model_runtime_configuration(root, environ=environment)
+    except (ModelProviderError, OSError) as error:
         # Keep the workbench reachable so the user can repair an invalid local model setting.
+        environment["AGENT4MARKET_MODEL_ERROR"] = str(error)
         model_runtime = None
     if model_runtime is not None:
         selected_model, model_environment = model_runtime
+        for key in ("AGENT4MARKET_MODEL_ERROR", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE", "AGENT4MARKET_MANAGED_MODELS_SHA256"):
+            environment.pop(key, None)
         environment.update(model_environment)
         has_explicit_model = any(
             argument == "--model" or argument.startswith("--model=") for argument in launch_arguments

@@ -11,5 +11,5 @@
     {"id": "shared.documents", "version": ">=1.0.0"}
   ],
   "skills": ["plan-director-presentations"],
-  "workflows": ["workflows/presentation-studio.json"]
+  "workflows": ["workflows/presentation-studio.json", "workflows/presentation-studio-quick-v2.json"]
 }

@@ -18,9 +18,9 @@ class PlatformTests(unittest.TestCase):
     def test_repository_bundles_validate(self) -> None:
         report = Platform(ROOT).validate_all()
         self.assertEqual(14, report.plugins)
-        self.assertEqual(23, report.workflows)
+        self.assertEqual(26, report.workflows)
         self.assertEqual(3, report.profiles)
-        self.assertEqual(30, report.services)
+        self.assertEqual(33, report.services)
 
     def test_director_profiles_resolve_expected_dependencies(self) -> None:
         platform = Platform(ROOT)

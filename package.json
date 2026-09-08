@@ -20,7 +20,9 @@
   ],
   "scripts": {
     "check:types": "tsc --noEmit",
-    "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/data-adapters.test.ts pi/tests/weekly-briefing.test.ts pi/tests/source-readers.test.ts pi/tests/subagent-contracts.test.ts pi/tests/web-search.test.ts pi/tests/deck-builder.test.mjs pi/tests/bid-store.test.ts pi/tests/bid-document-builder.test.mjs",
+    "test:ui-models": "node --test tests/ui-model-settings.test.mjs",
+    "test:provider-e2e": "node --test pi/tests/provider-transport-e2e.test.mjs",
+    "test:runtime": "node --test tests/task-runtime.test.ts tests/vertical-workflow-selection.test.ts pi/tests/model-boundaries.test.ts pi/tests/provider-transport-e2e.test.mjs pi/tests/data-adapters.test.ts pi/tests/weekly-briefing.test.ts pi/tests/source-readers.test.ts pi/tests/subagent-contracts.test.ts pi/tests/web-search.test.ts pi/tests/deck-builder.test.mjs pi/tests/bid-store.test.ts pi/tests/bid-document-builder.test.mjs",
     "test:sqlite-gate": "node pi/tests/sqlite-driver-gate.mjs",
     "test:ppt-e2e": "node pi/tests/standalone-deck-e2e.mjs",
     "build:macos": "bash scripts/build-macos-desktop.sh"

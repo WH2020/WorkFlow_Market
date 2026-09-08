@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ExtensionRunner, createExtensionRuntime } from "@earendil-works/pi-coding-agent";
+import { frozenRoleConfiguration } from "../pi/extensions/model-selection.ts";
 
 import verticalWorkflow, {
   removeAgentRuntimeLease,
@@ -110,7 +112,13 @@ test("sales director edition exposes only sales and government skills", async ()
   }
 });
 
-function harness(root: string) {
+const runtimeCleanups = new Set<() => Promise<void>>();
+afterEach(async () => {
+  for (const cleanup of runtimeCleanups) await cleanup();
+  runtimeCleanups.clear();
+});
+
+function harness(root: string, options: { reasoning?: boolean; idle?: () => boolean } = {}) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const tools = new Map<string, { execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown> }>();
@@ -123,7 +131,7 @@ function harness(root: string) {
     contextWindow: 128_000, maxTokens: 32_768,
   });
   const defaultModel = model("test-provider", "default-model", false);
-  const gatewayModel = model("agent4market-newapi", "gpt-5.5", false);
+  const gatewayModel = model("agent4market-newapi", "gpt-5.5", options.reasoning ?? true);
   const builtinReasoningModel = model("openai", "gpt-5.5", true);
   const availableModels = [defaultModel, gatewayModel, builtinReasoningModel];
   let selectedModel = defaultModel;
@@ -160,8 +168,11 @@ function harness(root: string) {
     mode: "tui",
     hasUI: true,
     ui,
+    isIdle: options.idle ?? (() => true),
+    abort() {},
     sessionManager: {
       getEntries: () => entries,
+      buildContextEntries: () => [],
       getSessionFile: () => join(root, "session.jsonl"),
     },
     model: defaultModel,
@@ -172,8 +183,38 @@ function harness(root: string) {
     },
     scopedModels: [],
   };
+  runtimeCleanups.add(async () => { await handlers.get("session_shutdown")?.({}, context); });
   return { handlers, commands, tools, messages, deliveries, entries, context, selectedModel: () => selectedModel, thinkingLevel: () => thinkingLevel };
 }
+
+test("streaming core leaves a workbench request queued until idle", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-streaming-selection-"));
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  let idle = false;
+  try {
+    const directory = join(root, ".pi", "director-runtime", "requests");
+    mkdirSync(directory, { recursive: true });
+    const path = join(directory, "request-idle.json");
+    writeFileSync(path, JSON.stringify({ ...request("request-idle", "sales-director"),
+      service_id: "sales-review", workflow_id: "market.sales.pipeline-review", requested_model: "agent4market-newapi/gpt-5.5" }));
+    const runtime = harness(root, { idle: () => idle, reasoning: false });
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).status, "requested");
+    assert.equal(runtime.messages.length, 0);
+    assert.equal(runtime.selectedModel().provider, "test-provider");
+    idle = true;
+    await new Promise((resolve) => setTimeout(resolve, 2050));
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).status, "accepted");
+    assert.equal(runtime.selectedModel().reasoning, false, "must not borrow capabilities from another provider's same model ID");
+    assert.equal(runtime.deliveries[0].deliverAs, "followUp");
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE; else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function writeRequest(root: string, profileId: string): void {
   const directory = join(root, ".pi", "director-runtime", "requests");
@@ -185,6 +226,68 @@ function writeRequest(root: string, profileId: string): void {
   };
   writeFileSync(join(directory, "request-profile-switch.json"), JSON.stringify(payload), "utf8");
 }
+
+test("managed recovery freezes recipients, compacts locally, and keeps legacy cancellation available", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-managed-recovery-"));
+  const names = ["WORKFLOW_AGENT_PROFILE", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE", "AGENT4MARKET_MANAGED_MODELS_SHA256", "AGENT4MARKET_ROLE_MODELS"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  delete process.env.AGENT4MARKET_MANAGED_MODELS_FILE;
+  delete process.env.AGENT4MARKET_MANAGED_MODELS_SHA256;
+  const recipient = { provider_id: "agent4market-newapi", base_url: "https://models.example", api: "openai-completions", model_id: "gpt-5.5" };
+  const key = `${recipient.provider_id}/${recipient.model_id}`;
+  process.env.AGENT4MARKET_MANAGED_MODELS = JSON.stringify({ [key]: recipient });
+  process.env.AGENT4MARKET_ROLE_MODELS = JSON.stringify({ "director-research-scout": key });
+  const workflow: RuntimeWorkflow = JSON.parse(readFileSync("vertical_plugins/market/sales/workflows/pipeline-review-readonly-v2.json", "utf8"));
+  try {
+    const bound = createTask({ taskId: "bound-task", sessionKey: join(root, "session.jsonl"), profileId: "sales-director", serviceId: "sales-review-readonly",
+      workflow, request: "只读分析", effectiveModel: key, effectiveRecipient: recipient, ...frozenRoleConfiguration() });
+    assert.deepEqual(bound.role_recipients?.["director-research-scout"], recipient);
+    const runtime = harness(root);
+    runtime.entries.push({ type: "custom", customType: "director-task-state", data: bound });
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    const handlers = new Map([...runtime.handlers].map(([name, handler]) => [name, [handler]]));
+    const runner = new ExtensionRunner([{ path: "workflow", handlers }] as never, createExtensionRuntime(), root, {} as never, {} as never);
+    runner.createContext = () => runtime.context as never;
+    let aborts = 0;
+    runtime.context.abort = () => { aborts++; };
+    runtime.context.ui.notify = () => { throw new Error("UI unavailable"); };
+    const first = { role: "user", content: `[DIRECTOR_TASK_CONTEXT ${bound.task_id}] 只读分析`, timestamp: Date.now() };
+    assert.deepEqual(await runner.emitContext([{ ...first, content: "旧任务私密历史" }, first] as never), [first]);
+    const compact = await runner.emit({ type: "session_before_compact", preparation: { firstKeptEntryId: "kept", tokensBefore: 80000 } } as never) as any;
+    assert.equal(compact.compaction.details.task_id, bound.task_id);
+    assert.equal(compact.compaction.firstKeptEntryId, "kept");
+    assert.doesNotMatch(compact.compaction.summary, /旧任务私密历史/);
+    assert.deepEqual(await runner.emitContext([{ ...first, content: "没有边界" }] as never), []);
+    assert.ok(aborts > 0, "must abort and redact even when UI notification throws");
+    await runtime.handlers.get("model_select")?.({ model: runtime.context.model });
+    assert.deepEqual(await runner.emitBeforeProviderRequest({ private: "fixture" }), {});
+    assert.deepEqual(await runner.emit({ type: "session_before_compact", preparation: { firstKeptEntryId: "kept", tokensBefore: 80000 } } as never), { cancel: true });
+    assert.deepEqual(await runner.emit({ type: "session_before_tree" } as never), { cancel: true });
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+
+    const legacy = { ...bound, task_id: "legacy-task", effective_recipient: undefined, role_recipients: undefined };
+    const legacyPath = join(root, ".pi", "director-runtime", "tasks", "legacy-task.json");
+    mkdirSync(join(root, ".pi", "director-runtime", "tasks"), { recursive: true });
+    writeFileSync(legacyPath, JSON.stringify(legacy));
+    const recovery = harness(root);
+    recovery.entries.push({ type: "custom", customType: "director-task-state", data: legacy });
+    await recovery.handlers.get("session_start")?.({}, recovery.context);
+    assert.equal(recovery.messages.length, 0);
+    const leasePath = join(root, ".pi", "director-runtime", "agent-leases", `${process.pid}.json`);
+    assert.match(JSON.parse(readFileSync(leasePath, "utf8")).model_error, /旧任务未记录/);
+    writeFileSync(legacyPath, JSON.stringify({ ...legacy, version: legacy.version + 1, approval_request: {
+      decision: "cancel", requested_at: new Date().toISOString(), requested_by: "local-workbench", expected_version: legacy.version,
+    } }));
+    await new Promise((resolve) => setTimeout(resolve, 2050));
+    assert.equal(JSON.parse(readFileSync(legacyPath, "utf8")).status, "cancelled");
+    assert.equal(recovery.messages.length, 0);
+    await recovery.handlers.get("session_shutdown")?.({}, recovery.context);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function writePresentationRevisionRequest(root: string): string {
   const requestId = "request-presentation-revision";

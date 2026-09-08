@@ -75,8 +75,11 @@ def settings_path(project_root: Path | str) -> Path:
     return Path(project_root).resolve() / ".pi" / "director-runtime" / "model-provider.json"
 
 
-def secret_path(project_root: Path | str) -> Path:
-    return Path(project_root).resolve() / ".pi" / "director-runtime" / "model-provider.secret"
+def secret_path(project_root: Path | str, provider_id: str = PROVIDER_ID) -> Path:
+    if not provider_id.startswith("agent4market-") or not all(c.isascii() and (c.isalnum() or c == "-") for c in provider_id):
+        raise ModelProviderError("供应商实例标识无效")
+    name = "model-provider.secret" if provider_id == PROVIDER_ID else f"{provider_id}.secret"
+    return Path(project_root).resolve() / ".pi" / "director-runtime" / name
 
 
 def pi_agent_dir(
@@ -136,6 +139,7 @@ def discover_models(
     timeout: float = 15.0,
     resolver: Callable[..., list[tuple[Any, ...]]] = socket.getaddrinfo,
     opener: Callable[..., Any] | None = None,
+    api: str = "openai-completions",
 ) -> tuple[str, list[dict[str, Any]]]:
     normalized = normalize_base_url(
         base_url, allow_private_network=allow_private_network, resolver=resolver
@@ -143,9 +147,16 @@ def discover_models(
     key = api_key.strip()
     if not key or len(key) > 4096:
         raise ModelProviderError("请填写有效的 API Key")
+    if api not in {"openai-completions", "openai-responses", "anthropic-messages"}:
+        raise ModelProviderError("不支持的模型协议")
+    headers = {"Accept": "application/json"}
+    if api == "anthropic-messages":
+        headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+    else:
+        headers["Authorization"] = f"Bearer {key}"
     request = Request(
         f"{normalized}/v1/models",
-        headers={"Accept": "application/json", "Authorization": f"Bearer {key}"},
+        headers=headers,
         method="GET",
     )
     open_request = opener or build_opener(_NoRedirect()).open
@@ -260,63 +271,73 @@ def _dpapi_unprotect(data: bytes, entropy: bytes) -> bytes:
         del source_buffer, extra_buffer
 
 
-def _secret_binding(base_url: str) -> str:
-    return hashlib.sha256(base_url.encode("utf-8")).hexdigest()
+def _secret_binding(base_url: str, provider_id: str | None = None) -> str:
+    identity = base_url if provider_id is None else json.dumps([provider_id, base_url], separators=(",", ":"))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
-def _keychain_service(project_root: Path) -> str:
+def _keychain_service(project_root: Path, provider_id: str = PROVIDER_ID) -> str:
     suffix = hashlib.sha256(str(project_root.resolve()).encode("utf-8")).hexdigest()[:16]
-    return f"Agent4Market.NewAPI.{suffix}"
+    return f"Agent4Market.NewAPI.{suffix}" if provider_id == PROVIDER_ID else f"Agent4Market.{provider_id}.{suffix}"
 
 
 def save_model_secret(
-    project_root: Path | str, api_key: str, base_url: str, *, system_name: str | None = None
+    project_root: Path | str, api_key: str, base_url: str, *, system_name: str | None = None,
+    provider_id: str = PROVIDER_ID,
 ) -> None:
     root = Path(project_root).resolve()
     key = api_key.strip()
     if not key:
         raise ModelProviderError("API Key 不能为空")
     system = (system_name or platform.system()).lower()
-    binding = _secret_binding(base_url)
-    path = secret_path(root)
+    binding = _secret_binding(base_url, provider_id)
+    path = secret_path(root, provider_id)
     if system == "windows":
-        entropy = hashlib.sha256(str(root).encode("utf-8")).digest()
+        entropy = hashlib.sha256(f"{root}\n{provider_id}".encode("utf-8")).digest()
         encrypted = _dpapi_protect(key.encode("utf-8"), entropy)
         record = {"version": 1, "backend": "windows-dpapi", "binding": binding,
                   "ciphertext": base64.b64encode(encrypted).decode("ascii")}
     elif system == "darwin":
-        service = _keychain_service(root)
+        service = _keychain_service(root, provider_id)
         completed = subprocess.run(
-            ["security", "add-generic-password", "-U", "-s", service, "-a", PROVIDER_ID, "-w", key],
+            ["security", "add-generic-password", "-U", "-s", service, "-a", provider_id, "-w", key],
             check=False, capture_output=True, text=True,
         )
         if completed.returncode != 0:
             raise ModelProviderError("无法写入 macOS 钥匙串")
         record = {"version": 1, "backend": "macos-keychain", "binding": binding,
-                  "service": service, "account": PROVIDER_ID}
+                  "service": service, "account": provider_id}
     else:
         record = {"version": 1, "backend": "private-file", "binding": binding,
                   "secret": base64.b64encode(key.encode("utf-8")).decode("ascii")}
+    record.update({"version": 2, "provider_id": provider_id})
     _atomic_json(path, record)
 
 
 def load_model_secret(
-    project_root: Path | str, base_url: str, *, system_name: str | None = None
+    project_root: Path | str, base_url: str, *, system_name: str | None = None,
+    provider_id: str = PROVIDER_ID,
 ) -> str | None:
     root = Path(project_root).resolve()
-    path = secret_path(root)
+    path = secret_path(root, provider_id)
     if not path.is_file():
         return None
     record = _read_object(path)
-    if record.get("version") != 1 or record.get("binding") != _secret_binding(base_url):
-        return None
+    if record.get("version") == 2:
+        if record.get("provider_id") != provider_id or record.get("binding") != _secret_binding(base_url, provider_id):
+            return None
+    elif record.get("version") != 1 or provider_id != PROVIDER_ID or record.get("binding") != _secret_binding(base_url):
+        return None  # Only the historical singleton may read an unscoped v1 credential.
     backend = record.get("backend")
     try:
         if backend == "windows-dpapi":
             encrypted = base64.b64decode(str(record.get("ciphertext", "")), validate=True)
-            entropy = hashlib.sha256(str(root).encode("utf-8")).digest()
+            identity = str(root) if record.get("version") == 1 else f"{root}\n{provider_id}"
+            entropy = hashlib.sha256(identity.encode("utf-8")).digest()
             return _dpapi_unprotect(encrypted, entropy).decode("utf-8")
         if backend == "macos-keychain":
+            if record.get("service") != _keychain_service(root, provider_id) or record.get("account") != provider_id:
+                return None
             completed = subprocess.run(
                 ["security", "find-generic-password", "-s", str(record.get("service", "")),
                  "-a", str(record.get("account", "")), "-w"],
@@ -335,46 +356,61 @@ def load_model_settings(project_root: Path | str) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     value = _read_object(path)
-    if (
-        value.get("version") != 1
-        or value.get("provider_id") != PROVIDER_ID
-        or not isinstance(value.get("base_url"), str)
-        or not value["base_url"].startswith(("http://", "https://"))
-        or not isinstance(value.get("selected_model"), str)
-        or not value["selected_model"]
-        or len(value["selected_model"]) > 200
-        or not isinstance(value.get("models"), list)
-    ):
-        raise ModelProviderError("本地模型配置格式无效")
-    model_ids = {
-        item.get("id") for item in value["models"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    if value["selected_model"] not in model_ids:
-        raise ModelProviderError("本地模型配置中的已选模型不在模型列表中")
-    return value
+
+    version = value.get("version")
+
+    if version == 3:
+        from .model_registry import validate_registry
+        return validate_registry(value)
+    # 版本 1：NewAPI 网关配置
+    if version == 1:
+        if (
+            value.get("provider_id") != PROVIDER_ID
+            or not isinstance(value.get("base_url"), str)
+            or not value["base_url"].startswith(("http://", "https://"))
+            or not isinstance(value.get("selected_model"), str)
+            or not value["selected_model"]
+            or len(value["selected_model"]) > 200
+            or not isinstance(value.get("models"), list)
+        ):
+            raise ModelProviderError("本地模型配置格式无效")
+        model_ids = {
+            item.get("id") for item in value["models"]
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        if value["selected_model"] not in model_ids:
+            raise ModelProviderError("本地模型配置中的已选模型不在模型列表中")
+        return value
+
+    # 版本 2：编码助手配置
+    elif version == 2:
+        provider_type = value.get("provider_type")
+        if provider_type not in {"claude-code", "codex-cli"}:
+            raise ModelProviderError("本地模型配置格式无效：未知的提供者类型")
+        if (
+            not isinstance(value.get("executable_path"), str)
+            or not value["executable_path"]
+            or not isinstance(value.get("selected_model"), str)
+            or not value["selected_model"]
+        ):
+            raise ModelProviderError("本地模型配置格式无效")
+        return value
+
+    else:
+        raise ModelProviderError(f"不支持的配置版本：{version}")
 
 
 def model_settings_summary(project_root: Path | str) -> dict[str, Any]:
     try:
         settings = load_model_settings(project_root)
-    except ModelProviderError as error:
-        return {"configured": False, "status": "error", "error": str(error)}
-    if settings is None:
-        return {"configured": False, "status": "unconfigured", "provider_id": PROVIDER_ID}
-    base_url = settings["base_url"]
-    has_secret = bool(load_model_secret(project_root, base_url))
-    return {
-        "configured": True,
-        "status": "configured" if has_secret else "missing_key",
-        "provider_id": PROVIDER_ID,
-        "base_url": base_url,
-        "selected_model": settings["selected_model"],
-        "models": [item for item in settings["models"] if isinstance(item, dict) and isinstance(item.get("id"), str)],
-        "allow_private_network": bool(settings.get("allow_private_network")),
-        "has_api_key": has_secret,
-        "updated_at": settings.get("updated_at"),
-    }
+        if settings and settings.get("version") == 2:
+            return {**settings, "configured": False, "status": "unsupported_backend", "providers": [],
+                    "has_api_key": False, "models": [],
+                    "error": "CLI 仅支持受控对话入口，尚不是 Pi 模型后端；请添加 API 供应商"}
+        from .model_registry import summary
+        return summary(project_root)
+    except (ModelProviderError, OSError) as error:
+        return {"configured": False, "status": "error", "error": str(error), "providers": []}
 
 
 def _pi_model_record(base_url: str, model: Mapping[str, Any]) -> dict[str, Any]:
@@ -418,37 +454,12 @@ def _merge_provider_files(
 
 def clear_model_provider(
     project_root: Path | str,
-    *,
+    *, provider_id: str | None = None,
     environ: Mapping[str, str] | None = None,
     home: Path | None = None,
 ) -> dict[str, Any]:
-    with _MODEL_CONFIG_LOCK:
-        root = Path(project_root).resolve()
-        try:
-            secret_record = _read_object(secret_path(root)) if secret_path(root).is_file() else {}
-        except ModelProviderError:
-            secret_record = {}
-        try:
-            settings_path(root).unlink(missing_ok=True)
-            secret_path(root).unlink(missing_ok=True)
-        except OSError as error:
-            raise ModelProviderError(f"无法清除本地模型设置：{error}") from error
-
-        if secret_record.get("backend") == "macos-keychain":
-            subprocess.run(
-                ["security", "delete-generic-password", "-s", str(secret_record.get("service", "")),
-                 "-a", str(secret_record.get("account", ""))],
-                check=False, capture_output=True, text=True,
-            )
-
-        models_path = pi_agent_dir(environ=environ, home=home) / "models.json"
-        if models_path.is_file():
-            models = _read_object(models_path)
-            providers = models.get("providers")
-            if isinstance(providers, dict) and PROVIDER_ID in providers:
-                providers.pop(PROVIDER_ID, None)
-                _atomic_json(models_path, models)
-        return model_settings_summary(root)
+    from .model_registry import remove_provider
+    return remove_provider(project_root, provider_id, environ=environ, home=home)
 
 
 def configure_model_provider(
@@ -462,45 +473,38 @@ def configure_model_provider(
     home: Path | None = None,
     resolver: Callable[..., list[tuple[Any, ...]]] = socket.getaddrinfo,
     opener: Callable[..., Any] | None = None,
+    **options: Any,
 ) -> dict[str, Any]:
-    root = Path(project_root).resolve()
-    normalized_for_secret = normalize_base_url(
-        base_url, allow_private_network=allow_private_network, resolver=resolver
-    )
-    key = (api_key or "").strip() or load_model_secret(root, normalized_for_secret)
-    if not key:
-        raise ModelProviderError("首次配置或更换网关时必须填写 API Key")
-    normalized, models = discover_models(
-        normalized_for_secret,
-        key,
-        allow_private_network=allow_private_network,
-        resolver=resolver,
-        opener=opener,
-    )
-    if selected_model not in {item["id"] for item in models}:
-        raise ModelProviderError("选择的模型不在网关最新模型列表中，请重新获取模型")
-    with _MODEL_CONFIG_LOCK:
-        _merge_provider_files(normalized, models, environ=environ, home=home)
-        save_model_secret(root, key, normalized)
-        settings = {
-            "version": 1,
-            "provider_id": PROVIDER_ID,
-            "base_url": normalized,
-            "selected_model": selected_model,
-            "models": models,
-            "allow_private_network": allow_private_network,
-            "updated_at": _now(),
+    from .model_registry import configure_provider
+    return configure_provider(project_root, base_url=base_url, api_key=api_key,
+                              selected_model=selected_model, allow_private_network=allow_private_network,
+                              environ=environ, home=home, resolver=resolver, opener=opener, **options)
+
+
+def model_runtime_configuration(project_root: Path | str, *, environ=None, home=None) -> tuple[str, dict[str, str]] | None:
+    from .model_registry import runtime_configuration
+    return runtime_configuration(project_root, environ=environ, home=home)
+
+
+def detect_coding_assistants(
+    environ: Mapping[str, str] | None = None
+) -> dict[str, dict[str, Any] | None]:
+    """Installation detection only; no guessed model list or credential access."""
+    from .coding_agents import _probe_command
+    environment = dict(os.environ if environ is None else environ)
+    result: dict[str, dict[str, Any] | None] = {}
+    for provider_type, command in (("claude-code", "claude"), ("codex-cli", "codex")):
+        probe = _probe_command(command, environment)
+        result[provider_type] = {
+            "available": bool(probe["ready"]), "path": probe.get("path"),
+            "version": probe.get("version"), "models": [], "backend_available": False,
+            "message": "仅检测到对话入口；尚未实现 Pi 执行后端",
         }
-        _atomic_json(settings_path(root), settings)
-        return model_settings_summary(root)
+    return result
 
 
-def model_runtime_configuration(project_root: Path | str) -> tuple[str, dict[str, str]] | None:
-    settings = load_model_settings(project_root)
-    if settings is None:
-        return None
-    key = load_model_secret(project_root, settings["base_url"])
-    if not key:
-        return None
-    model = f"{PROVIDER_ID}/{settings['selected_model']}"
-    return model, {API_KEY_ENV: key}
+def configure_coding_assistant_provider(
+    project_root: Path | str, *, provider_type: str, executable_path: str, selected_model: str,
+) -> dict[str, Any]:
+    # Never replace a working model registry with an unimplemented Agent backend.
+    raise ModelProviderError("Claude Code / Codex CLI 是受控对话入口，尚不支持作为 Pi 模型后端；请添加 API 供应商")

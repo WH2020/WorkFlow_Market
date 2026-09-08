@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_platform.wechat_store import (
     WechatStoreError,
@@ -158,13 +159,19 @@ class WechatStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(WechatStoreError, "当前模型"):
             create_review_scope(self.root, payload)
         payload["model_sharing_confirmed"] = True
-        scope = create_review_scope(self.root, payload)
+        recipient = {"provider_id": "agent4market-test", "base_url": "https://example.com", "api": "openai-responses", "model_id": "test"}
+        with self.assertRaisesRegex(WechatStoreError, "具体模型供应商"):
+            create_review_scope(self.root, payload)
+        payload["model_recipient"] = recipient
+        with patch("agent_platform.model_registry.available_models", return_value={"agent4market-test/test": recipient}):
+            scope = create_review_scope(self.root, payload)
         self.assertRegex(scope["scope_id"], r"^wechat-scope-[a-f0-9]{20}$")
         self.assertEqual(1, scope["conversation_count"])
         self.assertEqual(1, scope["message_count"])
         self.assertGreater(scope["text_bytes"], 0)
         summary = review_scope_summary(self.root, scope["scope_id"])
         self.assertEqual("project-default", summary["project_id"])
+        self.assertEqual(recipient, summary["model_recipient"])
         self.assertNotIn("conversation_ids_json", summary)
 
     def test_cleanup_removes_only_app_copy_and_indexed_plaintext(self) -> None:

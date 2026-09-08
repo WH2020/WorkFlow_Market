@@ -60,6 +60,9 @@ export type WorkflowTask = {
   requested_model?: string;
   requested_thinking_level?: TaskThinkingLevel;
   effective_model?: string;
+  effective_recipient?: { provider_id: string; base_url: string; api: string; model_id: string };
+  role_models?: Record<string, string>;
+  role_recipients?: Record<string, { provider_id: string; base_url: string; api: string; model_id: string }>;
   effective_thinking_level?: TaskThinkingLevel;
   status: TaskStatus;
   version: number;
@@ -289,6 +292,9 @@ export function createTask(input: {
   requestedModel?: string;
   requestedThinkingLevel?: TaskThinkingLevel;
   effectiveModel?: string;
+  effectiveRecipient?: WorkflowTask["effective_recipient"];
+  roleModels?: Record<string, string>;
+  roleRecipients?: WorkflowTask["role_recipients"];
   effectiveThinkingLevel?: TaskThinkingLevel;
 }): WorkflowTask {
   const timestamp = now();
@@ -307,6 +313,9 @@ export function createTask(input: {
     ...(input.requestedModel ? { requested_model: input.requestedModel } : {}),
     ...(input.requestedThinkingLevel ? { requested_thinking_level: input.requestedThinkingLevel } : {}),
     ...(input.effectiveModel ? { effective_model: input.effectiveModel } : {}),
+    ...(input.effectiveRecipient ? { effective_recipient: input.effectiveRecipient } : {}),
+    ...(input.roleModels ? { role_models: input.roleModels } : {}),
+    ...(input.roleRecipients ? { role_recipients: input.roleRecipients } : {}),
     ...(input.effectiveThinkingLevel ? { effective_thinking_level: input.effectiveThinkingLevel } : {}),
     status: "running",
     version: 1,

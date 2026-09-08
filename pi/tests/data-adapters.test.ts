@@ -27,6 +27,7 @@ import { resolveBusinessBackend } from "../extensions/business-backend.ts";
 type RegisteredTool = {
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
 };
+const fixtureRecipient = { provider_id: "agent4market-fixture", base_url: "https://models.example", api: "openai-completions", model_id: "fixture" };
 
 function fixture(
   fixedIntent = false,
@@ -85,7 +86,7 @@ function fixture(
           storage_binding: { backend: backend.backend, binding_id: backend.binding_id },
         };
       }
-      if (taskId) return { task_id: taskId, profile_id: profileId, project_id: projectId, authorized_wechat_scopes: wechatScopes };
+      if (taskId) return { task_id: taskId, profile_id: profileId, project_id: projectId, authorized_wechat_scopes: wechatScopes, model_recipient: fixtureRecipient };
     },
     afterLogicalTool: (tool, _params, details) => after.push({ tool, details }),
     onLogicalToolError: (tool, _params, outcome) => errors.push({ tool, outcome }),
@@ -227,6 +228,7 @@ test("WeChat adapter reads only the scope frozen into the sales-director task", 
     database.exec(`
       PRAGMA user_version=1;
       CREATE TABLE review_scopes(scope_id TEXT PRIMARY KEY,project_id TEXT,title TEXT,date_from TEXT,date_to TEXT,query TEXT,conversation_ids_json TEXT,message_count INTEGER,selection_sha256 TEXT,model_sharing_confirmed INTEGER,created_at TEXT,expires_at TEXT,status TEXT);
+      CREATE TABLE scope_recipients(scope_id TEXT PRIMARY KEY, recipient_json TEXT NOT NULL);
       CREATE TABLE conversations(conversation_id TEXT PRIMARY KEY,display_name TEXT,chat_type TEXT,last_sent_at TEXT);
       CREATE TABLE messages(message_id TEXT PRIMARY KEY,conversation_id TEXT,sender_name TEXT,is_self INTEGER,sent_at TEXT,epoch INTEGER,kind TEXT,content TEXT,source_locator TEXT,content_sha256 TEXT);
     `);
@@ -235,6 +237,7 @@ test("WeChat adapter reads only the scope frozen into the sales-director task", 
       createHash("sha256").update(selection, "utf8").digest("hex"), 1, "2026-08-25T00:00:00Z", "2099-08-25T00:00:00Z", "active",
     );
     database.prepare("INSERT INTO conversations VALUES(?,?,?,?)").run(conversationId, "客户甲", "direct", "2026-08-25T02:00:00Z");
+    database.prepare("INSERT INTO scope_recipients VALUES(?,?)").run(scopeId, JSON.stringify(fixtureRecipient));
     for (const [index, message] of messageFixtures.entries()) {
       database.prepare("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?)").run(
         message.messageId, conversationId, index ? "我" : "客户甲", index, `2026-08-${24 + index}T02:00:00Z`, 0,
@@ -1553,7 +1556,9 @@ test("SQLite adapters provide legacy projections, cross-table rollback, 360, evi
     }), /entity_type 不受支持/);
     rmSync(join(state.root, "data", "sales", "customers.csv"));
     rmSync(join(state.root, "data", "knowledge", "source-register.csv"));
-    const weekly = collectWeeklySnapshot(state.root, { start: "2026-08-01", end: "2026-08-31" }, "market-director") as { sales: { customers: unknown[] } };
+    // The account without activity is included by its creation timestamp, not a fixed historical month.
+    const fixtureDay = new Date().toISOString().slice(0, 10);
+    const weekly = collectWeeklySnapshot(state.root, { start: fixtureDay, end: fixtureDay }, "market-director") as { sales: { customers: unknown[] } };
     assert.equal(weekly.sales.customers.length, 2, "after cutover weekly.snapshot must not fall back to legacy CSV");
     const store = new SalesBusinessStore(database);
     try {
