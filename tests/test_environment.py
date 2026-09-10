@@ -1,15 +1,52 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agent_platform.environment import MIN_NODE, discover_ppt_runtime, launch_pi
+from agent_platform.environment import MIN_NODE, cli_python_executable, discover_ppt_runtime, launch_pi
 
 
 class EnvironmentTests(unittest.TestCase):
+    def test_cli_host_uses_the_current_python_native_entry_not_a_store_alias(self) -> None:
+        executable = Path(cli_python_executable())
+        self.assertTrue(executable.is_absolute())
+        self.assertTrue(executable.is_file())
+        if os.name == "nt":
+            self.assertFalse(getattr(executable.lstat(), "st_file_attributes", 0) & 0x400)
+
+    def test_cli_environment_is_child_only_and_stale_backend_paths_are_not_reused(self) -> None:
+        report = {"core": {"ready": True}, "ppt": {"ready": False, "config": {}}}
+        for configured in (True, False):
+            source_environment = {"PATH": "/synthetic", "AGENT4MARKET_CLI_BACKENDS_FILE": "stale-manifest",
+                                  "AGENT4MARKET_CLI_BACKENDS_SHA256": "stale-hash", "AGENT4MARKET_CLI_PYTHON": "stale-python"}
+            runtime = ("agent4market-cli/synthetic", {"AGENT4MARKET_CLI_BACKENDS_FILE": "fresh-manifest", "AGENT4MARKET_CLI_BACKENDS_SHA256": "fresh-hash"}) if configured else None
+            with (
+                patch("agent_platform.environment.subagent_environment", return_value={}),
+                patch("agent_platform.environment.ensure_subagent_configuration"),
+                patch("agent_platform.environment.doctor_report", return_value=report),
+                patch("agent_platform.environment._command_path", return_value=Path("/synthetic/pi")),
+                patch("agent_platform.environment.search_runtime_environment", return_value={}),
+                patch("agent_platform.environment.search_gateway_runtime_environment", return_value={}),
+                patch("agent_platform.environment.model_runtime_configuration", return_value=runtime),
+                patch("agent_platform.environment.cli_python_executable", return_value="frozen-python"),
+                patch("agent_platform.environment.subprocess.run", return_value=Mock(returncode=0)) as run,
+            ):
+                launch_pi(Path.cwd(), ["--version"], environ=source_environment)
+            child = run.call_args.kwargs["env"]
+            self.assertEqual("stale-manifest", source_environment["AGENT4MARKET_CLI_BACKENDS_FILE"])
+            if configured:
+                self.assertEqual("fresh-manifest", child["AGENT4MARKET_CLI_BACKENDS_FILE"])
+                self.assertEqual("fresh-hash", child["AGENT4MARKET_CLI_BACKENDS_SHA256"])
+                self.assertEqual("frozen-python", child["AGENT4MARKET_CLI_PYTHON"])
+            else:
+                self.assertNotIn("AGENT4MARKET_CLI_BACKENDS_FILE", child)
+                self.assertNotIn("AGENT4MARKET_CLI_BACKENDS_SHA256", child)
+                self.assertNotIn("AGENT4MARKET_CLI_PYTHON", child)
+
     def test_project_has_no_reqguard_gate_or_external_rpiv_todo_runtime(self) -> None:
         root = Path(__file__).resolve().parents[1]
         self.assertFalse((root / "docs" / "reqguard").exists())
@@ -57,7 +94,8 @@ class EnvironmentTests(unittest.TestCase):
             self.assertIn("--ignore-scripts", script)
         self.assertIn("build-windows-desktop.ps1", windows)
         self.assertIn("--self-test", desktop_build)
-        self.assertIn("TemporarySelfTestPath", desktop_build)
+        self.assertNotIn("TemporarySelfTestPath", desktop_build)
+        self.assertIn("-WorkingDirectory $OutputDirectory", desktop_build)
         self.assertIn("Start-Process -FilePath $SelfTestPath", desktop_build)
         self.assertIn("$SelfTest.ExitCode", desktop_build)
         self.assertIn("BurntSushi.ripgrep.MSVC", windows)
@@ -70,10 +108,27 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("Duration::from_secs(60)", desktop_source)
         self.assertIn("import sys; print(sys.executable)", desktop_source)
         self.assertIn('const PROFILE_ID: &str = "sales-director"', desktop_source)
-        self.assertIn('start_workbench(&root, false)', desktop_source)
+        self.assertIn('start_workbench(&root, false, &startup_token)', desktop_source)
         self.assertIn('arguments.push("--disable-scheduler".into())', desktop_source)
         self.assertIn("node_modules/@earendil-works/pi-coding-agent/dist/cli.js", desktop_source)
         self.assertNotIn("OpenBrowser", desktop_source)
+
+    def test_private_desktop_runtime_has_no_python_or_node_fallback(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        desktop = (root / "desktop/src-tauri/src/main.rs").read_text(encoding="utf-8")
+        launcher = (root / "scripts/start-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("return windows_project_root(&executable)", desktop)
+        self.assertIn("configure_private_runtime", desktop)
+        self.assertIn('root.join(".venv/Scripts/python.exe")', desktop)
+        self.assertIn('root.join("runtime/node/node.exe")', desktop)
+        self.assertIn('env("PI_CODING_AGENT_DIR", root.join(".pi/agent"))', desktop)
+        self.assertIn('env_remove("NODE_OPTIONS")', desktop)
+        self.assertIn('"--ui-self-test"', desktop)
+        self.assertIn('!ui_self_test', desktop)
+        self.assertIn('"AGENT4MARKET_DESKTOP_STARTUP_TOKEN"', desktop)
+        self.assertIn('window_builder.data_directory(root.join(".pi/webview2"))', desktop)
+        self.assertIn("System fallback is disabled", launcher)
+        self.assertIn('Get-Command $LocalPython', launcher)
 
     def test_desktop_embeds_the_ai_core_by_default_with_optional_visible_diagnostics(self) -> None:
         root = Path(__file__).resolve().parents[1]

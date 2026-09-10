@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from agent_platform import wechat_store
 from agent_platform.wechat_store import (
     WechatStoreError,
     cleanup_expired,
@@ -21,7 +22,7 @@ from agent_platform.wechat_store import (
 
 class WechatStoreTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(prefix="wechat-store-test-", dir=Path.home())
         self.root = Path(self.temporary.name)
         self.source = self.root / "wx-export.json"
         self.source.write_text(
@@ -108,6 +109,45 @@ class WechatStoreTests(unittest.TestCase):
         self.assertTrue(second["duplicate_file"])
         self.assertEqual(3, dashboard(self.root)["message_count"])
 
+    def test_copy_verification_failure_removes_unregistered_copy(self) -> None:
+        from agent_platform.wechat_privacy import verify_private_file
+        original_source = self.source.read_bytes()
+
+        def fail_published_copy(path):
+            if Path(path).name == self.source.name:
+                raise RuntimeError("synthetic post-publish failure")
+            return verify_private_file(path)
+
+        with patch("agent_platform.wechat_privacy.verify_private_file", side_effect=fail_published_copy):
+            with self.assertRaisesRegex(RuntimeError, "synthetic post-publish"):
+                self.import_sample()
+        self.assertEqual([], list((self.root / "data/wechat/imports").iterdir()))
+        self.assertEqual(0, dashboard(self.root)["message_count"])
+        self.assertEqual(original_source, self.source.read_bytes())
+
+    def test_copy_failure_before_publish_removes_temporary_file_and_batch(self) -> None:
+        with patch.object(wechat_store.shutil, "copyfile", side_effect=OSError("synthetic copy failure")):
+            with self.assertRaisesRegex(OSError, "synthetic copy failure"):
+                self.import_sample()
+        self.assertEqual([], list((self.root / "data/wechat/imports").iterdir()))
+        self.assertEqual(0, dashboard(self.root)["message_count"])
+
+    def test_copy_cleanup_failure_is_explicit(self) -> None:
+        unlink = Path.unlink
+
+        def deny_published_unlink(path, *args, **kwargs):
+            if path.name == self.source.name and "imports" in path.parts:
+                raise PermissionError("synthetic cleanup denial")
+            return unlink(path, *args, **kwargs)
+
+        with (patch("agent_platform.wechat_privacy.verify_private_file", side_effect=RuntimeError("synthetic verify")),
+              patch.object(Path, "unlink", deny_published_unlink)):
+            with self.assertRaises(WechatStoreError) as raised:
+                self.import_sample()
+        self.assertEqual("CLEANUP_FAILED", raised.exception.code)
+        self.assertNotIn(str(self.source), str(raised.exception))
+        self.assertTrue(self.source.is_file())
+
     def test_conflicting_message_identity_stops_without_overwriting_existing_text(self) -> None:
         self.import_sample()
         conflicting = self.root / "wx-conflict.jsonl"
@@ -173,6 +213,34 @@ class WechatStoreTests(unittest.TestCase):
         self.assertEqual("project-default", summary["project_id"])
         self.assertEqual(recipient, summary["model_recipient"])
         self.assertNotIn("conversation_ids_json", summary)
+
+    def test_review_scope_rejects_cli_recipients_before_model_lookup_or_database_open(self) -> None:
+        for provider_type in ("claude-code", "codex-cli"):
+            with self.subTest(provider_type=provider_type):
+                recipient = {
+                    "provider_id": f"agent4market-{provider_type}",
+                    "base_url": "https://example.invalid",
+                    "api": provider_type,
+                    "model_id": f"{provider_type}-account-model",
+                }
+                payload = {
+                    "project_id": "project-default",
+                    "conversation_ids": ["synthetic-conversation"],
+                    "date_from": "2026-08-24",
+                    "date_to": "2026-08-24",
+                    "query": "",
+                    "model_sharing_confirmed": True,
+                    "model_recipient": recipient,
+                }
+                with (
+                    patch("agent_platform.model_registry.available_models") as available_models,
+                    patch.object(wechat_store, "_connect") as connect,
+                ):
+                    with self.assertRaises(WechatStoreError) as raised:
+                        create_review_scope(self.root, payload)
+                self.assertEqual("CLI_WECHAT_UNSUPPORTED", raised.exception.code)
+                available_models.assert_not_called()
+                connect.assert_not_called()
 
     def test_cleanup_removes_only_app_copy_and_indexed_plaintext(self) -> None:
         self.import_sample()

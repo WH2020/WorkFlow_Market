@@ -20,6 +20,32 @@ const task = () => createTask({ taskId: "task-boundary", sessionKey: "fixture", 
   request: "当前任务", effectiveModel: key, effectiveRecipient: recipient,
   workflow: { id: "fixture", nodes: [{ id: "draft", type: "agent", depends_on: [] }] } });
 
+test("CLI child guard enforces exact contract thinking before context and provider requests", () => {
+  const root = mkdtempSync(join(tmpdir(), "director-child-thinking-"));
+  const previous = process.env.AGENT4MARKET_CLI_BACKENDS_FILE;
+  delete process.env.AGENT4MARKET_CLI_BACKENDS_FILE;
+  try {
+    const actual = { ...model, api: "codex-cli", baseUrl: "https://chatgpt.com/backend-api/codex", reasoning: true };
+    const contract = createGovernedSubagentContract(root, { task_id: "task-thinking", profile_id: "sales-director", node_id: "review", task_version: 1,
+      role: "readonly-reviewer", objective: "Synthetic review", allowed_tools: [], authorized_urls: [], expected_model: key,
+      model_recipient: runtimeModelRecipient(actual as never), expected_thinking_level: "high" });
+    const handlers = new Map<string, any>(); let thinking = "high"; let aborts = 0;
+    registerGuard({ on: (event: string, handler: any) => handlers.set(event, handler), getThinkingLevel: () => thinking } as never);
+    const ctx = { cwd: root, model: actual, abort: () => { aborts++; }, sessionManager: { buildContextEntries: () => [] } };
+    const prompt = `[DIRECTOR_TASK_CONTEXT task-thinking]\n受管任务：task-thinking\n受管节点：review\ncontract_id：${contract.contract_id}\nSynthetic`;
+    handlers.get("before_agent_start")({ prompt }, ctx); assert.equal(aborts, 0);
+    const message = { role: "user", content: prompt };
+    assert.deepEqual(handlers.get("context")({ messages: [message] }, ctx), { messages: [message] });
+    thinking = "low";
+    assert.deepEqual(handlers.get("before_provider_request")({}, ctx), {});
+    assert.deepEqual(handlers.get("context")({ messages: [message] }, ctx), { messages: [] });
+    assert.ok(aborts >= 2);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT4MARKET_CLI_BACKENDS_FILE; else process.env.AGENT4MARKET_CLI_BACKENDS_FILE = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("current task excludes old history and survives a validated local compaction", () => {
   const current = task();
   const marker = { role: "user", content: `[DIRECTOR_TASK_CONTEXT ${current.task_id}] 当前任务` };

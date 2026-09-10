@@ -268,6 +268,32 @@ def doctor_report(
     }
 
 
+def cli_python_executable() -> str:
+    """Freeze the running interpreter's exact native entry point.
+
+    Windows Store activation aliases resolve to a versioned binary. Do not
+    guess base_prefix/python.exe: that different entry point can be EPERM.
+    """
+    executable = Path(sys.executable)
+    if os.name == "nt" and getattr(executable.lstat(), "st_file_attributes", 0) & 0x400:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetModuleFileNameW.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+        kernel.GetModuleFileNameW.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        count = kernel.GetModuleFileNameW(None, buffer, len(buffer))
+        if not count or count >= len(buffer):
+            raise RuntimeError("无法解析当前 Python 的原生入口")
+        executable = Path(buffer.value)
+        if getattr(executable.lstat(), "st_file_attributes", 0) & 0x400:
+            raise RuntimeError("CLI 进程宿主解释器不能使用多级重解析入口")
+    if not executable.is_file():
+        raise RuntimeError("CLI 进程宿主缺少可用的 Python 解释器")
+    return str(executable.resolve())
+
+
 def launch_pi(
     project_root: Path | str,
     arguments: Sequence[str],
@@ -303,6 +329,8 @@ def launch_pi(
     except SearchGatewayError as error:
         raise RuntimeError(f"Search gateway configuration is invalid: {error}") from error
     try:
+        for key in ("AGENT4MARKET_CLI_BACKENDS_FILE", "AGENT4MARKET_CLI_BACKENDS_SHA256", "AGENT4MARKET_CLI_PYTHON"):
+            environment.pop(key, None)
         model_runtime = model_runtime_configuration(root, environ=environment)
     except (ModelProviderError, OSError) as error:
         # Keep the workbench reachable so the user can repair an invalid local model setting.
@@ -313,6 +341,8 @@ def launch_pi(
         for key in ("AGENT4MARKET_MODEL_ERROR", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE", "AGENT4MARKET_MANAGED_MODELS_SHA256"):
             environment.pop(key, None)
         environment.update(model_environment)
+        if model_environment.get("AGENT4MARKET_CLI_BACKENDS_FILE"):
+            environment["AGENT4MARKET_CLI_PYTHON"] = cli_python_executable()
         has_explicit_model = any(
             argument == "--model" or argument.startswith("--model=") for argument in launch_arguments
         )

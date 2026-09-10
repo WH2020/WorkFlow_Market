@@ -6,14 +6,203 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ui import server
 
 
 class ControlCentreTests(unittest.TestCase):
+    def test_app_update_snapshot_is_read_only_and_requires_local_client(self):
+        handler = object.__new__(server.ControlHandler)
+        handler.path = "/api/app-updates?url=https://untrusted.example"
+        handler.local_host = lambda: True
+        handler.local_user = lambda: True
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        checker = Mock()
+        checker.snapshot.return_value = {"status": "not_checked", "current_version": "0.20.2"}
+        with patch.object(server, "APP_UPDATES", checker):
+            handler.do_GET()
+        self.assertEqual(replies, [(HTTPStatus.OK, checker.snapshot.return_value)])
+        checker.snapshot.assert_called_once_with()
+        checker.check.assert_not_called()
+        handler.local_user = lambda: False
+        with patch.object(server, "APP_UPDATES", checker):
+            handler.do_GET()
+        self.assertEqual(len(replies), 1)
+
+    def test_update_check_and_open_post_require_token_and_only_accept_fixed_fields(self):
+        cases = [
+            ("/api/app-updates/check", {"manual": True}, "check", {"manual": True}),
+            ("/api/app-updates/open-release", {"tag": "v0.20.3"}, "open_release", None),
+        ]
+        for route, payload, method, keywords in cases:
+            for token in ("invalid", server.SERVER_TOKEN):
+                handler = object.__new__(server.ControlHandler)
+                encoded = json.dumps(payload).encode()
+                handler.path, handler.rfile = route, io.BytesIO(encoded)
+                handler.headers = {"X-Director-Token": token, "Content-Type": "application/json", "Content-Length": str(len(encoded))}
+                handler.local_host, handler.local_user = lambda: True, lambda: True
+                replies = []
+                handler.send_json = lambda status, value: replies.append((status, value))
+                handler.send_error = lambda status: replies.append((status, {}))
+                checker = Mock()
+                getattr(checker, method).return_value = {"status": "fixture"}
+                with self.subTest(route=route, token=token), patch.object(server, "APP_UPDATES", checker):
+                    handler.do_POST()
+                    if token == server.SERVER_TOKEN:
+                        self.assertEqual(replies[-1][0], HTTPStatus.OK)
+                        if keywords:
+                            getattr(checker, method).assert_called_once_with(**keywords)
+                        else:
+                            checker.open_release.assert_called_once_with("v0.20.3")
+                    else:
+                        self.assertEqual(replies[-1][0], HTTPStatus.FORBIDDEN)
+                        getattr(checker, method).assert_not_called()
+
+    def test_update_routes_reject_arbitrary_urls_or_install_requests(self):
+        for route, payload in (("check", {"url": "https://untrusted.example"}), ("check", {"manual": "true"}),
+                               ("open-release", {"tag": "v0.20.3", "url": "file:///secret"}), ("open-release", {"tag": 123})):
+            handler = object.__new__(server.ControlHandler)
+            encoded = json.dumps(payload).encode()
+            handler.path, handler.rfile = f"/api/app-updates/{route}", io.BytesIO(encoded)
+            handler.headers = {"X-Director-Token": server.SERVER_TOKEN, "Content-Type": "application/json", "Content-Length": str(len(encoded))}
+            handler.local_host, handler.local_user = lambda: True, lambda: True
+            replies = []
+            handler.send_json = lambda status, value: replies.append((status, value))
+            handler.send_error = lambda status: replies.append((status, {}))
+            with self.subTest(route=route, payload=payload), patch.object(server, "APP_UPDATES") as checker:
+                handler.do_POST()
+                self.assertEqual(replies[-1][0], HTTPStatus.BAD_REQUEST)
+                checker.check.assert_not_called()
+                checker.open_release.assert_not_called()
+
+    def test_cli_catalog_post_is_authenticated_and_forwards_only_detected_path(self):
+        payload = {"provider": "codex-cli", "executable_path": "C:/Synthetic/codex.exe", "args": ["untrusted"]}
+        encoded = json.dumps(payload).encode()
+        handler = object.__new__(server.ControlHandler)
+        handler.path = "/api/coding-assistants/models"
+        handler.headers = {"X-Director-Token": server.SERVER_TOKEN, "Content-Type": "application/json", "Content-Length": str(len(encoded))}
+        handler.local_host = lambda: True
+        handler.local_user = lambda: True
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        handler.send_error = lambda status: replies.append((status, {}))
+        for token in ("wrong-token", server.SERVER_TOKEN):
+            handler.headers["X-Director-Token"] = token
+            handler.rfile = io.BytesIO(encoded)
+            with patch("agent_platform.cli_model_catalog.discover_codex_models", return_value={"models": [], "account_verified": False}) as discover:
+                handler.do_POST()
+                if token == server.SERVER_TOKEN:
+                    discover.assert_called_once_with(server.ROOT, "C:/Synthetic/codex.exe")
+                    self.assertEqual(HTTPStatus.OK, replies[-1][0])
+                else:
+                    discover.assert_not_called()
+                    self.assertEqual(HTTPStatus.FORBIDDEN, replies[-1][0])
+
+    def test_cli_task_selection_freezes_configured_default_and_rejects_unsupported_effort(self):
+        key = "agent4market-codex-fixture/synthetic-model"
+        settings = {"default_model": key, "providers": [{"id": "agent4market-codex-fixture", "api": "codex-cli", "status": "configured",
+            "models": [{"id": "synthetic-model", "cli_reasoning": {"supported_efforts": ["low", "high", "ultra"], "default_effort": "low"}, "default_thinking_level": "high"}]}]}
+        with patch.object(server, "model_settings_summary", return_value=settings):
+            self.assertEqual(server.task_runtime_selection({}), {"requested_model": key, "requested_thinking_level": "high"})
+            self.assertEqual(server.task_runtime_selection({"requested_thinking_level": "low"})["requested_thinking_level"], "low")
+            for level in ("off", "medium", "max", "ultra"):
+                with self.subTest(level=level), self.assertRaises(ValueError):
+                    server.task_runtime_selection({"requested_thinking_level": level})
+
+    def test_cli_provider_choice_forwards_discovery_token_and_exact_thinking(self):
+        handler = object.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        with patch("agent_platform.model_provider.configure_coding_assistant_provider", return_value={}) as configure:
+            handler.configure_model_provider_choice({"provider": "codex-cli", "executable_path": "C:/Synthetic/codex.exe",
+                "selected_model": "synthetic-model", "discovery_id": "synthetic-token", "selected_thinking_level": "high"})
+            configure.assert_called_once_with(server.ROOT, provider_type="codex-cli", executable_path="C:/Synthetic/codex.exe",
+                selected_model="synthetic-model", provider_id=None, discovery_id="synthetic-token", selected_thinking_level="high")
+            self.assertEqual(replies[-1][0], HTTPStatus.OK)
+
+    def test_health_returns_only_the_launcher_supplied_startup_token(self):
+        handler = object.__new__(server.ControlHandler)
+        handler.path = "/api/health?desktop_startup_token=untrusted-request-token"
+        handler.local_host = lambda: True
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        with patch.dict(server.os.environ, {"AGENT4MARKET_DESKTOP_STARTUP_TOKEN": "synthetic-launch-token"}, clear=True):
+            handler.do_GET()
+        self.assertEqual(replies[-1][1]["desktop_startup_token"], "synthetic-launch-token")
+        with patch.dict(server.os.environ, {}, clear=True):
+            handler.do_GET()
+        self.assertNotIn("desktop_startup_token", replies[-1][1])
+
+    def test_cli_provider_post_aliases_forward_identity_and_return_reload_contract(self):
+        result = {
+            "version": 3,
+            "status": "configured",
+            "default_model": "agent4market-codex-cli/codex-account-model",
+            "saved_provider_id": "agent4market-codex-cli",
+            "providers": [],
+        }
+        cases = (
+            ("/api/model-provider-choice", "codex-cli", "C:\\Synthetic\\codex.exe"),
+            ("/api/model-provider/configure", "claude-code", "C:\\Synthetic\\claude.exe"),
+        )
+        for route, provider_type, executable_path in cases:
+            with self.subTest(route=route):
+                payload = {
+                    "provider": provider_type,
+                    "executable_path": executable_path,
+                    "selected_model": f"{provider_type}-account-model",
+                    "provider_id": f"agent4market-{provider_type}-existing",
+                }
+                encoded = json.dumps(payload).encode("utf-8")
+                handler = object.__new__(server.ControlHandler)
+                handler.path = route
+                handler.headers = {
+                    "X-Director-Token": server.SERVER_TOKEN,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(encoded)),
+                }
+                handler.rfile = io.BytesIO(encoded)
+                handler.local_host = lambda: True
+                handler.local_user = lambda: True
+                replies = []
+                handler.send_json = lambda status, value: replies.append((status, value))
+                handler.send_error = lambda status: self.fail(f"unexpected HTTP error: {status}")
+
+                with patch(
+                    "agent_platform.model_provider.configure_coding_assistant_provider",
+                    return_value=result,
+                ) as configure:
+                    handler.do_POST()
+
+                configure.assert_called_once_with(
+                    server.ROOT,
+                    provider_type=provider_type,
+                    executable_path=executable_path,
+                    selected_model=f"{provider_type}-account-model",
+                    provider_id=f"agent4market-{provider_type}-existing",
+                )
+                self.assertEqual(HTTPStatus.OK, replies[-1][0])
+                self.assertTrue(replies[-1][1]["restart_required"])
+                self.assertEqual(result, replies[-1][1]["model"])
+                self.assertEqual(result["saved_provider_id"], replies[-1][1]["saved_provider_id"])
+
+    def test_bootstrap_honors_disabled_scheduler_before_other_work(self):
+        handler = object.__new__(server.ControlHandler)
+        handler.path = "/api/bootstrap"
+        handler.local_host = lambda: True
+        handler.local_user = lambda: True
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), patch.object(server, "SCHEDULER_ENABLED", enabled), patch.object(server, "process_due_schedules") as due, patch.object(server, "wechat_http_supported", side_effect=RuntimeError("bootstrap-test-boundary")):
+                # Stop before any filesystem/bootstrap work; this endpoint test
+                # must never inspect the developer's real business data.
+                with self.assertRaisesRegex(RuntimeError, "bootstrap-test-boundary"):
+                    handler.do_GET()
+                self.assertEqual(due.call_count, int(enabled))
+
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(prefix="workbench-server-test-", dir=Path.home())
         self.old_runtime, self.old_tasks, self.old_requests, self.old_plans, self.old_projects, self.old_schedules, self.old_agent_leases, self.old_task_events, self.old_task_messages, self.old_desktop_settings, self.old_ai_core_log, self.old_reimbursement_batches, self.old_file_trash, self.old_active_profile = (
             server.RUNTIME, server.TASKS, server.REQUESTS, server.PRESENTATION_PLANS, server.PROJECTS, server.SCHEDULES, server.AGENT_LEASES, server.TASK_EVENTS, server.TASK_MESSAGES, server.DESKTOP_SETTINGS, server.AI_CORE_LOG, server.REIMBURSEMENT_BATCHES, server.FILE_TRASH, server.ACTIVE_PROFILE_ID
         )
@@ -62,15 +251,80 @@ class ControlCentreTests(unittest.TestCase):
         with (
             patch("sys.argv", arguments),
             patch("sys.stdout", encoded_stdout),
+            patch.object(server, "ROOT", Path(self.temporary.name)),
+            patch.object(server, "A4_API_HANDLER", None),
             patch.object(server, "ThreadingHTTPServer") as http_server,
             patch.object(server.threading, "Thread") as scheduler_thread,
         ):
             http_server.return_value.serve_forever.return_value = None
             server.main()
             encoded_stdout.flush()
+            store = server.A4_API_HANDLER.integration.recommender.store
+            self.assertIsNotNone(store)
+            self.assertEqual(
+                store.database_path,
+                Path(self.temporary.name) / ".pi" / "director-runtime" / "a4-recommendations.db",
+            )
+            self.assertTrue(store.database_path.is_file())
         scheduler_thread.assert_not_called()
         http_server.return_value.server_close.assert_called_once_with()
         self.assertIn(b"Agent4Market workbench started", encoded_output.getvalue())
+        self.assertNotIn(b"Warning: A4 persistence initialization failed", encoded_output.getvalue())
+
+    def test_main_restores_a4_recommendations_and_status_after_restart(self):
+        arguments = ["server.py", "--port", "0", "--profile", "sales-director", "--disable-scheduler"]
+        with (
+            patch("sys.argv", arguments),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+            patch.object(server, "ROOT", Path(self.temporary.name)),
+            patch.object(server, "A4_API_HANDLER", None),
+            patch.object(server, "ThreadingHTTPServer") as http_server,
+        ):
+            http_server.return_value.serve_forever.return_value = None
+            server.main()
+            first_handler = server.A4_API_HANDLER
+            self.assertIsNotNone(first_handler.integration.recommender.store)
+            recommendation_ids = []
+            for account_id in ("acc_startup_pending", "acc_startup_ignored"):
+                result = first_handler.handle_match_play({
+                    "user_input": "客户复盘",
+                    "account_data": {
+                        "account_id": account_id,
+                        "account_name": "启动回归测试客户",
+                        "open_actions": [{
+                            "action_id": f"act_{account_id}",
+                            "due_at": (datetime.now() - timedelta(days=5)).isoformat(),
+                        }],
+                    },
+                })
+                self.assertTrue(result.get("success"), result)
+                recommendations = result["data"]["recommendations"]
+                self.assertEqual(len(recommendations), 1)
+                recommendation_ids.append(recommendations[0]["recommendation_id"])
+            ignored = first_handler.handle_ignore_recommendation({
+                "recommendation_id": recommendation_ids[1],
+                "reason": "已在测试中处理",
+            })
+            self.assertTrue(ignored.get("success"), ignored)
+
+            server.main()
+            restored_handler = server.A4_API_HANDLER
+            self.assertIsNot(restored_handler, first_handler)
+            self.assertIsNot(
+                restored_handler.integration.recommender.store,
+                first_handler.integration.recommender.store,
+            )
+            pending = restored_handler.handle_get_recommendations({})
+            self.assertTrue(pending.get("success"), pending)
+            self.assertEqual(
+                [item["recommendation_id"] for item in pending["data"]["recommendations"]],
+                [recommendation_ids[0]],
+            )
+            restored_ignored = restored_handler.integration.recommender.recommendations[recommendation_ids[1]]
+            self.assertEqual(restored_ignored.status, "ignored")
+            self.assertEqual(restored_ignored.user_feedback, "已在测试中处理")
+            self.assertNotIn("A4 持久化初始化失败", output.getvalue())
+        self.assertEqual(http_server.return_value.server_close.call_count, 2)
 
     def test_atomic_json_round_trip(self):
         target = server.TASKS / "task-a.json"
@@ -328,6 +582,7 @@ class ControlCentreTests(unittest.TestCase):
         handler = object.__new__(server.ControlHandler)
         handler.path = "/api/weekly-briefing?start=2026-08-24&end=2026-08-28"
         handler.local_host = lambda: True
+        handler.local_user = lambda: True  # no socket in this endpoint unit test
         replies = []
         handler.send_json = lambda status, value: replies.append((status, value))
         expected = {"schema_version": "1.0", "seller_briefs": []}
@@ -508,6 +763,106 @@ class ControlCentreTests(unittest.TestCase):
             providers[0]["status"] = "disabled"
             with self.assertRaises(ValueError):
                 server.task_runtime_selection({})
+
+    def test_cli_task_selection_and_creation_require_a_configured_backend(self):
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        replies = []
+        handler.send_json = lambda status, value: replies.append((status, value))
+        for provider_type in ("claude-code", "codex-cli"):
+            with self.subTest(provider_type=provider_type):
+                provider_id = f"agent4market-{provider_type}"
+                model_id = f"{provider_type}-account-model"
+                model_key = f"{provider_id}/{model_id}"
+                provider = {
+                    "id": provider_id,
+                    "name": provider_type,
+                    "vendor": provider_type,
+                    "api": provider_type,
+                    "authentication": "cli-managed-unverified",
+                    "status": "configured",
+                    "has_api_key": False,
+                    "enabled": True,
+                    "models": [{"id": model_id, "enabled": True, "tools": True}],
+                }
+                settings = {
+                    "version": 3,
+                    "configured": True,
+                    "status": "configured",
+                    "default_model": model_key,
+                    "providers": [provider],
+                }
+                with patch("ui.server.model_settings_summary", return_value=settings):
+                    self.assertEqual(
+                        {"requested_model": model_key},
+                        server.task_runtime_selection({"requested_model": model_key}),
+                    )
+                    handler.create_request({
+                        "profile_id": "sales-director",
+                        "service_id": "sales-review",
+                        "project_id": server.DEFAULT_PROJECT_ID,
+                        "request": f"使用 {provider_type} 复盘重点客户",
+                        "requested_model": model_key,
+                    })
+                self.assertEqual(HTTPStatus.CREATED, replies[-1][0])
+                record = server.load_json(server.REQUESTS / f"{replies[-1][1]['request_id']}.json")
+                self.assertEqual(model_key, record["requested_model"])
+
+                for status in ("unavailable", "disabled"):
+                    with self.subTest(provider_type=provider_type, status=status):
+                        provider["status"] = status
+                        with patch("ui.server.model_settings_summary", return_value=settings):
+                            with self.assertRaisesRegex(ValueError, "当前已配置"):
+                                server.task_runtime_selection({"requested_model": model_key})
+                provider["status"] = "configured"
+
+    def test_wechat_task_request_rejects_each_cli_recipient_before_queueing(self):
+        handler = server.ControlHandler.__new__(server.ControlHandler)
+        handler.send_json = lambda *_args: self.fail("a rejected WeChat request must not be queued")
+        scope_id = "wechat-scope-0123456789abcdefabcd"
+        for provider_type in ("claude-code", "codex-cli"):
+            with self.subTest(provider_type=provider_type):
+                provider_id = f"agent4market-{provider_type}"
+                model_id = f"{provider_type}-account-model"
+                model_key = f"{provider_id}/{model_id}"
+                recipient = {
+                    "provider_id": provider_id,
+                    "base_url": "https://example.invalid",
+                    "api": provider_type,
+                    "model_id": model_id,
+                }
+                settings = {
+                    "version": 3,
+                    "status": "configured",
+                    "default_model": model_key,
+                    "providers": [{
+                        "id": provider_id,
+                        "vendor": provider_type,
+                        "api": provider_type,
+                        "authentication": "cli-managed-unverified",
+                        "status": "configured",
+                        "has_api_key": False,
+                        "enabled": True,
+                        "models": [{"id": model_id, "enabled": True, "tools": True}],
+                    }],
+                }
+                with (
+                    patch("ui.server.model_settings_summary", return_value=settings),
+                    patch("ui.server.wechat_review_scope_summary", return_value={
+                        "scope_id": scope_id,
+                        "project_id": server.DEFAULT_PROJECT_ID,
+                        "model_recipient": recipient,
+                    }),
+                    patch("agent_platform.model_registry.available_models", return_value={model_key: recipient}),
+                ):
+                    with self.assertRaisesRegex(ValueError, "不支持 CLI 后端"):
+                        handler.create_request({
+                            "profile_id": "sales-director",
+                            "service_id": "wechat-review",
+                            "project_id": server.DEFAULT_PROJECT_ID,
+                            "request": f"整理微信会话\n授权范围编号：{scope_id}",
+                            "requested_model": model_key,
+                        })
+                self.assertFalse(list(server.REQUESTS.glob("*.json")))
 
     def test_model_boundary_error_leaves_task_restart_controls_available(self):
         task = {"task_id": "blocked", "status": "running", "profile_id": "sales-director", "session_key": "session-a"}

@@ -406,7 +406,7 @@ def model_settings_summary(project_root: Path | str) -> dict[str, Any]:
         if settings and settings.get("version") == 2:
             return {**settings, "configured": False, "status": "unsupported_backend", "providers": [],
                     "has_api_key": False, "models": [],
-                    "error": "CLI 仅支持受控对话入口，尚不是 Pi 模型后端；请添加 API 供应商"}
+                    "error": "旧版 CLI 配置尚未绑定安全执行策略；请重新检测、填写模型 ID 并保存为 CLI 供应商"}
         from .model_registry import summary
         return summary(project_root)
     except (ModelProviderError, OSError) as error:
@@ -487,24 +487,55 @@ def model_runtime_configuration(project_root: Path | str, *, environ=None, home=
 
 
 def detect_coding_assistants(
-    environ: Mapping[str, str] | None = None
+    environ: Mapping[str, str] | None = None,
+    *,
+    project_root: Path | str | None = None,
 ) -> dict[str, dict[str, Any] | None]:
-    """Installation detection only; no guessed model list or credential access."""
-    from .coding_agents import _probe_command
-    environment = dict(os.environ if environ is None else environ)
-    result: dict[str, dict[str, Any] | None] = {}
-    for provider_type, command in (("claude-code", "claude"), ("codex-cli", "codex")):
-        probe = _probe_command(command, environment)
-        result[provider_type] = {
-            "available": bool(probe["ready"]), "path": probe.get("path"),
-            "version": probe.get("version"), "models": [], "backend_available": False,
-            "message": "仅检测到对话入口；尚未实现 Pi 执行后端",
-        }
-    return result
+    """Offline version/help detection only; never inspect CLI login state."""
+    from .cli_provider import detect_coding_assistants as detect
+    return detect(project_root, environ=environ)
 
 
 def configure_coding_assistant_provider(
-    project_root: Path | str, *, provider_type: str, executable_path: str, selected_model: str,
+    project_root: Path | str,
+    *,
+    provider_type: str,
+    executable_path: str,
+    selected_model: str,
+    discovery_id: str | None = None,
+    selected_thinking_level: str | None = None,
+    provider_id: str | None = None,
+    enabled: bool = True,
+    make_default: bool = True,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+    **probe_options: Any,
 ) -> dict[str, Any]:
-    # Never replace a working model registry with an unimplemented Agent backend.
-    raise ModelProviderError("Claude Code / Codex CLI 是受控对话入口，尚不支持作为 Pi 模型后端；请添加 API 供应商")
+    from .cli_provider import resolve_configured_backend
+    from .model_registry import configure_cli_provider
+
+    backend = resolve_configured_backend(
+        project_root,
+        provider_type,
+        executable_path,
+        environ=environ,
+        **probe_options,
+    )
+    metadata = None
+    if discovery_id is not None:
+        from .cli_model_catalog import selected_catalog_model
+        metadata = selected_catalog_model(project_root, backend, discovery_id, selected_model, selected_thinking_level)
+    elif selected_thinking_level is not None:
+        raise ModelProviderError("请先读取 CLI 模型目录，再选择思考强度")
+    return configure_cli_provider(
+        project_root,
+        provider_type=provider_type,
+        selected_model=selected_model,
+        backend=backend,
+        model_metadata=metadata,
+        provider_id=provider_id,
+        enabled=enabled,
+        make_default=make_default,
+        environ=environ,
+        home=home,
+    )

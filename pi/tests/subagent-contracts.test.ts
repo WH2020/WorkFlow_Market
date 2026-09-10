@@ -76,6 +76,28 @@ test("governed subagent contract freezes identity and produces a hashed local re
   }
 });
 
+test("CLI thinking is frozen in the child model suffix, immutable contract and result receipt", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent4market-child-effort-"));
+  try {
+    const contract = createGovernedSubagentContract(root, { task_id: "task-effort", profile_id: "sales-director", node_id: "review",
+      task_version: 1, role: "readonly-reviewer", objective: "Synthetic", expected_model: "agent4market-codex-fixture/synthetic-model",
+      expected_thinking_level: "max", allowed_tools: [], authorized_urls: [] });
+    const controlled = buildGovernedSubagentToolInputForTests({ agent: "director-readonly-reviewer", task: "Synthetic", context: "fork",
+      role: "readonly-reviewer", maxTurns: 6, model: contract.expected_model, thinking: contract.expected_thinking_level });
+    assert.equal(controlled.model, "agent4market-codex-fixture/synthetic-model:max");
+    assert.equal("thinking" in controlled, false, "ordinary subagent tool ignores this field");
+    assert.throws(() => updateGovernedSubagentContract(root, contract.contract_id, (value) => ({ ...value, expected_thinking_level: "high" })), /immutable/u);
+    const pending = { agent: "director-readonly-reviewer", context: "fork", role: "readonly-reviewer", allowed_tool_names: [] } as const;
+    const result = { agent: pending.agent, context: pending.context, exitCode: 0, model: controlled.model, thinking: "max", finalOutput: "Synthetic done" };
+    assert.equal(validateGovernedSubagentResultForTests({ mode: "single", results: [result] }, pending as never, contract).output, "Synthetic done");
+    for (const thinking of [undefined, "high", "ultra"]) {
+      assert.throws(() => validateGovernedSubagentResultForTests({ mode: "single", results: [{ ...result, thinking }] }, pending as never, contract), /thinking/u);
+    }
+    writeGovernedSubagentResult(root, contract, { agent: pending.agent, model: contract.expected_model, output: "Synthetic done" });
+    assert.equal(loadGovernedSubagentResult(root, contract.contract_id).thinking_level, "max");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("governed launch binds role, context, tools and rejects forged result tools", () => {
   const agentDefinition = readFileSync(
     join(process.cwd(), "pi", "subagents", "agents", "director-research-scout.md"),

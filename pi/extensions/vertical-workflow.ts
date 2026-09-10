@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { cliTaskThinking } from "./cli-model-provider.ts";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -857,6 +858,9 @@ export function validateGovernedSubagentResultForTests(
         normalizeModel(attempt.model) !== contract.expected_model)))) {
     throw new Error("Subagent result model differs from its frozen contract; fallback is not authorized");
   }
+  if (contract.expected_thinking_level !== undefined && result.thinking !== contract.expected_thinking_level) {
+    throw new Error("Subagent result thinking differs from its frozen contract");
+  }
   if (
     result.agent !== pending.agent ||
     result.context !== pending.context ||
@@ -906,6 +910,7 @@ export function buildGovernedSubagentToolInputForTests(input: {
   role: GovernedSubagentRole;
   maxTurns: number;
   model?: string;
+  thinking?: TaskThinkingLevel;
 }): Record<string, unknown> {
   return {
     agent: input.agent,
@@ -920,7 +925,9 @@ export function buildGovernedSubagentToolInputForTests(input: {
     acceptance: { level: "none", reason: "受管只读节点由主 Agent DAG 和本地证据回执验收" },
     suppressRoutineResultIntercom: true,
     share: false,
-    ...(input.model ? { model: input.model } : {}),
+    // pi-subagents 0.51.0 ignores top-level `thinking` for ordinary tool runs.
+    // Pi's documented model suffix is the actual child launch contract.
+    ...(input.model ? { model: input.thinking ? `${input.model}:${input.thinking}` : input.model } : {}),
     ...(input.role === "research-scout"
       ? {
           toolTimeoutMs: 120_000,
@@ -1039,7 +1046,13 @@ function isWorkflowTask(value: unknown): value is WorkflowTask {
     optionalRequestedModel(task.requested_model) &&
     optionalModel(task.effective_model) &&
     optionalThinking(task.requested_thinking_level) &&
-    optionalThinking(task.effective_thinking_level)
+    optionalThinking(task.effective_thinking_level) &&
+    (task.role_thinking_levels === undefined || (
+      task.role_thinking_levels !== null && typeof task.role_thinking_levels === "object" && !Array.isArray(task.role_thinking_levels) &&
+      Object.entries(task.role_thinking_levels).every(([role, level]) =>
+        ["director-research-scout", "director-readonly-reviewer"].includes(role) &&
+        thinkingLevels.has(level) && !!task.role_models?.[role])
+    ))
   );
 }
 
@@ -1087,6 +1100,7 @@ function sameExternalDecisionBase(memory: WorkflowTask, disk: WorkflowTask): boo
     effective_recipient: task.effective_recipient,
     role_models: task.role_models,
     role_recipients: task.role_recipients,
+    role_thinking_levels: task.role_thinking_levels,
     effective_thinking_level: task.effective_thinking_level,
     status: task.status,
     completed_nodes: task.completed_nodes,
@@ -1169,7 +1183,8 @@ function inputTargetsSafeProjectRead(input: unknown, projectRoot: string): boole
   return candidates.every((candidate) => {
     if (isAbsolute(candidate)) return false;
     const parts = candidate.split(/[\\/]+/u).filter(Boolean);
-    if (parts.includes("..") || parts.some((part) => SENSITIVE_READ_SEGMENTS.has(part.toLowerCase()))) return false;
+    if (candidate.includes("\0") || parts.includes("..") ||
+        parts.some((part) => part.includes(":") || /[ .]$/u.test(part) || SENSITIVE_READ_SEGMENTS.has(part.toLowerCase()))) return false;
     const fileName = parts.at(-1)?.toLowerCase() ?? "";
     if (
       fileName === ".env" || fileName.startsWith(".env.") ||
@@ -1178,6 +1193,8 @@ function inputTargetsSafeProjectRead(input: unknown, projectRoot: string): boole
       fileName.startsWith("credentials") || fileName.startsWith("secrets")
     ) return false;
     const target = resolve(projectRoot, candidate);
+    // A recursive grep/find at the project root could traverse protected data.
+    if (target === resolve(projectRoot)) return false;
     if (!pathIsWithin(projectRoot, ".", candidate)) return false;
     let cursor = target;
     while (!existsSync(cursor)) {
@@ -1188,7 +1205,8 @@ function inputTargetsSafeProjectRead(input: unknown, projectRoot: string): boole
     if (lstatSync(cursor).isSymbolicLink()) return false;
     const canonical = realpathSync.native(cursor);
     const containment = relative(canonicalRoot, canonical);
-    return !containment.startsWith("..") && !isAbsolute(containment);
+    return !containment.startsWith("..") && !isAbsolute(containment) &&
+      !containment.split(sep).some((part) => SENSITIVE_READ_SEGMENTS.has(part.toLowerCase()));
   });
 }
 
@@ -1285,7 +1303,11 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     if (selection.effective_recipient && !sameRecipient(selection.effective_recipient, recipient)) {
       throw new Error("任务冻结的模型接收方已变化，请恢复原供应商；不会改用其他地址");
     }
-    const requestedThinking = selection.requested_thinking_level ?? defaultThinkingLevel;
+    const cliThinking = cliTaskThinking(target);
+    const requestedThinking = selection.requested_thinking_level ?? cliThinking?.defaultLevel ?? defaultThinkingLevel;
+    if (cliThinking && !cliThinking.levels.includes(requestedThinking)) {
+      throw new Error("该 CLI 模型不支持所选思考强度；请明确选择支持的档位，不会自动降级");
+    }
     try {
       if (target) {
         const switched = await pi.setModel(target);
@@ -1296,6 +1318,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       }
       pi.setThinkingLevel(requestedThinking);
       const effectiveThinking = pi.getThinkingLevel() as TaskThinkingLevel;
+      if (cliThinking && effectiveThinking !== requestedThinking) throw new Error("核心改变了 CLI 思考强度，任务未启动；请重启智能核心");
       return {
         ...(modelKey(currentRuntimeModel) ? { effective_model: modelKey(currentRuntimeModel) } : {}),
         ...(recipient ? { effective_recipient: recipient } : {}),
@@ -2056,6 +2079,10 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     if (unboundSensitiveHistory) throw new Error("旧会话含未绑定接收方的微信内容，请新建 AI 核心会话并重新授权");
     if (process.env.AGENT4MARKET_MODEL_ERROR) throw new Error(process.env.AGENT4MARKET_MODEL_ERROR);
     const currentKey = modelKey(currentRuntimeModel);
+    if (["claude-code", "codex-cli"].includes(currentRuntimeModel?.api ?? "") &&
+        (sensitiveRecipient || (activeTask && authorizedWechatScopesFromRequest(activeTask.request).length > 0))) {
+      throw new Error("微信授权会话暂不支持 CLI 后端，请选择 API 模型；未发送会话内容");
+    }
     const catalog = managedModelCatalog();
     if (catalog && (!currentKey || !sameRecipient(catalog[currentKey], runtimeModelRecipient(currentRuntimeModel)))) {
       throw new Error("当前模型的接收方与受管配置不一致");
@@ -2068,6 +2095,10 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       if (!sameRecipient(activeTask.effective_recipient, catalog[currentKey!])) {
         throw new Error("任务冻结接收方与运行配置不一致");
       }
+    }
+    if (activeTask && (currentRuntimeModel?.api === "codex-cli" || currentRuntimeModel?.api === "claude-code") &&
+        pi.getThinkingLevel() !== activeTask.effective_thinking_level) {
+      throw new Error("任务思考强度已冻结，请勿在执行中更改；未发送模型请求");
     }
   };
   pi.on("context", (event, ctx) => {
@@ -2253,6 +2284,17 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     }
     const toolName = event.toolName;
     const input = event.input;
+    if (!MANAGED_ALLOWED_TOOLS.has(toolName) && toolName !== "subagent") {
+      return { block: true, reason: `销售工作台未授权工具 ${toolName}；空闲状态也不能绕过受控工具边界。` };
+    }
+    // Sensitive local inputs remain protected before/after a governed task too.
+    // In particular WXDecipher staging must never become idle-chat context.
+    if (toolName === "bash") {
+      return { block: true, reason: "销售工作台禁用通用 shell；请使用受控适配器，不能绕过本地敏感资料授权。" };
+    }
+    if (MANAGED_READ_TOOLS.has(toolName) && !inputTargetsSafeProjectRead(input, projectRoot)) {
+      return { block: true, reason: "只允许显式读取项目内非敏感路径；微信原库、解密暂存和 data/ 原文只能经已授权的会话适配器处理。" };
+    }
     if ((toolName === "write" || toolName === "edit") && inputTargetsData(input, projectRoot)) {
       return {
         block: true,
@@ -2297,6 +2339,12 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             (parent.provider_id !== child.provider_id || parent.base_url !== child.base_url || parent.api !== child.api)) {
           throw new Error("分叉复核会读取父会话，只能使用同一供应商与端点的模型");
         }
+        const childPolicy = cliTaskThinking(resolveRequestedModel(selected));
+        const childThinking = childPolicy ? (selected === activeTask.effective_model ? activeTask.effective_thinking_level
+          : activeTask.role_thinking_levels?.[SUBAGENT_AGENT_NAMES[role]] ?? (childPolicy.reasoning ? undefined : "off")) : undefined;
+        if (childPolicy && (!childThinking || !childPolicy.levels.includes(childThinking))) {
+          throw new Error("只读子任务不支持冻结的 CLI 思考强度，未启动子任务");
+        }
         const contract = createGovernedSubagentContract(projectRoot, {
           task_id: activeTask.task_id,
           profile_id: activeTask.profile_id,
@@ -2305,6 +2353,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           role,
           objective: node.boundary.objective,
           ...(selected ? { expected_model: selected } : {}),
+          ...(childThinking ? { expected_thinking_level: childThinking } : {}),
           ...(child ? { model_recipient: child } : {}),
           allowed_tools: node.boundary.allowed_tools,
           authorized_urls: authorizedUrlsFromRequest(activeTask.request),
@@ -2337,6 +2386,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           role,
           maxTurns: node.boundary.max_turns,
           model: selected,
+          thinking: childThinking,
         });
         pendingSubagentCalls.set(event.toolCallId, pending);
         inFlightSubagentNodes.add(nodeKey);
@@ -2357,20 +2407,11 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         reason: `受管工作流未授权工具 ${toolName}；请使用当前 DAG 声明的适配器或只读工具。`,
       };
     }
-    if (toolName === "bash") {
-      return { block: true, reason: "受管工作流运行期间禁用 bash；请使用当前 DAG 的确定性工具或节点完成工具。" };
-    }
     if ((toolName === "write" || toolName === "edit") && activeNodes.some((node) => node.type === "tool")) {
       return { block: true, reason: "当前阶段包含确定性 Tool 节点，只允许调用与 DAG 匹配的 director_* 适配器。" };
     }
     if (MANAGED_READ_TOOLS.has(toolName) && activeNodes.some((node) => node.type === "tool")) {
       return { block: true, reason: "当前阶段包含确定性 Tool 节点，只允许调用与 DAG 匹配的 director_* 适配器。" };
-    }
-    if (MANAGED_READ_TOOLS.has(toolName) && !inputTargetsSafeProjectRead(input, projectRoot)) {
-      return {
-        block: true,
-        reason: "受管任务只允许显式读取项目内非敏感路径；禁止绝对路径、data/.pi/.git、密钥文件和链接穿透。",
-      };
     }
     if ((toolName === "write" || toolName === "edit") && !inputTargetsOnlyOutputs(input, projectRoot)) {
       return { block: true, reason: "受管任务的普通文件写入只允许位于 outputs/；业务数据必须使用受控适配器。" };

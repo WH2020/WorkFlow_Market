@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -118,7 +119,7 @@ afterEach(async () => {
   runtimeCleanups.clear();
 });
 
-function harness(root: string, options: { reasoning?: boolean; idle?: () => boolean } = {}) {
+function harness(root: string, options: { reasoning?: boolean; idle?: () => boolean; cli?: boolean; cliRole?: boolean; clampThinking?: boolean } = {}) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const tools = new Map<string, { execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown> }>();
@@ -131,9 +132,11 @@ function harness(root: string, options: { reasoning?: boolean; idle?: () => bool
     contextWindow: 128_000, maxTokens: 32_768,
   });
   const defaultModel = model("test-provider", "default-model", false);
-  const gatewayModel = model("agent4market-newapi", "gpt-5.5", options.reasoning ?? true);
+  const gatewayModel = options.cli ? { ...model("agent4market-codex-fixture", "synthetic-model", true), api: "codex-cli", baseUrl: "https://chatgpt.com/backend-api/codex" }
+    : model("agent4market-newapi", "gpt-5.5", options.reasoning ?? true);
   const builtinReasoningModel = model("openai", "gpt-5.5", true);
   const availableModels = [defaultModel, gatewayModel, builtinReasoningModel];
+  if (options.cliRole) availableModels.push({ ...model("agent4market-codex-fixture", "synthetic-model", true), api: "codex-cli", baseUrl: "https://chatgpt.com/backend-api/codex" });
   let selectedModel = defaultModel;
   let thinkingLevel = "off";
   const pi = {
@@ -159,7 +162,7 @@ function harness(root: string, options: { reasoning?: boolean; idle?: () => bool
       return true;
     },
     getThinkingLevel() { return thinkingLevel; },
-    setThinkingLevel(level: string) { thinkingLevel = selectedModel.reasoning ? level : "off"; },
+    setThinkingLevel(level: string) { thinkingLevel = selectedModel.reasoning ? options.clampThinking ? "low" : level : "off"; },
   } as unknown as ExtensionAPI;
   verticalWorkflow(pi);
   const ui = { setStatus() {}, notify() {}, select: async () => undefined, input: async () => undefined };
@@ -184,7 +187,8 @@ function harness(root: string, options: { reasoning?: boolean; idle?: () => bool
     scopedModels: [],
   };
   runtimeCleanups.add(async () => { await handlers.get("session_shutdown")?.({}, context); });
-  return { handlers, commands, tools, messages, deliveries, entries, context, selectedModel: () => selectedModel, thinkingLevel: () => thinkingLevel };
+  return { handlers, commands, tools, messages, deliveries, entries, context, selectedModel: () => selectedModel, thinkingLevel: () => thinkingLevel,
+    changeThinking: (value: string) => { thinkingLevel = value; } };
 }
 
 test("streaming core leaves a workbench request queued until idle", async () => {
@@ -376,6 +380,104 @@ test("a workbench request applies and freezes its model and thinking level", asy
     else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
     if (previousEdition === undefined) delete process.env.WORKFLOW_AGENT_EDITION_PROFILE;
     else process.env.WORKFLOW_AGENT_EDITION_PROFILE = previousEdition;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex tasks freeze supported defaults, reject unsupported or clamped efforts, and block later drift", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-cli-thinking-"));
+  const fields = ["WORKFLOW_AGENT_PROFILE", "WORKFLOW_AGENT_EDITION_PROFILE", "AGENT4MARKET_CLI_BACKENDS_FILE", "AGENT4MARKET_CLI_BACKENDS_SHA256", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE"];
+  const previous = Object.fromEntries(fields.map((field) => [field, process.env[field]]));
+  const key = "agent4market-codex-fixture/synthetic-model";
+  const recipient = { provider_id: "agent4market-codex-fixture", api: "codex-cli", base_url: "https://chatgpt.com/backend-api/codex", model_id: "synthetic-model" };
+  const data = JSON.stringify({ version: 1, providers: [{ id: recipient.provider_id, api: recipient.api, base_url: recipient.base_url,
+    executable_path: process.execPath, command: process.execPath, args: [], version: "synthetic", runner_policy_version: 1, launch_sha256: "0".repeat(64),
+    models: [{ id: recipient.model_id, cli_reasoning: { supported_efforts: ["low", "high", "max", "ultra"], default_effort: "low" }, default_thinking_level: "high" }] }] });
+  try {
+    process.env.WORKFLOW_AGENT_PROFILE = process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+    process.env.AGENT4MARKET_CLI_BACKENDS_FILE = join(root, "cli.json"); writeFileSync(process.env.AGENT4MARKET_CLI_BACKENDS_FILE, data);
+    process.env.AGENT4MARKET_CLI_BACKENDS_SHA256 = createHash("sha256").update(data).digest("hex");
+    delete process.env.AGENT4MARKET_MANAGED_MODELS_FILE;
+    process.env.AGENT4MARKET_MANAGED_MODELS = JSON.stringify({ [key]: recipient });
+    for (const [name, level, clamp] of [["default", undefined, false], ["invalid", "medium", false], ["clamp", "high", true]] as const) {
+      const caseRoot = join(root, name); const requestId = `request-cli-${name}`;
+      const directory = join(caseRoot, ".pi", "director-runtime", "requests"); mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, `${requestId}.json`), JSON.stringify({ ...request(requestId, "sales-director"),
+        service_id: "sales-review", workflow_id: "market.sales.pipeline-review", requested_model: key,
+        ...(level ? { requested_thinking_level: level } : {}) }));
+      const runtime = harness(caseRoot, { cli: true, clampThinking: clamp });
+      await runtime.handlers.get("session_start")?.({}, runtime.context); await new Promise((resolve) => setTimeout(resolve, 50));
+      const taskPath = join(caseRoot, ".pi", "director-runtime", "tasks", `${requestId}.json`);
+      if (name === "default") {
+        const task = JSON.parse(readFileSync(taskPath, "utf8"));
+        assert.equal(task.effective_thinking_level, "high"); assert.equal(runtime.thinkingLevel(), "high");
+        let aborts = 0; runtime.context.abort = () => { aborts++; };
+        runtime.changeThinking("low");
+        const filtered = await runtime.handlers.get("context")?.({ messages: [{ role: "user", content: "SYNTHETIC_PRIVATE_CANARY" }] }, runtime.context);
+        assert.deepEqual(filtered, { messages: [] });
+        assert.deepEqual(await runtime.handlers.get("before_provider_request")?.({}, runtime.context), {});
+        assert.ok(aborts >= 2);
+      } else {
+        assert.equal(existsSync(taskPath), false, "unsupported/clamped thinking cannot create a task");
+        assert.equal(runtime.selectedModel().provider, "test-provider", "model must roll back");
+      }
+      await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+    }
+  } finally {
+    for (const field of fields) { if (previous[field] === undefined) delete process.env[field]; else process.env[field] = previous[field]; }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restored CLI role overrides keep task-created thinking after the configured default changes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-cli-role-thinking-"));
+  const fields = ["WORKFLOW_AGENT_PROFILE", "WORKFLOW_AGENT_EDITION_PROFILE", "AGENT4MARKET_CLI_BACKENDS_FILE", "AGENT4MARKET_CLI_BACKENDS_SHA256", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE", "AGENT4MARKET_ROLE_MODELS"];
+  const previous = Object.fromEntries(fields.map((field) => [field, process.env[field]]));
+  const parent = { provider_id: "agent4market-newapi", api: "openai-completions", base_url: "https://models.example", model_id: "gpt-5.5" };
+  const child = { provider_id: "agent4market-codex-fixture", api: "codex-cli", base_url: "https://chatgpt.com/backend-api/codex", model_id: "synthetic-model" };
+  const parentKey = `${parent.provider_id}/${parent.model_id}`, childKey = `${child.provider_id}/${child.model_id}`;
+  const role = "director-research-scout";
+  const configure = (level: string) => {
+    const data = JSON.stringify({ version: 1, providers: [{ id: child.provider_id, api: child.api, base_url: child.base_url,
+      executable_path: process.execPath, command: process.execPath, args: [], version: "synthetic", runner_policy_version: 1, launch_sha256: "0".repeat(64),
+      models: [{ id: child.model_id, cli_reasoning: { supported_efforts: ["low", "high"], default_effort: "low" }, default_thinking_level: level }] }] });
+    process.env.AGENT4MARKET_CLI_BACKENDS_FILE = join(root, "cli.json"); writeFileSync(process.env.AGENT4MARKET_CLI_BACKENDS_FILE, data);
+    process.env.AGENT4MARKET_CLI_BACKENDS_SHA256 = createHash("sha256").update(data).digest("hex");
+  };
+  try {
+    process.env.WORKFLOW_AGENT_PROFILE = process.env.WORKFLOW_AGENT_EDITION_PROFILE = "sales-director";
+    delete process.env.AGENT4MARKET_MANAGED_MODELS_FILE;
+    process.env.AGENT4MARKET_MANAGED_MODELS = JSON.stringify({ [parentKey]: parent, [childKey]: child });
+    process.env.AGENT4MARKET_ROLE_MODELS = JSON.stringify({ [role]: childKey });
+    configure("high");
+    const workflow: RuntimeWorkflow = JSON.parse(readFileSync("vertical_plugins/shared/research/workflows/frontier-research-subagent.json", "utf8"));
+    const created = createTask({ taskId: "task-frozen-role", sessionKey: join(root, "session.jsonl"), profileId: "sales-director",
+      serviceId: "industry-research", workflow, request: "Synthetic public research", effectiveModel: parentKey, effectiveRecipient: parent,
+      effectiveThinkingLevel: "off", ...frozenRoleConfiguration() });
+    assert.equal(created.role_thinking_levels?.[role], "high");
+    const progressed = completeModelNode(created, workflow, "scope", created.version);
+    configure("low");
+    assert.equal(frozenRoleConfiguration().roleThinkingLevels?.[role], "low");
+    for (const legacy of [false, true]) {
+      const caseRoot = join(root, legacy ? "legacy" : "frozen"); mkdirSync(caseRoot);
+      const restored = JSON.parse(JSON.stringify(progressed));
+      restored.session_key = join(caseRoot, "session.jsonl");
+      if (legacy) delete restored.role_thinking_levels;
+      const runtime = harness(caseRoot, { cliRole: true });
+      runtime.entries.push({ type: "custom", customType: "director-task-state", data: restored });
+      await runtime.handlers.get("session_start")?.({}, runtime.context);
+      const input: Record<string, unknown> = {};
+      const result = await runtime.handlers.get("tool_call")?.({ toolName: "subagent", toolCallId: "synthetic-role-call", input }, runtime.context) as any;
+      if (legacy) {
+        assert.equal(result?.block, true); assert.match(result.reason, /冻结的 CLI 思考强度/u);
+        assert.equal(input.model, undefined);
+      } else {
+        assert.equal(result?.block, undefined); assert.equal(input.model, `${childKey}:high`);
+      }
+      await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+    }
+  } finally {
+    for (const field of fields) { if (previous[field] === undefined) delete process.env[field]; else process.env[field] = previous[field]; }
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -587,6 +689,43 @@ test("managed tasks block unknown tools and restrict ordinary writes to outputs"
     if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
     else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sensitive file guards remain enforced in idle, active and completed Pi sessions", async () => {
+  const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+  try {
+    for (const phase of ["idle", "active", "completed"] as const) {
+      const root = mkdtempSync(join(tmpdir(), `director-sensitive-${phase}-`));
+      try {
+        const runtime = harness(root);
+        if (phase !== "idle") {
+          const workflow: RuntimeWorkflow = JSON.parse(readFileSync("vertical_plugins/market/sales/workflows/pipeline-review-readonly-v2.json", "utf8"));
+          const state = createTask({ taskId: `sensitive-${phase}`, sessionKey: join(root, "session.jsonl"),
+            profileId: "sales-director", serviceId: "sales-review-readonly", workflow, request: "只读复核", effectiveModel: "test-provider/default-model" });
+          if (phase === "completed") state.status = "completed";
+          runtime.entries.push({ type: "custom", customType: "director-task-state", data: state });
+        }
+        await runtime.handlers.get("session_start")?.({}, runtime.context);
+        const guard = runtime.handlers.get("tool_call")!;
+        for (const toolName of ["read", "grep", "find", "ls"]) {
+          for (const path of ["data/wechat/decipher", "data/wechat/chat-index.sqlite3", ".", "data./wechat/decipher", join(root, "data/wechat/decipher")]) {
+            const result = guard({ toolName, input: { path, pattern: ".*" } }, runtime.context) as { block?: boolean };
+            assert.equal(result?.block, true, `${phase}: ${toolName} ${path}`);
+          }
+        }
+        for (const toolName of ["bash", "new_unregistered_file_reader"]) {
+          const result = guard({ toolName, input: { command: "read private data" } }, runtime.context) as { block?: boolean };
+          assert.equal(result?.block, true, `${phase}: ${toolName}`);
+        }
+        if (phase !== "active") assert.equal(guard({ toolName: "read", input: { path: "README.md" } }, runtime.context), undefined);
+        await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
+  } finally {
+    if (previousProfile === undefined) delete process.env.WORKFLOW_AGENT_PROFILE;
+    else process.env.WORKFLOW_AGENT_PROFILE = previousProfile;
   }
 });
 
