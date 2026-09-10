@@ -42,3 +42,5 @@ library/templates/company/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
 /runtime/
+/agent_platform/%SystemDrive%/
+/test_request.txt

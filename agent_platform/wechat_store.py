@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -22,6 +23,8 @@ MAX_MESSAGE_CHARS = 20_000
 MAX_SCOPE_CONVERSATIONS = 50
 MAX_SCOPE_MESSAGES = 600
 MAX_SCOPE_TEXT_BYTES = 750_000
+MAX_EXPORT_ROWS = 50_000
+MAX_EXPORT_BYTES = 16 * 1024 * 1024
 ALLOWED_IMPORT_SUFFIXES = {".json", ".jsonl", ".csv"}
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
@@ -48,13 +51,17 @@ def _root(project_root: Path | str) -> Path:
 
 
 def _wechat_root(project_root: Path | str) -> Path:
+    from .wechat_privacy import verify_private_directory
     root = _root(project_root)
     data = root / "data"
-    if data.exists() and (data.is_symlink() or not data.is_dir()):
+    if data.is_symlink() or (data.exists() and (not data.is_dir() or data.resolve() != data.absolute())):
         raise WechatStoreError("UNSAFE_PATH", "应用数据目录必须是普通目录")
     candidate = data / "wechat"
-    if candidate.exists() and not candidate.resolve().is_relative_to(root):
+    if candidate.is_symlink() or (candidate.exists() and candidate.resolve() != candidate.absolute()):
         raise WechatStoreError("UNSAFE_PATH", "微信资料目录越出应用范围")
+    if candidate.exists():
+        # Do not silently migrate legacy broad ACLs or rewrite user-owned data.
+        verify_private_directory(candidate)
     return candidate
 
 
@@ -141,16 +148,22 @@ def _safe_filename(value: str) -> str:
 
 
 def _connect(project_root: Path | str, *, writable: bool) -> sqlite3.Connection:
+    from .wechat_privacy import ensure_private_directory, verify_private_file
     root = _wechat_root(project_root)
     if root.exists() and (root.is_symlink() or not root.is_dir()):
         raise WechatStoreError("UNSAFE_PATH", "微信资料目录必须是应用内的普通目录")
     if writable:
-        root.mkdir(parents=True, exist_ok=True)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        if not root.exists():
+            ensure_private_directory(root)
     path = database_path(project_root)
     if path.exists() and (path.is_symlink() or not path.is_file()):
         raise WechatStoreError("UNSAFE_PATH", "微信会话索引必须是普通文件")
     if not path.exists() and not writable:
         raise WechatStoreError("NOT_CONFIGURED", "尚未导入微信会话")
+    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm"), Path(str(path) + "-journal")):
+        if candidate.exists() or candidate.is_symlink():
+            verify_private_file(candidate)
     try:
         if writable:
             connection = sqlite3.connect(path, timeout=5)
@@ -179,6 +192,7 @@ def _initialize(connection: sqlite3.Connection) -> None:
             scope_id TEXT PRIMARY KEY REFERENCES review_scopes(scope_id) ON DELETE CASCADE,
             recipient_json TEXT NOT NULL CHECK (json_valid(recipient_json))
         ) STRICT""")
+        _initialize_account_bindings(connection)
         connection.commit()
         return
     connection.executescript(
@@ -271,7 +285,21 @@ def _initialize(connection: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         connection.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT")
         connection.execute("INSERT INTO settings VALUES('fts','unavailable')")
+    _initialize_account_bindings(connection)
     connection.commit()
+
+
+def _initialize_account_bindings(connection: sqlite3.Connection) -> None:
+    # Additive: legacy structured imports/scopes keep their original identifiers.
+    connection.execute("""CREATE TABLE IF NOT EXISTS import_batch_accounts (
+        batch_id TEXT PRIMARY KEY REFERENCES import_batches(batch_id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL
+    ) STRICT""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS conversation_accounts (
+        conversation_id TEXT PRIMARY KEY REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        account_id TEXT NOT NULL,
+        account_label TEXT NOT NULL
+    ) STRICT""")
 
 
 def _iter_json_messages(value: Any, inherited: Mapping[str, Any] | None = None) -> Iterator[dict[str, Any]]:
@@ -346,7 +374,7 @@ def _iter_rows(path: Path) -> Iterator[dict[str, Any]]:
     yield from _iter_json_messages(value)
 
 
-def _normalize_message(row: Mapping[str, Any], account_label: str, row_number: int) -> dict[str, Any] | None:
+def _normalize_message(row: Mapping[str, Any], account_label: str, row_number: int, *, account_id: str = "") -> dict[str, Any] | None:
     conversation = _safe_text(_first(row, (
         "conversation", "conversation_id", "talker", "username", "session_id", "chat_id", "room_id",
     )), 500)
@@ -377,7 +405,8 @@ def _normalize_message(row: Mapping[str, Any], account_label: str, row_number: i
     if table and source_message_id:
         source_message_id = f"{table}:{source_message_id}"
     content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    conversation_id = _stable_id("wxconv", account_label, conversation)
+    conversation_id = (_stable_id("wxconv", "account-id", account_id, conversation) if account_id
+                       else _stable_id("wxconv", account_label, conversation))
     identity = source_message_id or f"{epoch}:{sender_id or sender_name}:{kind}:{content_sha256}"
     message_id = _stable_id("wxmsg", conversation_id, identity)
     is_group = _bool(row.get("is_group")) or conversation.endswith("@chatroom")
@@ -401,20 +430,45 @@ def _normalize_message(row: Mapping[str, Any], account_label: str, row_number: i
 
 
 def _copy_raw(project_root: Path, source: Path, batch_id: str, filename: str) -> str:
+    from .wechat_privacy import ensure_private_directory, verify_private_directory, verify_private_file
     imports_root = _wechat_root(project_root) / "imports"
     if imports_root.exists() and (imports_root.is_symlink() or not imports_root.is_dir()):
         raise WechatStoreError("UNSAFE_PATH", "微信导入目录必须是普通目录")
+    if imports_root.exists():
+        verify_private_directory(imports_root)
+    else:
+        ensure_private_directory(imports_root)
     target_root = imports_root / batch_id
-    target_root.mkdir(parents=True, exist_ok=False)
+    if target_root.exists() or target_root.is_symlink():
+        raise WechatStoreError("UNSAFE_PATH", "微信导入批次目录必须是新的独立目录")
+    ensure_private_directory(target_root)
     target = target_root / filename
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".wechat-import-", suffix=".tmp", dir=target_root)
-    os.close(descriptor)
-    temporary = Path(temporary_name)
+    temporary: Path | None = None
+    published = False
     try:
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".wechat-import-", suffix=".tmp", dir=target_root)
+        os.close(descriptor)
+        temporary = Path(temporary_name)
         shutil.copyfile(source, temporary)
         os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
+        published = True
+        verify_private_file(target)
+    except BaseException as error:
+        # The caller cannot clean this batch until we return its relative path.
+        # Roll back only our two known files; never traverse a changed directory.
+        try:
+            if target_root.is_symlink() or target_root.resolve() != target_root.absolute():
+                raise OSError("Unsafe rollback directory")
+            if published:
+                target.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            target_root.rmdir()
+        except OSError:
+            raise WechatStoreError(
+                "CLEANUP_FAILED", "导入失败且本批应用副本未能清除；请检查私有数据目录后重试",
+            ) from error
+        raise
     return target.relative_to(project_root).as_posix()
 
 
@@ -424,6 +478,7 @@ def import_export(
     *,
     source_name: str,
     account_label: str = "本机微信",
+    account_id: str = "",
     retention_days: int = 7,
     auto_cleanup: bool = True,
     ownership_confirmed: bool,
@@ -444,6 +499,8 @@ def import_export(
     if source.suffix.casefold() != Path(filename).suffix.casefold():
         raise WechatStoreError("INVALID_FILE", "上传文件类型与文件名不一致")
     label = _safe_text(account_label, 120, default="本机微信") or "本机微信"
+    if not isinstance(account_id, str) or (account_id and not re.fullmatch(r"[\w.@-]{1,128}", account_id)):
+        raise WechatStoreError("INVALID_ACCOUNT", "本人微信 ID 格式无效")
     if int(retention_days) != 7 or not auto_cleanup:
         raise WechatStoreError("INVALID_RETENTION", "微信导入副本和消息原文固定保留 7 天并自动清理")
     digest = hashlib.sha256()
@@ -458,8 +515,11 @@ def import_export(
     raw_relative = ""
     try:
         duplicate = connection.execute(
-            "SELECT * FROM import_batches WHERE file_sha256=? AND raw_status='retained' ORDER BY imported_at DESC LIMIT 1",
-            (file_sha256,),
+            """SELECT b.* FROM import_batches b LEFT JOIN import_batch_accounts a ON a.batch_id=b.batch_id
+               WHERE b.file_sha256=? AND b.raw_status='retained' AND
+               ((?<>'' AND a.account_id=?) OR (?='' AND a.account_id IS NULL AND b.account_label=?))
+               ORDER BY b.imported_at DESC LIMIT 1""",
+            (file_sha256, account_id, account_id, account_id, label),
         ).fetchone()
         if duplicate:
             return {
@@ -485,13 +545,20 @@ def import_export(
                 0, 0, 0, 0,
             ),
         )
+        if account_id:
+            connection.execute("INSERT INTO import_batch_accounts VALUES(?,?)", (batch_id, account_id))
         parsed_rows = imported = duplicates = 0
         conversation_ids: set[str] = set()
         for row_number, row in enumerate(_iter_rows(imported_copy), 1):
             if row_number > MAX_IMPORT_ROWS:
                 raise WechatStoreError("ROW_LIMIT", f"单次最多导入 {MAX_IMPORT_ROWS} 条消息")
             parsed_rows += 1
-            normalized = _normalize_message(row, label, row_number)
+            row_account = row.get("account_id") or account_id
+            if (not isinstance(row_account, str) or (row_account and not re.fullmatch(r"[\w.@-]{1,128}", row_account))
+                    or (account_id and row_account != account_id)):
+                raise WechatStoreError("ACCOUNT_MISMATCH", "导出文件的账号 ID 与本次填写不一致；请分账号导入")
+            row_label = _safe_text(row.get("account_label"), 120) or label
+            normalized = _normalize_message(row, row_label, row_number, account_id=row_account)
             if normalized is None:
                 continue
             conversation_ids.add(normalized["conversation_id"])
@@ -508,6 +575,11 @@ def import_export(
                     normalized["conversation_id"], normalized["source_username"], normalized["display_name"],
                     normalized["chat_type"], timestamp,
                 ),
+            )
+            connection.execute(
+                """INSERT INTO conversation_accounts VALUES(?,?,?)
+                   ON CONFLICT(conversation_id) DO UPDATE SET account_label=excluded.account_label""",
+                (normalized["conversation_id"], row_account, row_label),
             )
             existing = connection.execute(
                 "SELECT purge_at,conversation_id,content_sha256 FROM messages WHERE message_id=?", (normalized["message_id"],)
@@ -693,6 +765,13 @@ def list_conversations(
                 ORDER BY last_epoch DESC,display_name COLLATE NOCASE,conversation_id LIMIT ? OFFSET ?""",
             [*values, limit, offset],
         )]
+        if rows and connection.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='conversation_accounts'").fetchone():
+            bindings = {row["conversation_id"]: dict(row) for row in connection.execute(
+                f"SELECT * FROM conversation_accounts WHERE conversation_id IN ({','.join('?' for _ in rows)})",
+                [row["conversation_id"] for row in rows],
+            )}
+            for row in rows:
+                row.update(bindings.get(row["conversation_id"], {"account_id": "", "account_label": "历史导入（未绑定 ID）"}))
         return {"total": total, "returned": len(rows), "offset": offset, "rows": rows}
     finally:
         connection.close()
@@ -758,6 +837,94 @@ def read_messages(
         connection.close()
 
 
+def export_selection(project_root: Path | str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Export only explicitly selected, unexpired messages; never call a model."""
+    format_name = payload.get("format", "jsonl")
+    if not isinstance(format_name, str) or format_name not in {"json", "jsonl", "csv"}:
+        raise WechatStoreError("UNSUPPORTED_FORMAT", "导出格式必须是 JSON、JSONL 或 CSV")
+    selected = payload.get("conversation_ids")
+    if (not isinstance(selected, list) or not 1 <= len(selected) <= MAX_SCOPE_CONVERSATIONS
+            or not all(isinstance(value, str) and ID_RE.fullmatch(value) for value in selected)):
+        raise WechatStoreError("INVALID_SCOPE", "导出时请明确选择 1–50 个会话")
+    conversation_ids = sorted(set(selected))
+    start = _date(payload.get("date_from"), "开始日期") if payload.get("date_from") else ""
+    end = _date(payload.get("date_to"), "结束日期") if payload.get("date_to") else ""
+    if start and end and start > end:
+        raise WechatStoreError("INVALID_DATE", "开始日期不能晚于结束日期")
+    query = _safe_text(payload.get("query"), 100)
+    placeholders = ",".join("?" for _ in conversation_ids)
+    clauses = [f"m.conversation_id IN ({placeholders})", "m.purge_at>?"]
+    values: list[Any] = [*conversation_ids, _iso(_now())]
+    message_date = "(CASE WHEN m.epoch>0 THEN date(m.epoch,'unixepoch','localtime') ELSE substr(m.sent_at,1,10) END)"
+    if start:
+        clauses.append(message_date + ">=?")
+        values.append(start)
+    if end:
+        clauses.append(message_date + "<=?")
+        values.append(end)
+    if query:
+        clauses.append("(m.content LIKE ? ESCAPE '\\' OR m.sender_name LIKE ? ESCAPE '\\')")
+        values.extend([_like(query), _like(query)])
+    columns = ["account_id", "account_label", "conversation", "conversation_name", "message_id", "sender_id", "sender_name", "is_self", "time", "kind", "content"]
+    buffer = io.StringIO(newline="")
+    csv_writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n") if format_name == "csv" else None
+    if csv_writer:
+        buffer.write("\ufeff")
+        csv_writer.writeheader()
+    elif format_name == "json":
+        buffer.write("[\n")
+    total_bytes = len(buffer.getvalue().encode("utf-8"))
+    count = 0
+    connection = _connect(project_root, writable=False)
+    try:
+        present = connection.execute(f"SELECT count(*) FROM conversations WHERE conversation_id IN ({placeholders})", conversation_ids).fetchone()[0]
+        if present != len(conversation_ids):
+            raise WechatStoreError("NOT_FOUND", "所选会话已不存在，请刷新后重新选择")
+        bound = connection.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='conversation_accounts'").fetchone()
+        account_fields = "coalesce(a.account_id,'') AS account_id,coalesce(a.account_label,b.account_label) AS account_label" if bound else "'' AS account_id,b.account_label AS account_label"
+        account_join = "LEFT JOIN conversation_accounts a ON a.conversation_id=m.conversation_id" if bound else ""
+        rows = connection.execute(
+            f"""SELECT {account_fields},c.source_username AS conversation,c.display_name AS conversation_name,
+                       m.source_message_id AS message_id,m.sender_id,m.sender_name,m.is_self,
+                       m.sent_at AS time,m.kind,m.content
+                FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id
+                JOIN import_batches b ON b.batch_id=m.source_batch_id {account_join}
+                WHERE {' AND '.join(clauses)}
+                ORDER BY m.epoch,m.conversation_id,m.message_id LIMIT ?""",
+            [*values, MAX_EXPORT_ROWS + 1],
+        )
+        for row in rows:
+            count += 1
+            if count > MAX_EXPORT_ROWS:
+                raise WechatStoreError("ROW_LIMIT", "单次导出最多 50000 条消息，请缩小范围；未生成不完整文件")
+            item = dict(row)
+            if csv_writer:
+                # Spreadsheet applications may evaluate attacker-supplied chat text.
+                safe = {key: ("'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@"))
+                              else value) for key, value in item.items()}
+                row_buffer = io.StringIO(newline="")
+                csv.DictWriter(row_buffer, fieldnames=columns, lineterminator="\n").writerow(safe)
+                encoded = row_buffer.getvalue()
+            else:
+                item["is_self"] = bool(item["is_self"])
+                encoded = ((",\n" if count > 1 else "") if format_name == "json" else "") + json.dumps(item, ensure_ascii=False)
+                if format_name == "jsonl":
+                    encoded += "\n"
+            total_bytes += len(encoded.encode("utf-8"))
+            if total_bytes + 3 > MAX_EXPORT_BYTES:
+                raise WechatStoreError("FILE_TOO_LARGE", "导出内容超过 16 兆字节，请缩小范围；未生成不完整文件")
+            buffer.write(encoded)
+        if not count:
+            raise WechatStoreError("EMPTY_SCOPE", "所选日期和关键词范围内没有仍在保留期的消息")
+    finally:
+        connection.close()
+    if format_name == "json":
+        buffer.write("\n]\n")
+    return {"filename": f"WXDecipher-selected.{format_name}", "format": format_name, "message_count": count,
+            "mime_type": {"json": "application/json", "jsonl": "application/x-ndjson", "csv": "text/csv"}[format_name] + ";charset=utf-8",
+            "content": buffer.getvalue()}
+
+
 def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) -> dict[str, Any]:
     if payload.get("model_sharing_confirmed") is not True:
         raise WechatStoreError(
@@ -768,6 +935,8 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
     recipient = payload.get("model_recipient")
     if not isinstance(recipient, dict) or set(recipient) != {"provider_id", "base_url", "api", "model_id"}:
         raise WechatStoreError("MODEL_RECIPIENT_REQUIRED", "请先选择并确认具体模型供应商、地址和模型")
+    if recipient.get("api") in {"claude-code", "codex-cli"}:
+        raise WechatStoreError("CLI_WECHAT_UNSUPPORTED", "微信授权会话暂不支持 CLI 后端，请选择 API 模型；CLI 登录账号无法可靠冻结")
     key = f"{recipient.get('provider_id')}/{recipient.get('model_id')}"
     if available_models(project_root).get(key) != recipient:
         raise WechatStoreError("MODEL_RECIPIENT_CHANGED", "模型接收方不可用或已发生变化，请重新确认")
@@ -935,6 +1104,32 @@ def review_scope_summary(project_root: Path | str, scope_id: str) -> dict[str, A
         connection.close()
 
 
+def _purge_batch_directory(root: Path, batch_id: str) -> int:
+    """Only flat, ordinary files inside a validated app-owned batch directory."""
+    from .wechat_privacy import verify_private_directory, verify_private_file
+    if not re.fullmatch(r"wechat-batch-[a-f0-9]{20}", batch_id):
+        raise WechatStoreError("UNSAFE_PATH", "微信导入批次目录无效")
+    parent = _wechat_root(root) / "imports"
+    target = parent / batch_id
+    for directory in (parent, target):
+        if directory.is_symlink() or (directory.exists() and
+                (not directory.is_dir() or directory.resolve() != directory.absolute())):
+            raise WechatStoreError("UNSAFE_PATH", "微信导入清理路径不是普通目录")
+        if directory.exists():
+            verify_private_directory(directory)
+    if not target.exists():
+        return 0
+    files = list(target.iterdir())
+    if any(not file.is_file() or file.is_symlink() or file.stat().st_nlink != 1 for file in files):
+        raise WechatStoreError("UNSAFE_PATH", "微信导入目录含非普通文件，已停止清理")
+    for file in files:
+        verify_private_file(file)
+    for file in files:
+        file.unlink()
+    target.rmdir()
+    return len(files)
+
+
 def cleanup_expired(project_root: Path | str, *, reference: datetime | None = None) -> dict[str, Any]:
     path = database_path(project_root)
     if not path.is_file():
@@ -951,16 +1146,20 @@ def cleanup_expired(project_root: Path | str, *, reference: datetime | None = No
             (cutoff,),
         ).fetchall()
         for batch in batches:
-            raw = (root / batch["raw_path"]).resolve()
-            allowed = (_wechat_root(root) / "imports").resolve()
-            if raw.is_relative_to(allowed) and raw.is_file() and not raw.is_symlink():
-                raw.unlink()
-                purged_files += 1
-                try:
-                    raw.parent.rmdir()
-                except OSError:
-                    pass
+            purged_files += _purge_batch_directory(root, batch["batch_id"])
             connection.execute("UPDATE import_batches SET raw_status='purged' WHERE batch_id=?", (batch["batch_id"],))
+        # A crash can happen after a raw copy was created but before its DB
+        # transaction commits. Expire those unregistered copies as well.
+        imports = _wechat_root(root) / "imports"
+        if imports.exists():
+            if imports.is_symlink() or not imports.is_dir() or imports.resolve() != imports.absolute():
+                raise WechatStoreError("UNSAFE_PATH", "微信导入目录必须是普通目录")
+            known = {row[0] for row in connection.execute("SELECT batch_id FROM import_batches")}
+            orphan_cutoff = (instant - timedelta(days=7)).timestamp()
+            for candidate in imports.iterdir():
+                if (re.fullmatch(r"wechat-batch-[a-f0-9]{20}", candidate.name)
+                        and candidate.name not in known and candidate.lstat().st_mtime <= orphan_cutoff):
+                    purged_files += _purge_batch_directory(root, candidate.name)
         expired_ids = [row[0] for row in connection.execute("SELECT message_id FROM messages WHERE purge_at<=?", (cutoff,))]
         if expired_ids:
             try:

@@ -1650,6 +1650,9 @@ function escapeSqlLike(value: string): string {
 }
 
 function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipient?: ModelRecipient): Record<string, unknown> {
+  if (recipient && ["claude-code", "codex-cli"].includes(recipient.api)) {
+    throw new Error("微信授权会话暂不支持 CLI 后端，请选择 API 模型");
+  }
   const database = new DatabaseSync(resolveWechatDatabase(projectRoot), {
     allowExtension: false,
     defensive: true,

@@ -1,9 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadGovernedSubagentContract, type GovernedSubagentContract } from "./subagent-contracts.ts";
 import { managedModelCatalog, runtimeModelRecipient, sameRecipient, taskScopedMessages } from "./model-selection.ts";
+import registerCliProviders from "./cli-model-provider.ts";
 
 /** The child process must reject a fallback before private context reaches any transport. */
 export default function registerModelGuard(pi: ExtensionAPI): void {
+  registerCliProviders(pi);
   let contract: GovernedSubagentContract | undefined;
   let failure: string | undefined;
   const abort = (ctx: ExtensionContext, error: unknown) => {
@@ -19,6 +21,10 @@ export default function registerModelGuard(pi: ExtensionAPI): void {
     if ((contract.model_recipient || managedModelCatalog()) &&
         !sameRecipient(contract.model_recipient, runtimeModelRecipient(ctx.model))) {
       throw new Error("Subagent 实际接收方与冻结合同不一致");
+    }
+    if ((ctx.model?.api === "codex-cli" || ctx.model?.api === "claude-code" || contract.expected_thinking_level !== undefined) &&
+        (contract.expected_thinking_level === undefined || pi.getThinkingLevel() !== contract.expected_thinking_level)) {
+      throw new Error("Subagent 实际思考强度与冻结合同不一致");
     }
   };
   pi.on("before_agent_start", (event, ctx) => {

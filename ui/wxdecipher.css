@@ -1,0 +1,43 @@
+.wxdecipher-console {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border: 1px solid #dce5ee;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+.wechat-panel .period-badge { white-space: nowrap; flex-shrink: 0; }
+.wechat-conversation-account { overflow-wrap: anywhere; }
+.wxdecipher-console > summary { cursor: pointer; color: #263d57; font-size: 14px; font-weight: 750; }
+.wxdecipher-console > summary .hint { margin-left: 10px; font-weight: 400; }
+.wxdecipher-console > p { margin-top: 12px; line-height: 1.65; }
+.wxdecipher-files { display: grid; gap: 8px; margin: 12px 0; padding: 0; list-style: none; }
+.wxdecipher-files li { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid #e0e7ee; border-radius: 8px; background: #fff; }
+.wxdecipher-files li > span { color: #41546a; font-size: 12px; overflow-wrap: anywhere; }
+.wxdecipher-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.wxdecipher-fields > label { display: grid; gap: 6px; color: #4f5d70; font-size: 12px; font-weight: 700; }
+.wxdecipher-fields > label:last-child { grid-column: 1 / -1; }
+.wxdecipher-fields input, .wxdecipher-fields select, .wxdecipher-files input, .wxdecipher-export select {
+  min-width: 0; width: 100%; padding: 9px 10px; border: 1px solid #c5cfdd; border-radius: 8px; background: #fff; color: var(--ink); font: inherit;
+}
+.wxdecipher-fields input:focus-visible, .wxdecipher-fields select:focus-visible, .wxdecipher-files input:focus-visible {
+  outline: 3px solid #5b87bb55; outline-offset: 2px;
+}
+.wxdecipher-snapshot { margin-top: 14px; max-width: 920px; }
+.wxdecipher-status { margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: #edf4f8; color: #39576c; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.7; }
+.wxdecipher-status.error { background: #fff1f0; color: #9b343d; border: 1px solid #edc4c4; }
+.wxdecipher-export { padding-top: 16px; border-top: 1px solid #e5ebf2; }
+.wxdecipher-export label { font-size: 12px; font-weight: 700; color: #4f5d70; }
+.wxdecipher-export select { width: auto; max-width: 100%; font-size: 12px; }
+.wxdecipher-media-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.wxdecipher-media-results article { min-width: 0; padding: 12px; border: 1px solid #dce5ee; border-radius: 8px; background: white; overflow-wrap: anywhere; }
+.wxdecipher-media-results img { display: block; width: 100%; max-height: 240px; object-fit: contain; margin: 8px 0; }
+.wxdecipher-media-results p { font-size: 12px; line-height: 1.6; }
+.wxdecipher-process-actions select { min-width: 0; max-width: 100%; padding: 9px 10px; border: 1px solid #c5cfdd; border-radius: 8px; background: #fff; font: inherit; }
+@media (max-width: 760px) {
+  .wxdecipher-console { padding: 12px; }
+  .wxdecipher-console > summary .hint { display: block; margin: 5px 0 0; }
+  .wxdecipher-files li { grid-template-columns: minmax(0, 1fr) auto; }
+  .wxdecipher-files li > span { grid-column: 1 / -1; }
+  .wxdecipher-fields { grid-template-columns: 1fr; }
+  .wxdecipher-media-results { grid-template-columns: 1fr; }
+}

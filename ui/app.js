@@ -9,9 +9,19 @@
   let editingModelId = "";
   let discoveredModelOptions = [];
   let providerSettingsInitialized = false;
+  let codingAssistantDetection = {};
+  let codexModelCatalog = null;
+  let codexCatalogLoading = false;
+  let codexCatalogAttempt = "";
   let searchSettingsInitialized = false;
   let searchGatewaySettingsInitialized = false;
   let runtimeSettingsInitialized = false;
+  let appUpdateState = null;
+  let appUpdateRequestBusy = false;
+  let appUpdateOpening = false;
+  let appUpdateLocalError = "";
+  let appUpdateAutoEnabled = true;
+  let appUpdateLastAutoAttempt = null;
   let mailSettingsInitialized = false;
   let taskRuntimeCatalogKey = "";
   let currentView = "home";
@@ -47,6 +57,8 @@
     rows: [], selected: new Set(), selectedId: "", messages: [], revision: "", renderedKey: "",
     loading: false, loaded: false, error: "", previewLoading: false, previewGeneration: 0, creating: false,
   };
+  const wxdecipherState = { files: [], busy: false, exporting: false, captureLoading: false };
+  const wxmediaState = { busy: false, urls: [] };
   const customerState = {
     filters: { query: "", owner: "", region: "", industry: "", stage: "", health: "", updated: "" },
     rows: [], cursor: "", hasMore: false, loading: false, loaded: false, error: "", selectedId: "", detail: null,
@@ -211,7 +223,7 @@
   }
 
   const viewTitles = {
-    home: "工作台", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
+    home: "工作台", chat: "自由聊天", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
     bids: "智能招投标", knowledge: "资料库", weekly: "销售行动简报", outputs: "输出中心", projects: "项目空间",
     schedules: "每日定时任务", search: "自定义操作", tools: "工具栏", settings: "设置",
   };
@@ -517,6 +529,43 @@
     return settings.providers || (settings.configured && settings.provider_id ? [{ ...settings, id: settings.provider_id, name: "NewAPI" }] : []);
   }
 
+  const CLI_PROVIDER_TYPES = new Set(["claude-code", "codex-cli"]);
+
+  function providerType(provider) {
+    return CLI_PROVIDER_TYPES.has(provider?.vendor) ? provider.vendor
+      : CLI_PROVIDER_TYPES.has(provider?.provider) ? provider.provider
+        : CLI_PROVIDER_TYPES.has(provider?.provider_type) ? provider.provider_type
+          : CLI_PROVIDER_TYPES.has(provider?.api) ? provider.api : "api";
+  }
+
+  function isCliProvider(provider) {
+    return CLI_PROVIDER_TYPES.has(providerType(provider));
+  }
+
+  function apiModelProviders() {
+    return modelProviders().filter((provider) => !isCliProvider(provider));
+  }
+
+  function cliProvider(type) {
+    const settings = model?.model || {};
+    const providers = modelProviders().filter((provider) => providerType(provider) === type);
+    return providers.find((provider) => settings.default_model?.startsWith(provider.id + "/"))
+      || providers.find((provider) => provider.status === "configured") || providers[0];
+  }
+
+  function matchingCliProvider(type, detection) {
+    const executablePath = detection.executable_path || detection.path;
+    return modelProviders().find((provider) => providerType(provider) === type
+      && provider.status === "configured" && provider.executable_path === executablePath
+      && Boolean(provider.version) && provider.version === detection.version
+      && (!provider.launch_sha256 || !detection.launch_sha256 || provider.launch_sha256 === detection.launch_sha256));
+  }
+
+  function runnableModelProviders() {
+    return modelProviders().filter((provider) => provider.status === "configured" && provider.enabled !== false
+      && (isCliProvider(provider) || provider.has_api_key));
+  }
+
   function saveEditedCapabilities() {
     if (!editingModelId) return;
     editingModels.set(editingModelId, {
@@ -550,7 +599,7 @@
 
   function fillProviderEditor(id) {
     const settings = model?.model || {};
-    const provider = modelProviders().find((item) => item.id === id);
+    const provider = apiModelProviders().find((item) => item.id === id);
     $("model-instance").value = provider?.id || "";
     $("model-provider-name").value = provider?.name || "NewAPI";
     $("model-vendor").value = provider?.vendor || "newapi";
@@ -574,7 +623,7 @@
     for (const [control, role] of [["model-role-scout", "director-research-scout"], ["model-role-reviewer", "director-readonly-reviewer"]]) {
       const follow = document.createElement("option"); follow.value = ""; follow.textContent = "跟随主任务";
       const options = [follow];
-      modelProviders().filter((item) => item.status === "configured").forEach((item) => {
+      runnableModelProviders().forEach((item) => {
         (item.models || []).filter((entry) => entry.enabled !== false && entry.tools !== false).forEach((entry) => {
           const option = document.createElement("option"); option.value = item.id + "/" + entry.id;
           option.textContent = item.name + " · " + entry.id; options.push(option);
@@ -592,94 +641,229 @@
     panel.classList.toggle("error", ["error", "unsupported_backend", "missing_default"].includes(settings.status));
     $("model-current").textContent = settings.error || (settings.default_model
       ? "默认：" + settings.default_model + " · " + modelProviders().length + " 个供应商"
-      : modelProviders().length ? "请选择一个已启用的默认模型" : "尚未添加 API 供应商");
+      : modelProviders().length ? "请选择一个已启用的默认模型" : "尚未添加模型供应商");
     if (modelSettingsInitialized && !force) return;
     modelSettingsInitialized = true;
     const previous = $("model-instance").value;
     const empty = document.createElement("option"); empty.value = ""; empty.textContent = "新增供应商";
     const options = [empty];
-    modelProviders().forEach((item) => {
+    apiModelProviders().forEach((item) => {
       const option = document.createElement("option"); option.value = item.id;
       option.textContent = item.name + " · " + (item.status === "configured" ? "已配置" : item.status === "disabled" ? "已停用" : "缺少凭据");
       options.push(option);
     });
     $("model-instance").replaceChildren(...options);
-    fillProviderEditor(settings.saved_provider_id || previous || settings.provider_id || "");
+    const preferred = [settings.saved_provider_id, previous, settings.provider_id]
+      .find((id) => apiModelProviders().some((provider) => provider.id === id)) || "";
+    fillProviderEditor(preferred);
   }
 
-  function renderProviderSettings() {
+  function selectedProviderType() {
+    return [...document.querySelectorAll('input[name="provider-type"]')].find((radio) => radio.checked)?.value || "newapi";
+  }
+
+  function selectProviderType(type) {
+    const selected = CLI_PROVIDER_TYPES.has(type) ? type : "newapi";
+    document.querySelectorAll('input[name="provider-type"]').forEach((radio) => { radio.checked = radio.value === selected; });
+    $("api-provider-config").hidden = selected !== "newapi";
+    $("claude-code-config").hidden = selected !== "claude-code";
+    $("codex-cli-config").hidden = selected !== "codex-cli";
+    const saved = CLI_PROVIDER_TYPES.has(selected) ? cliProvider(selected) : null;
+    const detection = codingAssistantDetection[selected] || {};
+    $("save-provider-settings").textContent = selected === "newapi" ? "管理 API 供应商" : "保存并设为默认";
+    $("save-provider-settings").disabled = selected !== "newapi" && (!detection.available || detection.backend_available === false || !$(selected + "-path").value.trim());
+    if (selected === "codex-cli") {
+      $("save-provider-settings").disabled ||= codexCatalogLoading || !codexModelCatalog?.models.some((item) => item.id === $("codex-cli-model").value && item.supported_thinking_levels.includes($("codex-cli-thinking").value));
+      if (detection.available && codexCatalogAttempt !== (detection.launch_sha256 || detection.path)) void loadCodexModels();
+    }
+    $("reset-cli-provider").hidden = selected === "newapi";
+    $("reset-cli-provider").disabled = !saved;
+  }
+
+  function cliConfiguredModel(provider) {
+    if (!provider) return "";
     const settings = model?.model || {};
-    $("provider-current").textContent = settings.error || "Pi 模型执行核心 · " + modelProviders().length + " 个 API 供应商";
+    if (settings.default_model?.startsWith(provider.id + "/")) return settings.default_model.slice(provider.id.length + 1);
+    return provider.selected_model || (provider.models || []).find((item) => item.enabled !== false)?.id || "";
+  }
+
+  function renderCodexThinking(preserve = false) {
+    const control = $("codex-cli-thinking");
+    const record = codexModelCatalog?.models.find((item) => item.id === $("codex-cli-model").value);
+    const saved = cliProvider("codex-cli")?.models?.find((item) => item.id === record?.id);
+    const previous = preserve ? control.value : "";
+    const options = [];
+    for (const effort of record?.cli_reasoning.supported_efforts || []) {
+      const level = effort === "none" ? "off" : effort;
+      const option = document.createElement("option"); option.value = level;
+      option.disabled = !record.supported_thinking_levels.includes(level);
+      option.textContent = (level === "off" ? "off（关闭思考）" : level) + (option.disabled ? "（当前工作台核心不支持）" : "");
+      options.push(option);
+    }
+    const declared = record?.cli_reasoning.default_effort;
+    const desired = previous || saved?.default_thinking_level || (declared === "none" ? "off" : declared);
+    if (!record?.supported_thinking_levels.includes(desired)) {
+      const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "请选择受支持的思考强度";
+      options.unshift(placeholder);
+    }
+    control.replaceChildren(...options);
+    control.value = record?.supported_thinking_levels.includes(desired) ? desired : "";
+    control.disabled = !record || codexCatalogLoading;
+  }
+
+  function renderCodexCatalog(forceSaved = false) {
+    const control = $("codex-cli-model");
+    const saved = cliConfiguredModel(cliProvider("codex-cli"));
+    const desired = (forceSaved ? saved : control.value || saved) || codexModelCatalog?.models.find((item) => item.is_default)?.id || "";
+    const options = (codexModelCatalog?.models || []).map((item) => {
+      const option = document.createElement("option"); option.value = item.id;
+      option.textContent = item.display_name === item.id ? item.id : `${item.display_name} · ${item.id}`;
+      option.disabled = item.supported_thinking_levels.length === 0;
+      return option;
+    });
+    if (!options.some((option) => option.value === desired)) {
+      const placeholder = document.createElement("option"); placeholder.value = desired;
+      placeholder.textContent = desired ? `${desired}（原配置；尚未在目录中确认）` : "请选择目录中的模型";
+      options.unshift(placeholder);
+    }
+    control.replaceChildren(...options); control.value = desired;
+    control.disabled = !codexModelCatalog || codexCatalogLoading;
+    renderCodexThinking(!forceSaved);
+  }
+
+  async function loadCodexModels(force = false) {
+    const detection = codingAssistantDetection["codex-cli"] || {};
+    const key = detection.launch_sha256 || detection.path;
+    if (codexCatalogLoading || !detection.available || (!force && codexCatalogAttempt === key)) return;
+    codexCatalogAttempt = key; codexCatalogLoading = true; codexModelCatalog = null;
+    $("refresh-codex-models").disabled = true;
+    $("codex-cli-catalog-status").textContent = "正在读取隔离的 Codex 模型目录（不会发起模型任务）…";
+    renderCodexCatalog(); selectProviderType(selectedProviderType());
+    try {
+      const response = await api("/api/coding-assistants/models", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "codex-cli", executable_path: detection.path }) });
+      const current = codingAssistantDetection["codex-cli"] || {};
+      if ((current.launch_sha256 || current.path) !== key) throw new Error("CLI 已变化，请重新读取模型目录");
+      codexModelCatalog = response;
+      $("codex-cli-catalog-status").textContent = `已读取 ${response.models.length} 个 CLI 目录模型；未读取登录文件、未验证账号权限。ultra 等核心不支持的档位不可选。`;
+    } catch (error) {
+      $("codex-cli-catalog-status").textContent = error.message + " 已有模型配置保持不变。";
+    } finally {
+      codexCatalogLoading = false; $("refresh-codex-models").disabled = false;
+      renderCodexCatalog(); selectProviderType(selectedProviderType());
+    }
+  }
+
+  function renderProviderSettings(force = false) {
+    const settings = model?.model || {};
+    const apiCount = apiModelProviders().length;
+    const cliCount = modelProviders().filter(isCliProvider).length;
+    $("provider-current").textContent = settings.error || `Pi 模型执行核心 · ${apiCount} 个 API 供应商 · ${cliCount} 个 CLI 供应商`;
     $("model-provider-panel").classList.toggle("configured", settings.status === "configured");
-    $("claude-code-config").hidden = true;
-    $("codex-cli-config").hidden = true;
-    $("newapi-status").textContent = modelProviders().length ? "在下方按实例配置" : "尚未配置";
+    $("newapi-status").textContent = apiCount ? `${apiCount} 个已保存实例` : "尚未配置";
+    for (const type of CLI_PROVIDER_TYPES) {
+      const saved = cliProvider(type);
+      const detection = codingAssistantDetection[type] || {};
+      const status = $(type + "-status");
+      status.classList.toggle("available", Boolean(detection.available));
+      status.classList.toggle("unavailable", !detection.available);
+      if (saved) status.textContent = detection.available ? "已配置 · 登录状态未验证" : "已配置 · 当前未检测到程序";
+      else if (detection.available) status.textContent = detection.backend_available === false
+        ? "已安装 · 当前版本暂不支持直接执行"
+        : `已安装${detection.version ? ` (${detection.version})` : ""} · 登录状态未验证`;
+      else status.textContent = detection.reason || "未检测到";
+      if (force || !providerSettingsInitialized) {
+        $(type + "-path").value = detection.path || saved?.executable_path || "";
+        if (type !== "codex-cli") $(type + "-model").value = cliConfiguredModel(saved);
+      } else if (detection.path) {
+        $(type + "-path").value = detection.path;
+      }
+      $(type + "-config-status").textContent = saved
+        ? `已保存 ${cliConfiguredModel(saved) || "模型 ID"}；本机 CLI 自行管理登录，工作台未验证当前账号。`
+        : "只登记检测到的程序路径和你填写的完整模型 ID；不会读取或验证 CLI 登录账号。";
+    }
+    renderCodexCatalog(force || !providerSettingsInitialized);
+    if (!providerSettingsInitialized || force) {
+      const defaultProvider = modelProviders().find((provider) => settings.default_model?.startsWith(provider.id + "/"));
+      selectProviderType(providerType(defaultProvider));
+    } else {
+      selectProviderType(selectedProviderType());
+    }
+    providerSettingsInitialized = true;
   }
 
   async function detectCodingAssistants() {
+    for (const type of CLI_PROVIDER_TYPES) {
+      $(type + "-status").textContent = "检测中…";
+      $(type + "-status").classList.remove("available");
+      $(type + "-status").classList.add("unavailable");
+    }
     try {
       const response = await api("/api/coding-assistants/detect");
-      const claudeStatus = $("claude-code-status");
-      const codexStatus = $("codex-cli-status");
-
-      // 处理 Claude Code 检测结果
-      if (response["claude-code"]?.available) {
-        claudeStatus.textContent = `已安装 (${response["claude-code"].version})`;
-        claudeStatus.classList.remove("unavailable");
-        claudeStatus.classList.add("available");
-        $("claude-code-path").value = response["claude-code"].path;
-
-        // 填充 Claude Code 模型下拉框
-        const claudeModelSelect = $("claude-code-model");
-        claudeModelSelect.innerHTML = "";
-        response["claude-code"].models.forEach((model) => {
-          const option = document.createElement("option");
-          option.value = model.id;
-          option.textContent = model.name;
-          claudeModelSelect.appendChild(option);
-        });
-      } else {
-        claudeStatus.textContent = "未检测到";
-        claudeStatus.classList.remove("available");
-        claudeStatus.classList.add("unavailable");
-        $("claude-code-path").value = "";
+      codingAssistantDetection = Object.fromEntries([...CLI_PROVIDER_TYPES].map((type) => [type, response[type] || {}]));
+      codexCatalogAttempt = ""; codexModelCatalog = null;
+      for (const type of CLI_PROVIDER_TYPES) {
+        if (codingAssistantDetection[type].path) $(type + "-path").value = codingAssistantDetection[type].path;
+        else if (!cliProvider(type)) $(type + "-path").value = "";
       }
-
-      // 处理 Codex CLI 检测结果
-      if (response["codex-cli"]?.available) {
-        codexStatus.textContent = `已安装 (${response["codex-cli"].version})`;
-        codexStatus.classList.remove("unavailable");
-        codexStatus.classList.add("available");
-        $("codex-cli-path").value = response["codex-cli"].path;
-
-        // 填充 Codex CLI 模型下拉框
-        const codexModelSelect = $("codex-cli-model");
-        codexModelSelect.innerHTML = "";
-        response["codex-cli"].models.forEach((model) => {
-          const option = document.createElement("option");
-          option.value = model.id;
-          option.textContent = model.name;
-          codexModelSelect.appendChild(option);
-        });
-      } else {
-        codexStatus.textContent = "未检测到";
-        codexStatus.classList.remove("available");
-        codexStatus.classList.add("unavailable");
-        $("codex-cli-path").value = "";
-      }
-
+      renderProviderSettings();
       return response;
     } catch (error) {
-      $("claude-code-status").textContent = "检测失败";
-      $("codex-cli-status").textContent = "检测失败";
+      codingAssistantDetection = {};
+      for (const type of CLI_PROVIDER_TYPES) {
+        $(type + "-status").textContent = "检测失败";
+        $(type + "-status").classList.remove("available");
+        $(type + "-status").classList.add("unavailable");
+      }
+      selectProviderType(selectedProviderType());
       throw error;
     }
   }
 
   async function saveProviderSettings() {
-    $("model-settings-panel").open = true;
-    $("model-settings-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-    $("model-instance").focus();
+    const type = selectedProviderType();
+    if (type === "newapi") {
+      $("model-settings-panel").open = true;
+      $("model-settings-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      $("model-instance").focus();
+      return;
+    }
+    const detection = codingAssistantDetection[type] || {};
+    const executablePath = $(type + "-path").value.trim();
+    const selectedModel = $(type + "-model").value.trim();
+    const status = $(type + "-config-status");
+    const selectedThinking = type === "codex-cli" ? $("codex-cli-thinking").value : undefined;
+    if (type === "codex-cli" && !codexModelCatalog?.models.some((item) => item.id === selectedModel && item.supported_thinking_levels.includes(selectedThinking))) {
+      status.textContent = "请从已读取的目录中选择模型及受支持的思考强度。"; return;
+    }
+    if (!detection.available || !executablePath) { status.textContent = "请先检测到本机 CLI；程序路径不能手动填写。"; return; }
+    if (detection.backend_available === false) { status.textContent = "当前工作台版本尚未提供该 CLI 的直接执行后端。"; return; }
+    if (!selectedModel || selectedModel.length > 200 || /\s|[\x00-\x1f\x7f]/u.test(selectedModel)) {
+      status.textContent = "请填写不含空白字符的真实完整模型 ID（最多 200 个字符）。";
+      return;
+    }
+    const button = $("save-provider-settings");
+    button.disabled = true;
+    status.textContent = "正在保存 CLI 模型配置…";
+    try {
+      const existing = matchingCliProvider(type, detection);
+      const response = await api("/api/model-provider-choice", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: type, executable_path: executablePath, selected_model: selectedModel,
+          ...(type === "codex-cli" ? { discovery_id: codexModelCatalog.discovery_id, selected_thinking_level: selectedThinking } : {}),
+          ...(existing?.id ? { provider_id: existing.id } : {}) }),
+      });
+      model.model = response.model || response;
+      providerSettingsInitialized = false;
+      renderModelSettings(true); renderProviderSettings(true); renderTaskRuntimeOptions();
+      status.textContent = response.message || "CLI 模型配置已保存；登录由本机 CLI 管理，工作台未验证当前账号。";
+      note("CLI 模型已设为新任务默认值；请重启应用或智能核心后再创建任务。不会自动启动真实任务。");
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+      selectProviderType(type);
+    }
   }
 
   function renderSearchSettings(force = false) {
@@ -834,9 +1018,9 @@
 
   function renderTaskRuntimeOptions() {
     const settings = model?.model || { configured: false, status: "unconfigured" };
-    const providers = modelProviders().filter((provider) => provider.status === "configured" && provider.has_api_key);
+    const providers = runnableModelProviders();
     const available = providers.flatMap((provider) => (provider.models || []).filter((item) => item.enabled !== false && item.tools !== false).map((item) => ({ ...item, provider })));
-    const catalogKey = JSON.stringify([settings.default_model, available.map((item) => [item.provider.id, item.id])]);
+    const catalogKey = JSON.stringify([settings.default_model, available.map((item) => [item.provider.id, item.id, item.cli_reasoning, item.default_thinking_level])]);
     if (catalogKey !== taskRuntimeCatalogKey) {
       taskRuntimeCatalogKey = catalogKey;
       const previous = $("task-model").value;
@@ -871,10 +1055,36 @@
       $("task-thinking").dataset.initialized = "true";
       $("task-model").onchange = () => {
         try { localStorage.setItem("agent4market.taskModel", $("task-model").value); } catch { /* Local storage is optional. */ }
+        renderTaskThinkingOptions();
       };
       $("task-thinking").onchange = () => {
         try { localStorage.setItem("agent4market.taskThinking", $("task-thinking").value); } catch { /* Local storage is optional. */ }
       };
+    }
+    renderTaskThinkingOptions();
+  }
+
+  function renderTaskThinkingOptions() {
+    const key = $("task-model").value || model?.model?.default_model;
+    const provider = modelProviders().find((item) => key?.startsWith(item.id + "/"));
+    const record = provider?.models.find((item) => `${provider.id}/${item.id}` === key);
+    const levels = isCliProvider(provider)
+      ? record?.cli_reasoning ? ["off", "minimal", "low", "medium", "high", "xhigh", "max"].filter((level) => record.cli_reasoning.supported_efforts.includes(level === "off" ? "none" : level)) : ["off"]
+      : ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+    const defaultLevel = isCliProvider(provider) ? record?.default_thinking_level || "off" : "";
+    const control = $("task-thinking"); const catalogKey = JSON.stringify([key, levels, defaultLevel]);
+    if (control.dataset.catalogKey === catalogKey) return;
+    const previous = control.value;
+    const fallback = document.createElement("option"); fallback.value = "";
+    fallback.textContent = defaultLevel ? `模型默认：${defaultLevel}` : "默认思考强度";
+    control.replaceChildren(fallback, ...levels.map((level) => {
+      const option = document.createElement("option"); option.value = level; option.textContent = level === "off" ? "off（关闭思考）" : level; return option;
+    }));
+    control.value = levels.includes(previous) ? previous : "";
+    control.dataset.catalogKey = catalogKey;
+    if (previous && !levels.includes(previous)) {
+      try { localStorage.removeItem("agent4market.taskThinking"); } catch { /* Optional. */ }
+      note("所选模型不支持之前的思考强度，已清除该选择；提交前可重新选择，留空使用显示的模型默认值。");
     }
   }
 
@@ -885,6 +1095,95 @@
       ...(requestedModel ? { requested_model: requestedModel } : {}),
       ...(requestedThinking ? { requested_thinking_level: requestedThinking } : {}),
     };
+  }
+
+  function syncAppUpdateState(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return;
+    if (appUpdateState?.instance_id === snapshot.instance_id && appUpdateState.revision > snapshot.revision) return;
+    if (!appUpdateState || appUpdateState.instance_id !== snapshot.instance_id || appUpdateState.revision < snapshot.revision) appUpdateLocalError = "";
+    appUpdateState = snapshot;
+  }
+
+  function appUpdateTime(value) {
+    const date = value ? new Date(value) : null;
+    return date && Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { hour12: false }) : "尚未检查";
+  }
+
+  function renderAppUpdates() {
+    syncAppUpdateState(model?.app_updates);
+    const state = appUpdateState || { status: "not_checked", current_version: "unknown" };
+    const busy = appUpdateRequestBusy || state.checking;
+    const labels = { not_checked: "尚未检查更新", checking: "正在检查 GitHub 正式版本…",
+      up_to_date: "已是当前发布的最新版本", available: `发现新版本 ${state.latest?.version || ""}`,
+      current_ahead: "本机版本高于当前公开发布版本，不需要降级", error: state.error?.message || "检查更新失败，请重试。" };
+    $("app-update-current-version").textContent = `当前版本 ${state.current_version === "unknown" ? "未知" : state.current_version}`;
+    $("app-update-status").textContent = appUpdateLocalError || (appUpdateRequestBusy ? labels.checking : labels[state.status] || labels.not_checked);
+    $("app-update-status").classList.toggle("error", Boolean(appUpdateLocalError) || state.status === "error");
+    $("app-update-status").classList.toggle("available", state.update_available === true);
+    $("app-update-checked-at").textContent = state.checked_at
+      ? `最近检查：${appUpdateTime(state.checked_at)}${state.stale ? ` · 以下为上次成功检查的信息（${appUpdateTime(state.last_success_at)}）` : ""}${state.status === "error" && appUpdateAutoEnabled ? " · 自动重试已延后，避免频繁请求" : ""}`
+      : "仅检查公共发布信息，不上传用户配置或业务数据。";
+    $("app-updates-badge").hidden = !state.update_available;
+    $("app-updates-button-label").textContent = state.update_available ? "发现新版本" : busy ? "正在检查更新" : "检查更新";
+    $("app-updates-button").classList.toggle("has-update", state.update_available === true);
+    $("app-update-release").hidden = !state.latest;
+    $("app-update-release-name").textContent = state.latest ? `${state.latest.name} · ${state.latest.version}` : "";
+    $("app-update-release-date").textContent = state.latest ? `发布时间：${appUpdateTime(state.latest.published_at)}${state.stale ? " · 缓存信息" : ""}` : "";
+    $("app-update-release-notes").textContent = state.latest ? `${state.latest.notes || "发布者未填写更新说明。"}${state.latest.notes_truncated ? "\n\n更新说明较长，完整内容请查看发布页。" : ""}` : "";
+    $("app-update-check").disabled = Boolean(busy) || state.retry_after_seconds > 0;
+    $("app-update-check").textContent = busy ? "正在检查…" : state.retry_after_seconds > 0 ? `${state.retry_after_seconds} 秒后可重试` : "立即检查";
+    $("app-update-open-release").disabled = !state.can_open_release || appUpdateOpening;
+    $("app-update-open-release").textContent = appUpdateOpening ? "正在打开…" : "查看发布页";
+    $("app-update-auto").checked = appUpdateAutoEnabled;
+  }
+
+  async function checkAppUpdates(manual = false) {
+    if (!requestToken || appUpdateRequestBusy || appUpdateState?.checking || appUpdateState?.retry_after_seconds > 0) return;
+    if (!manual && (!appUpdateAutoEnabled || appUpdateState?.auto_retry_after_seconds > 0 || (appUpdateLastAutoAttempt !== null && Date.now() - appUpdateLastAutoAttempt < 300000))) return;
+    appUpdateLastAutoAttempt = Date.now();
+    appUpdateRequestBusy = true; appUpdateLocalError = "";
+    renderAppUpdates();
+    try {
+      const response = await api("/api/app-updates/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ manual }) });
+      syncAppUpdateState(response);
+    } catch (error) {
+      appUpdateLocalError = `无法检查更新：${error.message}`;
+    } finally { appUpdateRequestBusy = false; renderAppUpdates(); }
+  }
+
+  async function openAppUpdateRelease() {
+    const tag = appUpdateState?.latest?.tag;
+    if (!tag || !appUpdateState.can_open_release || appUpdateOpening) return;
+    appUpdateOpening = true; renderAppUpdates();
+    try {
+      const confirmed = await confirmAction({ title: "获取 Agent4Market 新版", message: `在系统浏览器中打开 ${appUpdateState.latest.version} 的 GitHub 发布页？这一步不会自动下载、安装或重启。`,
+        detail: "请按发布说明操作，不要覆盖正在运行的程序；当前任务和数据保持不变。", confirmText: "打开发布页" });
+      if (!confirmed) return;
+      const response = await api("/api/app-updates/open-release", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag }) });
+      $("app-update-action-status").textContent = response.message;
+    } catch (error) { $("app-update-action-status").textContent = error.message; }
+    finally { appUpdateOpening = false; renderAppUpdates(); }
+  }
+
+  function initializeAppUpdates() {
+    const settings = document.querySelector('[data-page="settings"]');
+    const template = $("app-update-panel-template");
+    settings.insertBefore(template.content.cloneNode(true), $("runtime-settings-panel"));
+    try { appUpdateAutoEnabled = localStorage.getItem("agent4market-auto-updates") !== "false"; } catch { appUpdateAutoEnabled = true; }
+    $("app-updates-button").onclick = () => {
+      switchView("settings"); $("app-update-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      checkAppUpdates(true);
+    };
+    $("app-update-check").onclick = () => checkAppUpdates(true);
+    $("app-update-open-release").onclick = openAppUpdateRelease;
+    $("app-update-auto").onchange = () => {
+      appUpdateAutoEnabled = $("app-update-auto").checked;
+      try { localStorage.setItem("agent4market-auto-updates", String(appUpdateAutoEnabled)); } catch { /* Session preference still applies. */ }
+      if (appUpdateAutoEnabled) checkAppUpdates(false);
+    };
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) checkAppUpdates(false); });
+    window.addEventListener("online", () => checkAppUpdates(false));
+    setInterval(() => checkAppUpdates(false), 60000);
   }
 
   function renderRuntimeSettings(force = false) {
@@ -2592,7 +2891,7 @@
     try {
       const body = { recommendation_id: recommendationId };
       if (userEdits) body.user_edits = userEdits;
-      const response = await api("/api/a4/recommendations/accept", { method: "POST", body: JSON.stringify(body) });
+      const response = await api("/api/a4/recommendations/accept", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!response.success) throw new Error(response.error || "接受建议失败");
       await loadCustomerRecommendations(customerState.selectedId);
       return true;
@@ -2605,7 +2904,7 @@
     try {
       const body = { recommendation_id: recommendationId };
       if (reason) body.reason = reason;
-      const response = await api("/api/a4/recommendations/ignore", { method: "POST", body: JSON.stringify(body) });
+      const response = await api("/api/a4/recommendations/ignore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!response.success) throw new Error(response.error || "忽略建议失败");
       await loadCustomerRecommendations(customerState.selectedId);
       return true;
@@ -2614,17 +2913,17 @@
       return false;
     }
   }
-  async function loadCustomerSignals(accountId) {
-    if (!accountId || customerState.signalsLoading) return;
+  async function loadCustomerSignals(selectedAccountId) {
+    if (!selectedAccountId || customerState.signalsLoading) return;
     const generation = ++customerState.signalsGeneration;
     customerState.signalsLoading = true; customerState.signalsError = ""; customerState.signals = [];
     try {
-      const accountData = customerState.rows.find((row) => accountId(row) === accountId);
+      const accountData = customerState.rows.find((row) => accountId(row) === selectedAccountId);
       if (!accountData) {
         customerState.signalsError = "客户数据不存在";
         return;
       }
-      const response = await api("/api/a4/evaluate-signals", { method: "POST", body: JSON.stringify(accountData) });
+      const response = await api("/api/a4/evaluate-signals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountData) });
       if (generation !== customerState.signalsGeneration) return;
       if (response.success && Array.isArray(response.data?.signals)) {
         customerState.signals = response.data.signals.filter((sig) => sig.severity === "high" || sig.severity === "medium");
@@ -3410,7 +3709,7 @@
       detail.textContent = summary.error || "请重新打开应用后再试";
     } else if (!summary.configured || !summary.message_count) {
       strong.textContent = summary.status === "raw_expired" ? "原文已按期限清理" : "尚未导入会话";
-      detail.textContent = "支持 JSON、JSONL、CSV；单个文件不超过 64 兆字节";
+      detail.textContent = "可解密数据库副本，或导入 JSON、JSONL、CSV；原文只在本机浏览";
     } else {
       strong.textContent = `本机已有 ${summary.conversation_count} 个会话、${summary.message_count} 条消息`;
       const latest = summary.batches?.[0];
@@ -3421,6 +3720,235 @@
     box.append(strong, detail);
     $("review-selected-wechat").disabled = wechatState.creating || wechatState.selected.size === 0 || !summary.message_count;
     $("review-today-wechat").disabled = wechatState.creating || !summary.message_count;
+    $("wechat-export-selected").disabled = wxdecipherState.exporting || wechatState.selected.size === 0 || !summary.message_count;
+    renderWxDecipherControls();
+  }
+
+  function wxDecipherStatus(message, error = false) {
+    $("wxdecipher-status").textContent = message;
+    $("wxdecipher-status").classList.toggle("error", error);
+  }
+
+  function renderWxDecipherControls() {
+    const busy = wxdecipherState.busy || wxdecipherState.captureLoading;
+    const unavailable = model?.wechat?.http_available === false;
+    const blocked = busy || unavailable;
+    $("choose-wechat-export").disabled = unavailable;
+    $("wxdecipher-media-choose").disabled = unavailable || wxmediaState.busy;
+    $("wxdecipher-run").disabled = blocked || !wxdecipherState.files.length || !$("wechat-ownership").checked || !$("wxdecipher-snapshot").checked;
+    $("wxdecipher-run").textContent = busy ? "正在本机处理…" : "校验、解密并导入";
+    $("wxdecipher-add-files").disabled = blocked;
+    $("wxdecipher-clear-files").disabled = busy || !wxdecipherState.files.length;
+    ["wxdecipher-key", "wxdecipher-self-id", "wxdecipher-cipher-mode", "wxdecipher-snapshot", "wxdecipher-wal-confirm", "wxdecipher-capture-confirm"].forEach((id) => { $(id).disabled = blocked; });
+    const captureAllowed = $("wxdecipher-capture-confirm").checked && $("wechat-ownership").checked && model?.wechat?.decipher?.key_capture !== false;
+    $("wxdecipher-process-refresh").disabled = blocked || !captureAllowed;
+    $("wxdecipher-process").disabled = blocked || !captureAllowed;
+    $("wxdecipher-files").querySelectorAll("input,button").forEach((item) => { item.disabled = blocked; });
+    $("wxdecipher-console")?.setAttribute("aria-busy", String(busy));
+    const capability = model?.wechat?.decipher;
+    $("wxdecipher-dependencies").textContent = unavailable ? "当前平台的本机用户隔离尚未就绪，微信工具暂不开放。" : capability?.decrypt_available === false
+      ? "加密库需要安装 requirements-wxdecipher.txt；明文 SQLite 可直接导入。" : "逐页校验 · 任一失败即停止整批导入";
+  }
+
+  function renderWxDecipherFiles() {
+    const total = wxdecipherState.files.reduce((sum, entry) => sum + entry.file.size, 0);
+    $("wxdecipher-file-count").textContent = wxdecipherState.files.length
+      ? `已选 ${wxdecipherState.files.length} 个 · ${(total / 1024 / 1024).toFixed(1)} 兆字节` : "尚未选择数据库";
+    $("wxdecipher-files").replaceChildren(...wxdecipherState.files.map((entry) => {
+      const row = document.createElement("li");
+      const name = document.createElement("span"); name.textContent = `${entry.file.name} · ${(entry.file.size / 1024 / 1024).toFixed(1)} MB`;
+      const isWal = /-wal$/iu.test(entry.file.name);
+      const key = document.createElement(isWal ? "span" : "input"); key.type = "password"; key.maxLength = 64; key.autocomplete = "off";
+      if (isWal) key.textContent = "WAL · 使用配对主库的密钥";
+      key.placeholder = "此文件专用密钥（可选）"; key.value = entry.key || "";
+      key.setAttribute("aria-label", `${entry.file.name} 专用密钥`);
+      key.oninput = () => { entry.key = key.value; };
+      const remove = document.createElement("button"); remove.type = "button"; remove.className = "secondary";
+      remove.textContent = "移除"; remove.setAttribute("aria-label", `移除 ${entry.file.name}`);
+      remove.onclick = () => { entry.key = ""; wxdecipherState.files = wxdecipherState.files.filter((item) => item !== entry); renderWxDecipherFiles(); };
+      row.append(name, key, remove); return row;
+    }));
+    renderWxDecipherControls();
+  }
+
+  async function runWxDecipher() {
+    if (wxdecipherState.busy) return;
+    if (!$("wechat-ownership").checked || !$("wxdecipher-snapshot").checked || !wxdecipherState.files.length) {
+      wxDecipherStatus("请先选择数据库，并确认账号权限和静态副本。", true); return;
+    }
+    const key = $("wxdecipher-key").value.trim();
+    const fileKeys = Object.fromEntries(wxdecipherState.files.filter((entry) => entry.key?.trim()).map((entry) => [entry.file.name, entry.key.trim()]));
+    if ([key, ...Object.values(fileKeys)].some((value) => value && !/^[0-9a-f]{64}$/iu.test(value))) {
+      wxDecipherStatus("密钥必须为 64 位十六进制；没有加密的 SQLite 副本可留空。", true); return;
+    }
+    const cipherMode = $("wxdecipher-cipher-mode").value;
+    const accountLabel = $("wechat-account").value.trim() || "本机微信";
+      const selfUsername = $("wxdecipher-self-id").value.trim();
+      if (!/^[\w.@-]{1,128}$/u.test(selfUsername)) {
+        wxDecipherStatus("请填写数据库使用的本人微信 ID（不是昵称），用于稳定区分账号，避免同名标签混合会话。", true); return;
+      }
+    const files = wxdecipherState.files.map((entry) => entry.file);
+    const walFiles = files.filter((file) => /-wal$/iu.test(file.name));
+    const dbNames = new Set(files.filter((file) => !/-wal$/iu.test(file.name)).map((file) => file.name.toLowerCase()));
+    if (!dbNames.size || walFiles.some((file) => !dbNames.has(file.name.slice(0, -4).toLowerCase()))) {
+      wxDecipherStatus("每个 WAL 必须有同批次同名主库，例如 message_0.db 与 message_0.db-wal。", true); return;
+    }
+    const walConfirmed = $("wxdecipher-wal-confirm").checked;
+    if (walFiles.length && !walConfirmed) { wxDecipherStatus("请明确勾选允许对所选同快照 DB/WAL 进行离线重放。", true); return; }
+    let autoCapture;
+    if ($("wxdecipher-capture-confirm").checked) {
+      try { autoCapture = { ...JSON.parse($("wxdecipher-process").value), confirmed: true }; }
+      catch { wxDecipherStatus("请先列出并明确选择本次取钥的微信进程。", true); return; }
+      if (!autoCapture.process_id || !autoCapture.created_at) { wxDecipherStatus("微信进程选择无效，请重新选择。", true); return; }
+    }
+    // No localStorage/sessionStorage, URL parameters or persisted job metadata.
+    $("wxdecipher-key").value = "";
+    wxdecipherState.files.forEach((entry) => { entry.key = ""; });
+    wxdecipherState.busy = true; renderWxDecipherFiles();
+    let sessionId = "";
+    try {
+      wxDecipherStatus("正在创建本机数据库导入会话…");
+      const session = await api("/api/wechat/decipher/sessions", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownership_confirmed: true, snapshot_confirmed: true, account_label: accountLabel, self_username: selfUsername }) });
+      sessionId = session.session_id;
+      for (let index = 0; index < files.length; index++) {
+        wxDecipherStatus(`正在上传本机副本 ${index + 1}/${files.length}：${files[index].name}。暂未导入消息。`);
+        await api("/api/wechat/decipher/upload", { method: "POST", headers: {
+          "Content-Type": "application/octet-stream", "X-WXDecipher-Session": sessionId,
+          "X-File-Name": encodeURIComponent(files[index].name),
+        }, body: files[index] });
+      }
+      if (autoCapture) {
+        const consent = await api("/api/wechat/decipher/capture-consent", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, ...autoCapture }) });
+        autoCapture.consent_token = consent.consent_token;
+      }
+      wxDecipherStatus("正在校验密钥、逐页解密和检查数据库，再转换为会话。大数据库需要一些时间，请勿重复提交。");
+      const result = await api("/api/wechat/decipher/run", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, key, file_keys: fileKeys, cipher_mode: cipherMode, wal_replay_confirmed: walConfirmed, auto_capture: autoCapture }) });
+      sessionId = "";
+      $("wxdecipher-capture-confirm").checked = false;
+      $("wxdecipher-process").value = "";
+      const report = result.decipher || {};
+      wxDecipherStatus([result.message, `本次转换 ${report.messages || 0} 条消息；${report.databases?.length || 0} 个数据库通过校验。`,
+        ...(report.key_capture ? [`本次自动匹配 ${report.key_capture.verified_databases} 个数据库密钥（实验性兼容扫描；不代表其他版本已验证）。`] : []),
+        ...(report.databases || []).filter((item) => item.wal).map((item) => `${item.source_name}：WAL 恢复 ${item.wal.applied_pages} 个页，取至第 ${item.wal.committed_frames} 个已提交帧。`),
+        ...(report.warnings || [])].join("\n"));
+      wxdecipherState.files = [];
+      wechatState.loaded = false; wechatState.revision = ""; wechatState.selected.clear(); wechatState.selectedId = ""; wechatState.messages = [];
+      $("wechat-date-from").value = ""; $("wechat-date-to").value = ""; $("wechat-query").value = ""; $("wechat-chat-type").value = "";
+      $("wechat-model-sharing").checked = false;
+      await load();
+    } catch (error) {
+      wxDecipherStatus(error.message || "数据库处理失败；未自动调用模型。", true);
+    } finally {
+      if (sessionId) {
+        try { await api("/api/wechat/decipher/discard", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId }) }); }
+        catch { wxDecipherStatus($("wxdecipher-status").textContent + "\n暂存清理未确认，工作台将在会话到期后重试清理。", true); }
+      }
+      $("wxdecipher-capture-confirm").checked = false;
+      $("wxdecipher-process").value = "";
+      wxdecipherState.busy = false; renderWxDecipherFiles();
+    }
+  }
+
+  async function exportSelectedWechat() {
+    if (wxdecipherState.exporting) return;
+    const ids = [...wechatState.selected];
+    if (!ids.length || ids.length > 50) { note("请明确选择 1–50 个会话后导出。", true); return; }
+    const format = $("wechat-export-format").value;
+    const filters = wechatFilters();
+    const confirmed = await confirmAction({ title: "导出所选微信会话", message: `将按当前日期和关键词导出 ${ids.length} 个所选会话到本机文件，不调用模型。下载文件由你自行保管，不受工作台 7 天清理管理。${format === "csv" ? "CSV 会转义可能被表格软件当作公式的内容；需要原样保存请用 JSON/JSONL。" : ""}`, confirmText: "生成本地文件" });
+    if (!confirmed) return;
+    wxdecipherState.exporting = true; renderWechatSummary();
+    try {
+      const result = await api("/api/wechat/export", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_ids: ids, format, ...filters }) });
+      const url = URL.createObjectURL(new Blob([result.content], { type: result.mime_type }));
+      const link = document.createElement("a"); link.href = url; link.download = result.filename;
+      document.body.append(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      note(`已生成 ${result.message_count} 条消息的 ${format.toUpperCase()} 文件；未调用模型。`);
+    } catch (error) { note(error.message, true); }
+    finally { wxdecipherState.exporting = false; renderWechatSummary(); }
+  }
+
+  function clearWxMedia() {
+    wxmediaState.urls.forEach((url) => URL.revokeObjectURL(url));
+    wxmediaState.urls = [];
+    $("wxdecipher-media-results").replaceChildren();
+  }
+
+  async function refreshWxProcesses() {
+    if (wxdecipherState.busy || wxdecipherState.captureLoading) return;
+    if (!$("wechat-ownership").checked || !$("wxdecipher-capture-confirm").checked) {
+      wxDecipherStatus("请先确认本人账号，并明确允许本次只读取钥。", true); return;
+    }
+    wxdecipherState.captureLoading = true; renderWxDecipherControls();
+    const select = $("wxdecipher-process");
+    select.replaceChildren();
+    try {
+      const result = await api("/api/wechat/decipher/processes", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownership_confirmed: true, capture_confirmed: true }) });
+      const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "请选择本次取钥的微信进程"; select.append(placeholder);
+      for (const item of result.processes || []) {
+        const option = document.createElement("option"); option.value = JSON.stringify({ process_id: item.process_id, created_at: item.created_at });
+        option.textContent = `${item.name} · PID ${item.process_id}`; select.append(option);
+      }
+      select.value = "";
+      wxDecipherStatus(`${result.message}\n${result.processes?.length ? "请选择一个进程；点击导入后才会读取内存。" : "没有可选进程；请保持本人微信登录并使用普通用户工作台，或手动提供密钥。"}`);
+    } catch (error) { wxDecipherStatus(error.message, true); }
+    finally { wxdecipherState.captureLoading = false; renderWxDecipherControls(); }
+  }
+
+  async function restoreWxMedia(files) {
+    if (wxmediaState.busy) return;
+    const status = $("wxdecipher-media-status");
+    if (!$("wechat-ownership").checked) { status.textContent = "请先确认本人账号且有权处理。"; return; }
+    if (!files.length || files.length > 4 || files.some((file) => file.size < 1 || file.size > 16 * 1024 * 1024)) {
+      status.textContent = "每次选择 1–4 个媒体副本，单个不超过 16 兆字节。"; return;
+    }
+    const imageKey = $("wxdecipher-image-key").value;
+    const xorKey = $("wxdecipher-xor-key").value.trim();
+    if (imageKey && !/^(?:[\x21-\x7e]{16}|[0-9a-f]{32})$/iu.test(imageKey)) {
+      status.textContent = "图片密钥须为 16 个 ASCII 字符或 32 位十六进制。"; return;
+    }
+    if (xorKey && (!/^\d{1,3}$/u.test(xorKey) || Number(xorKey) > 255)) {
+      status.textContent = "XOR 参数须为 0–255 的十进制整数或留空。"; return;
+    }
+    $("wxdecipher-image-key").value = "";
+    clearWxMedia();
+    wxmediaState.busy = true;
+    ["wxdecipher-media-choose", "wxdecipher-media-clear", "wxdecipher-image-key", "wxdecipher-xor-key"].forEach((id) => { $(id).disabled = true; });
+    let restored = 0;
+    try {
+      for (const [index, file] of files.entries()) {
+        status.textContent = `本机正在恢复 ${index + 1}/${files.length}：${file.name}`;
+        const card = document.createElement("article");
+        const title = document.createElement("strong"); title.textContent = file.name; card.append(title);
+        $("wxdecipher-media-results").append(card);
+        try {
+          const response = await fetch("/api/wechat/decipher/media", { method: "POST", headers: {
+            "Content-Type": "application/octet-stream", "X-Wechat-Ownership": "true",
+            "X-Director-Token": requestToken || "",
+            "X-WXDecipher-Image-Key": imageKey, "X-WXDecipher-Xor-Key": xorKey,
+          }, body: file });
+          if (!response.ok) { const error = await response.json(); throw new Error(error.error || "媒体恢复失败"); }
+          const result = JSON.parse(response.headers.get("X-WXDecipher-Media") || "{}");
+          const url = URL.createObjectURL(await response.blob());
+          wxmediaState.urls.push(url);
+          if (result.previewable) { const image = document.createElement("img"); image.src = url; image.alt = `${file.name} 恢复预览`; card.append(image); }
+          const detail = document.createElement("p");
+          detail.textContent = `${result.decoder} · ${(result.bytes / 1024).toFixed(1)} KB${result.warning ? `。${result.warning}` : ""}`;
+          const download = document.createElement("a"); download.href = url; download.download = result.filename; download.textContent = "下载恢复文件";
+          card.append(detail, download); restored++;
+        } catch (error) { const detail = document.createElement("p"); detail.textContent = error.message || "媒体恢复失败"; card.append(detail); }
+      }
+      status.textContent = `已恢复 ${restored}/${files.length} 个媒体副本；未修改源文件、未保存密钥、未调用模型。关闭页面或清除预览将释放结果，下载副本不受 7 天清理管理。`;
+    } finally {
+      wxmediaState.busy = false;
+      ["wxdecipher-media-choose", "wxdecipher-media-clear", "wxdecipher-image-key", "wxdecipher-xor-key"].forEach((id) => { $(id).disabled = false; });
+    }
   }
 
   function wechatTime(value) {
@@ -3453,18 +3981,20 @@
       card.className = `wechat-conversation-card${wechatState.selected.has(row.conversation_id) ? " selected" : ""}${wechatState.selectedId === row.conversation_id ? " previewing" : ""}`;
       card.tabIndex = 0;
       const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = wechatState.selected.has(row.conversation_id);
-      checkbox.setAttribute("aria-label", `选择${row.display_name}`);
+      checkbox.setAttribute("aria-label", `选择${row.display_name}（${row.account_label || "历史导入"}${row.account_id ? " · " + row.account_id : ""}）`);
       checkbox.onchange = () => {
         if (checkbox.checked) wechatState.selected.add(row.conversation_id); else wechatState.selected.delete(row.conversation_id);
         renderWechatConversations(); renderWechatSummary();
       };
       const copy = document.createElement("div"); copy.className = "wechat-conversation-copy";
       const title = document.createElement("strong"); title.textContent = row.display_name || "未命名会话";
+      const account = document.createElement("small"); account.className = "wechat-conversation-account";
+      account.textContent = `${row.account_label || "历史导入"}${row.account_id ? " · " + row.account_id : " · 未绑定本人 ID"}`;
       const meta = document.createElement("small");
       const type = row.chat_type === "group" ? "群聊" : row.chat_type === "official" ? "公众号" : row.chat_type === "direct" ? "个人会话" : "其他";
       meta.textContent = `${type} · 保留 ${row.retained_messages} 条 · ${wechatTime(row.last_sent_at)}`;
       const preview = document.createElement("p"); preview.className = "wechat-conversation-preview"; preview.textContent = row.last_preview || "无文字预览";
-      copy.append(title, meta, preview); card.append(checkbox, copy);
+      copy.append(title, account, meta, preview); card.append(checkbox, copy);
       const previewConversation = () => {
         wechatState.selectedId = row.conversation_id;
         renderWechatConversations();
@@ -3481,7 +4011,7 @@
   function renderWechatMessages() {
     const box = $("wechat-messages");
     const selected = wechatState.rows.find((row) => row.conversation_id === wechatState.selectedId);
-    $("wechat-preview-title").textContent = selected?.display_name || "会话预览";
+    $("wechat-preview-title").textContent = selected ? `${selected.display_name} · ${selected.account_id || selected.account_label || "历史导入"}` : "会话预览";
     box.classList.toggle("empty", wechatState.messages.length === 0);
     if (!wechatState.messages.length) {
       box.replaceChildren();
@@ -3549,15 +4079,16 @@
     const provider = modelProviders().find((item) => modelKey?.startsWith(item.id + "/") && item.status === "configured");
     const selectedModel = provider?.models.find((item) => modelKey === provider.id + "/" + item.id && item.enabled !== false && item.tools !== false);
     if (!provider || !selectedModel) throw new Error("整理微信前，请先配置并选择具体的 API 供应商和模型。");
+    if (isCliProvider(provider)) throw new Error("微信会话整理首版不支持 Claude Code 或 Codex CLI；请改选可明确冻结接收方的 API 供应商模型。");
     runtime.requested_model = modelKey;
     const recipient = { provider_id: provider.id, base_url: provider.base_url, api: selectedModel.api || provider.api, model_id: selectedModel.id };
     const modelName = `${provider.name} · ${selectedModel.id}`;
     const confirmed = await confirmAction({
       title: "确认整理微信会话",
       message: today
-        ? `将把今天全部有消息的会话交给“${modelName}”整理。`
+        ? `将把今天全部账号中有消息的会话交给“${modelName}”整理。`
         : `将把 ${conversationIds.length} 个会话在 ${filters.date_from} 至 ${filters.date_to} 的所选内容交给“${modelName}”整理。`,
-      detail: `接收地址：${recipient.base_url}；协议：${recipient.api}。云端处理会使文字离开本机；仅允许此供应商和模型处理所选范围，不自动更新台账。`,
+      detail: `账号：${today ? "全部已导入账号" : [...new Set(wechatState.rows.filter((row) => conversationIds.includes(row.conversation_id)).map((row) => row.account_id || row.account_label || "历史导入"))].join("、")}。接收地址：${recipient.base_url}；协议：${recipient.api}。云端处理会使文字离开本机；仅允许此供应商和模型处理所选范围，不自动更新台账。`,
       confirmText: "确认并开始",
     });
     if (!confirmed) return;
@@ -3792,6 +4323,7 @@
   }
 
   function render() {
+    renderAppUpdates();
     renderModelSettings(); renderProviderSettings(); renderSearchSettings(); renderSearchGatewaySettings(); renderTaskRuntimeOptions(); renderRuntimeSettings(); renderMailSettings(); renderProjectSelectors(); renderServices(); renderTaskForm(); renderTasks();
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderWechatSummary(); renderToolPanels(); renderCustomerOperations(); renderAttention(); renderBidding(); switchView(currentView);
   }
@@ -3900,6 +4432,7 @@
     if (model.library_revision !== libraryState.expectedRevision || libraryState.error || !libraryState.version) await loadLibrary();
     render();
     restoreTaskComposerFocus(composerFocus);
+    freeChat.update(model.model);
     if (currentView === "tools" && activeTool === "wechat" && model?.wechat?.configured && model.wechat.revision !== wechatState.revision) {
       loadWechatConversations({ force: true });
     }
@@ -3972,6 +4505,7 @@
       const accountId = customerState.selectedId || "";
       const response = await api("/api/a4/match-play", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ user_input: userInput, account_id: accountId || null })
       });
       if (!response.success) throw new Error(response.error || "意图识别失败");
@@ -4532,6 +5066,9 @@
   };
 
   $("save-provider-settings").onclick = () => saveProviderSettings();
+  $("refresh-codex-models").onclick = () => loadCodexModels(true);
+  $("codex-cli-model").onchange = () => { renderCodexThinking(); selectProviderType(selectedProviderType()); };
+  $("codex-cli-thinking").onchange = () => selectProviderType(selectedProviderType());
 
   $("detect-coding-assistants").onclick = async () => {
     const button = $("detect-coding-assistants");
@@ -4540,9 +5077,9 @@
     try {
       await detectCodingAssistants();
       button.textContent = "重新检测编码助手";
-      note("编码助手检测完成");
+      note("CLI 安装检测完成；检测结果不代表已经登录。 ");
     } catch (error) {
-      note(error.message, "error");
+      note(error.message, true);
       button.textContent = "重新检测编码助手";
     } finally {
       button.disabled = false;
@@ -4551,11 +5088,33 @@
 
   document.querySelectorAll('input[name="provider-type"]').forEach((radio) => {
     radio.addEventListener("change", () => {
-      const selected = radio.value;
-      $("claude-code-config").hidden = selected !== "claude-code";
-      $("codex-cli-config").hidden = selected !== "codex-cli";
+      selectProviderType(radio.value);
     });
   });
+
+  $("reset-cli-provider").onclick = async () => {
+    const type = selectedProviderType();
+    const provider = CLI_PROVIDER_TYPES.has(type) ? cliProvider(type) : null;
+    if (!provider) return;
+    if (!await confirmAction({
+      title: "移除此 CLI 供应商？",
+      message: `将删除“${provider.name || type}”的本机工作台配置。CLI 自身的登录状态和文件不会改变，其他 API 与 CLI 供应商保持不变。`,
+      confirmText: "移除此供应商", tone: "danger",
+    })) return;
+    const button = $("reset-cli-provider");
+    button.disabled = true;
+    try {
+      const response = await api("/api/model-settings/reset", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider_id: provider.id }),
+      });
+      model.model = response.model || response;
+      providerSettingsInitialized = false;
+      renderModelSettings(true); renderProviderSettings(true); renderTaskRuntimeOptions();
+      note("CLI 供应商已从工作台移除；其他配置未改变，重启应用或智能核心后生效。");
+    } catch (error) {
+      $(type + "-config-status").textContent = error.message;
+    } finally { button.disabled = false; selectProviderType(selectedProviderType()); }
+  };
 
   $("reset-model-settings").onclick = async () => {
     const providerId = $("model-instance").value;
@@ -4753,6 +5312,48 @@
     if (!$("wechat-ownership").checked) { note("请先确认这是本人账号且有权处理的聊天内容。", true); return; }
     $("wechat-file-input").click();
   };
+  $("wxdecipher-add-files").onclick = () => $("wxdecipher-file-input").click();
+  $("wxdecipher-file-input").onchange = () => {
+    if (wxdecipherState.busy) return;
+    const incoming = [...($("wxdecipher-file-input").files || [])];
+    $("wxdecipher-file-input").value = "";
+    if (!incoming.length) return;
+    const candidate = [...wxdecipherState.files];
+    for (const file of incoming) {
+      if (!/\.(db|sqlite|sqlite3)(?:-wal)?$/iu.test(file.name) || file.size < (/-wal$/iu.test(file.name) ? 0 : 512) || file.size > 256 * 1024 * 1024) {
+        wxDecipherStatus("只接受 .db / .sqlite / .sqlite3 主库及同名 -wal 副本；主库至少 512 字节，单个文件不超过 256 兆字节。", true); return;
+      }
+      if (candidate.some((entry) => entry.file.name.toLowerCase() === file.name.toLowerCase())) {
+        wxDecipherStatus(`已选择同名文件 ${file.name}；本批次不能重复或混合多个账号。`, true); return;
+      }
+      candidate.push({ file, key: "" });
+    }
+    if (candidate.length > 32 || candidate.filter((entry) => !/-wal$/iu.test(entry.file.name)).length > 16 || candidate.reduce((sum, entry) => sum + entry.file.size, 0) > 1024 * 1024 * 1024) {
+      wxDecipherStatus("每次最多 16 个主库及其 16 个 WAL，合计不超过 1 吉字节。", true); return;
+    }
+    wxdecipherState.files = candidate; renderWxDecipherFiles();
+    wxDecipherStatus("文件已选择，尚未上传或解密。可继续添加联系人/会话库，再提供密钥并确认副本。");
+  };
+  $("wxdecipher-clear-files").onclick = () => {
+    wxdecipherState.files.forEach((entry) => { entry.key = ""; });
+    wxdecipherState.files = []; $("wxdecipher-key").value = "";
+    renderWxDecipherFiles(); wxDecipherStatus("已清空选择，未改动原始文件。");
+  };
+  $("wxdecipher-run").onclick = runWxDecipher;
+  $("wxdecipher-process-refresh").onclick = refreshWxProcesses;
+  $("wxdecipher-capture-confirm").addEventListener("change", () => { if (!$("wxdecipher-capture-confirm").checked) $("wxdecipher-process").value = ""; renderWxDecipherControls(); });
+  $("wxdecipher-media-choose").onclick = () => {
+    if (!$("wechat-ownership").checked) { $("wxdecipher-media-status").textContent = "请先勾选本人账号授权。"; return; }
+    $("wxdecipher-media-input").click();
+  };
+  $("wxdecipher-media-input").onchange = () => {
+    const files = [...($("wxdecipher-media-input").files || [])]; $("wxdecipher-media-input").value = "";
+    if (files.length) restoreWxMedia(files);
+  };
+  $("wxdecipher-media-clear").onclick = () => { if (!wxmediaState.busy) { clearWxMedia(); $("wxdecipher-image-key").value = ""; $("wxdecipher-media-status").textContent = "已清除本页媒体预览和下载链接；已下载的副本不受影响。"; } };
+  $("wxdecipher-snapshot").addEventListener("change", renderWxDecipherControls);
+  $("wechat-ownership").addEventListener("change", renderWxDecipherControls);
+  $("wechat-export-selected").onclick = exportSelectedWechat;
   $("wechat-file-input").onchange = async () => {
     const file = $("wechat-file-input").files?.[0];
     if (!file) return;
@@ -4770,6 +5371,7 @@
           "X-Wechat-Auto-Cleanup": "true",
           "X-Wechat-Retention-Days": "7",
           "X-Wechat-Account": encodeURIComponent($("wechat-account").value.trim() || "本机微信"),
+          "X-Wechat-Self-Id": encodeURIComponent($("wxdecipher-self-id").value.trim()),
         },
         body: file,
       });
@@ -4985,8 +5587,11 @@
     });
   });
 
+  const freeChat = window.Agent4MarketFreeChat.create({ api, getToken: () => requestToken });
+  initializeAppUpdates();
   localizeStaticInterface();
-  detectCodingAssistants().catch(() => {});
-  load().catch((error) => note(`无法读取工作台：${error.message}`, true));
+  load()
+    .then(() => { checkAppUpdates(false); return detectCodingAssistants().catch(() => {}); })
+    .catch((error) => note(`无法读取工作台：${error.message}`, true));
   setInterval(() => load().catch(() => {}), 3000);
 })();

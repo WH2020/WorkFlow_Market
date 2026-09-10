@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>销售总监 AI 工作台</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/wxdecipher.css">
+  <link rel="stylesheet" href="/free-chat.css">
 </head>
 <body>
   <div class="app-shell">
@@ -12,6 +14,7 @@
       <div class="brand"><span class="brand-mark">S</span><div><strong>销售总监</strong><small>AI 工作台</small></div></div>
       <nav aria-label="主导航">
         <button class="nav-item active" data-view="home"><span>⌂</span>工作台</button>
+        <button class="nav-item" data-view="chat"><span>◌</span>自由聊天</button>
         <button class="nav-item" data-view="work"><span>＋</span>发起工作</button>
         <button class="nav-item" data-view="tasks"><span>☑</span>任务中心<i id="nav-task-count"></i></button>
         <button class="nav-item" data-view="sales"><span>♙</span>客户经营</button>
@@ -25,6 +28,7 @@
         <button class="nav-item" data-view="search"><span>⌕</span>自定义操作</button>
         <button class="nav-item" data-view="tools"><span>◇</span>工具栏</button>
       </nav>
+      <button id="app-updates-button" class="nav-item sidebar-updates" type="button" title="检查 Agent4Market 更新"><span aria-hidden="true">↻</span><b id="app-updates-button-label">检查更新</b><i id="app-updates-badge" hidden aria-label="发现新版本"></i></button>
       <button class="nav-item sidebar-settings" data-view="settings"><span>⚙</span>设置</button>
     </aside>
 
@@ -38,6 +42,27 @@
       <div id="notice" class="notice" aria-live="polite"></div>
 
       <main>
+        <section class="page" data-page="chat">
+          <div class="page-heading"><div><p class="section-kicker">CONVERSATION</p><h1>自由聊天</h1><p>聊想法、问问题，或一起推敲一段文字。</p></div><button id="chat-new" class="secondary" type="button">新对话</button></div>
+          <section class="panel free-chat-panel" aria-label="自由聊天">
+            <div class="free-chat-toolbar">
+              <label>对话模型<select id="chat-model" aria-describedby="chat-model-hint"><option value="">正在读取模型…</option></select></label>
+              <label>思考强度<select id="chat-thinking"><option value="">模型默认</option></select></label>
+              <button id="chat-settings" class="text-button" type="button" data-view="settings">模型设置</button>
+            </div>
+            <p id="chat-model-hint" class="hint">每段对话使用一个模型。切换模型或本机 CLI 登录账号后，请开始新对话。</p>
+            <div id="chat-conversation" class="free-chat-conversation" role="log" aria-label="对话内容">
+              <div id="chat-welcome" class="free-chat-welcome"><span aria-hidden="true">◌</span><h2>从一个问题开始</h2><p>可以直接问答、讨论想法或润色你输入的文字。</p><small>仅使用本段对话的文字；需要查询业务资料或执行工作时，请使用“发起工作”。</small></div>
+            </div>
+            <div id="chat-status" class="free-chat-status" role="status" aria-live="polite">正在读取模型…</div>
+            <form id="chat-form" class="free-chat-composer">
+              <label class="free-chat-input-label" for="chat-input">发送消息</label>
+              <textarea id="chat-input" maxlength="8000" rows="3" placeholder="输入你的问题…" aria-describedby="chat-input-hint"></textarea>
+              <div class="free-chat-send-row"><small id="chat-input-hint">Enter 发送 · Shift + Enter 换行</small><button id="chat-stop" class="secondary" type="button" hidden>停止生成</button><button id="chat-send" class="primary" type="submit" disabled>发送</button></div>
+            </form>
+            <p class="hint">聊天记录只保留在本次会话中。刷新页面或关闭应用后将开始新对话。</p>
+          </section>
+        </section>
         <section class="page active" data-page="home">
           <div class="welcome-row"><div><h1 id="greeting">今天的销售工作已为你整理好</h1><p>先处理需要确认的事项，再从快捷入口发起工作。</p></div><div class="welcome-actions"><label class="project-picker">当前项目<select id="home-project"></select></label><button class="secondary" data-view="search">搜索全部资料</button></div></div>
           <div class="dashboard-grid">
@@ -197,14 +222,14 @@
         <section class="page" data-page="tools">
           <div class="page-heading"><div><p class="section-kicker">QUICK TOOLS</p><h1>工具栏</h1><p>把高频行政工作集中在这里，减少重复整理和文件切换。</p></div></div>
           <div class="tool-shelf" aria-label="可用工具">
-            <button id="tool-assistant" class="tool-card active" type="button" data-tool="assistant"><span>◈</span><strong>AI 对话助手</strong><small>用自然语言创建任务，自动匹配服务和填充字段</small></button>
+            <button id="tool-assistant" class="tool-card active" type="button" data-tool="assistant"><span>◈</span><strong>任务助手</strong><small>用自然语言创建任务，自动匹配服务和填充字段</small></button>
             <button id="tool-wechat" class="tool-card" type="button" data-tool="wechat"><span>微</span><strong>微信会话整理</strong><small>导入、筛选并整理本人有权处理的会话</small></button>
             <button id="tool-reimbursement" class="tool-card" type="button" data-tool="reimbursement"><span>¥</span><strong>报销材料</strong><small>从邮箱筛选并导入发票、行程单和附件</small></button>
           </div>
           <section id="assistant-tool-panel" class="panel assistant-panel" data-tool-panel="assistant">
             <div class="panel-heading">
               <div>
-                <h2>AI 对话助手</h2>
+                <h2>任务助手</h2>
                 <p class="hint">用自然语言创建任务，助手会自动匹配服务、填充字段并跟踪进展。</p>
               </div>
               <span id="assistant-status" class="period-badge">正在连接…</span>
@@ -213,7 +238,7 @@
             <div id="assistant-conversation" class="assistant-conversation">
               <div class="assistant-welcome">
                 <span>◈</span>
-                <h3>欢迎使用 AI 对话助手</h3>
+                <h3>描述你希望完成的工作</h3>
                 <p>直接描述你的需求，例如：</p>
                 <ul>
                   <li>"请帮我研究华为公司的最新云计算战略"</li>
@@ -238,13 +263,42 @@
             </div>
           </section>
           <section id="wechat-tool-panel" class="panel wechat-panel" data-tool-panel="wechat" hidden>
-            <div class="panel-heading"><div><h2>导入微信会话</h2><p class="hint">选择 WXDecipher 风格的 JSON、JSONL 或 CSV 结构化导出文件。导入和浏览只在本机进行。</p></div><span class="period-badge">本地只读</span></div>
+            <div class="panel-heading"><div><h2>WXDecipher · 微信会话</h2><p class="hint">在工作台内解密数据库副本、浏览会话、导出结构化文件。导入和浏览只在本机进行。</p></div><span class="period-badge">本地只读</span></div>
             <div class="wechat-import-row">
               <label>微信账号标记（可选）<input id="wechat-account" maxlength="120" placeholder="例如：工作微信"></label>
               <label class="wechat-consent"><input id="wechat-ownership" type="checkbox"><span>我确认这是本人账号，且有权处理所选聊天内容</span></label>
               <button id="choose-wechat-export" class="primary" type="button">选择导出文件</button>
             </div>
-            <p class="safety-note">不会连接微信进程、提取密钥或修改微信原数据库。工具副本和消息原文固定保留 7 天后自动清理，已生成的整理报告继续保留。WXDecipher 当前公开仓库主要提供设计规范；本版不会声称可自动解密。</p>
+            <p class="safety-note">默认不读取微信进程；自动取钥须另行明确授权并选择进程。不扫描微信目录、不修改原数据库、不保存密钥。数据库解密暂存用完即清理，异常中断的暂存 30 分钟后在下次访问时清理；结构化副本和索引原文固定保留 7 天后自动清理。</p>
+            <details id="wxdecipher-console" class="wxdecipher-console" open>
+              <summary>从数据库副本导入 <span class="hint">手动／自动取钥 · WAL 离线重放</span></summary>
+              <p class="hint">添加同一账号的 message_0.db 等消息库；可继续添加 contact.db、session.db、message_resource.db，补全会话名和发送者。可直接导入明文 SQLite；需要日志中的新消息时，一并选择同快照的 message_0.db-wal 等同名文件。最多 16 个主库及其 16 个 WAL，单个 256 兆字节、合计 1 吉字节。</p>
+              <div class="form-actions"><button id="wxdecipher-add-files" type="button" class="secondary">添加数据库副本</button><button id="wxdecipher-clear-files" type="button" class="secondary" disabled>清空选择</button><span id="wxdecipher-file-count" class="hint">尚未选择数据库</span></div>
+              <ul id="wxdecipher-files" class="wxdecipher-files" aria-label="已选择的数据库"></ul>
+              <div class="wxdecipher-fields">
+                <label>通用密钥（可选）<input id="wxdecipher-key" type="password" maxlength="64" autocomplete="off" spellcheck="false" placeholder="64 位十六进制；明文数据库留空"></label>
+                <label>本人微信 ID（必填，不是昵称）<input id="wxdecipher-self-id" maxlength="128" autocomplete="off" required placeholder="wxid_…，作为稳定账号标识"></label>
+                <label>密钥模式<select id="wxdecipher-cipher-mode"><option value="auto">自动校验两种 SQLCipher 4 密钥模式</option><option value="sqlcipher4-raw">原始 AES 密钥（不做完整 KDF）</option><option value="sqlcipher4">主密钥（PBKDF2-SHA512 / 256000）</option></select></label>
+              </div>
+              <p class="hint">本人微信 ID 用于区分账号，账号标记仅用于展示；请勿把不同账号填成同一 ID。密钥只用于本次本机处理，不保存、不传给模型。不同数据库可在文件行内填写独立密钥。自动取钥仅填补未手动提供密钥的数据库；只支持既有 SQLCipher 4 页参数，不支持明文页头／外置盐布局。</p>
+              <label class="wechat-consent wxdecipher-snapshot"><input id="wxdecipher-snapshot" type="checkbox"><span>所选 DB/WAL 来自同一账号、同一时点，是一致的静态副本，不是正在写入的原库。未选择 WAL 时，我了解其中的新消息不在导入范围内。</span></label>
+              <label class="wechat-consent"><input id="wxdecipher-wal-confirm" type="checkbox"><span>允许在新副本中重放所选 WAL 的最后有效提交；损坏、旧世代或未提交尾部可能被忽略，并在结果中告知。</span></label>
+              <label class="wechat-consent"><input id="wxdecipher-capture-confirm" type="checkbox"><span>允许本次自动取数据库密钥（实验性）：只读所选微信进程，不提权、不注入、不暂停；仅使用与所选副本匹配的密钥，不显示或保存。兼容性未在本机真实微信上验证。</span></label>
+              <div class="form-actions wxdecipher-process-actions"><button id="wxdecipher-process-refresh" type="button" class="secondary" disabled>列出可选微信进程</button><select id="wxdecipher-process" aria-label="明确选择本次取钥的微信进程" disabled><option value="">请先授权并列出进程</option></select></div>
+              <div class="form-actions"><button id="wxdecipher-run" type="button" class="primary" disabled>校验、解密并导入</button><span id="wxdecipher-dependencies" class="hint"></span></div>
+              <div id="wxdecipher-status" class="wxdecipher-status" role="status" aria-live="polite">选择数据库后，勾选副本确认即可开始。不会自动读取本机微信。</div>
+            </details>
+            <details id="wxdecipher-media-console" class="wxdecipher-console">
+              <summary>媒体副本恢复 <span class="hint">本地解码、预览和下载 · 不交给模型</span></summary>
+              <p class="hint">选择 DAT 图片副本或已落盘的图片、MP4、WAV、SILK。支持旧版单字节 XOR、V2 AES 分段图片；不扫描微信目录，不联网补下载，不自动关联到会话。SILK 仅恢复原始文件，不转码。单个最多 16 兆字节，每次最多 4 个。</p>
+              <div class="wxdecipher-fields">
+                <label>V2 图片 AES 密钥（不是数据库密钥）<input id="wxdecipher-image-key" type="password" maxlength="32" autocomplete="off" spellcheck="false" placeholder="16 个 ASCII 字符或 32 位十六进制"></label>
+                <label>XOR 参数（可选，十进制 0–255）<input id="wxdecipher-xor-key" inputmode="numeric" maxlength="3" autocomplete="off" placeholder="留空仅按 JPEG / PNG 尾标记反推"></label>
+              </div>
+              <div class="form-actions"><button id="wxdecipher-media-choose" type="button" class="secondary">选择媒体副本并恢复</button><button id="wxdecipher-media-clear" type="button" class="secondary">清除预览</button></div>
+              <div id="wxdecipher-media-status" class="wxdecipher-status" role="status" aria-live="polite">需先勾选上方本人账号授权。结果只在当前页面内存中保留；下载文件由你自行保管。</div>
+              <div id="wxdecipher-media-results" class="wxdecipher-media-results" aria-label="媒体恢复结果"></div>
+            </details>
             <div id="wechat-summary" class="wechat-summary" aria-live="polite"><strong>尚未导入会话</strong><span>支持 JSON、JSONL、CSV</span></div>
           </section>
           <section id="wechat-browser-panel" class="panel wechat-browser-panel" data-tool-panel="wechat">
@@ -267,6 +321,7 @@
             </div>
             <label class="wechat-model-consent"><input id="wechat-model-sharing" type="checkbox"><span><strong>允许当前任务使用所选会话文字</strong><small>若当前模型由云端服务提供，所选文字会发送给该模型。未勾选不会创建整理任务。</small></span></label>
             <div class="form-actions"><button id="review-selected-wechat" class="primary" type="button">整理所选会话</button><button id="review-today-wechat" class="secondary" type="button">整理今天全部会话</button><button id="cleanup-wechat" class="secondary" type="button">清理已到期原文</button><span class="hint">整理报告按人员/群聊、进展、承诺、异议、风险和下一步组织，并保留消息定位。</span></div>
+            <div class="form-actions wxdecipher-export"><label for="wechat-export-format">本地导出</label><select id="wechat-export-format"><option value="jsonl">JSONL（逐行消息）</option><option value="json">JSON（消息数组）</option><option value="csv">CSV（安全表格）</option></select><button id="wechat-export-selected" type="button" class="secondary" disabled>导出所选会话</button><span class="hint">按当前日期、关键词和勾选范围导出，不调用模型。最多 50 个会话、50000 条、16 兆字节。</span></div>
           </section>
           <section class="panel reimbursement-panel" data-tool-panel="reimbursement" hidden>
             <div class="panel-heading"><div><h2>从邮箱获取报销材料</h2><p class="hint">按日期和关键词筛选邮件，只导入你勾选的附件，不读取正文用于其他任务。</p></div><span class="period-badge">只读连接</span></div>
@@ -293,9 +348,33 @@
           </section>
         </section>
 
-<section class="page" data-page="settings"><div class="page-heading"><div><p class="section-kicker">SETTINGS</p><h1>设置</h1><p>模型、公开检索、邮箱与本地运行配置。</p></div></div><section id="runtime-settings-panel" class="panel runtime-panel"><div class="panel-heading"><div><h2>AI 核心</h2><p id="runtime-settings-status" class="hint">正在读取运行状态…</p></div><span id="runtime-mode-badge" class="period-badge">嵌入运行</span></div><label class="runtime-toggle"><input id="show-ai-core-window" type="checkbox"><span><strong>显示 AI 核心调试窗口</strong><small>默认关闭。只有排查启动或模型问题时才建议打开，保存后重启应用生效。</small></span></label><div class="form-actions"><button id="save-runtime-settings" type="button" class="secondary">保存运行方式</button><span class="hint">隐藏时 AI 核心仍在应用内正常处理任务。</span></div><details class="runtime-log"><summary>查看内嵌运行记录</summary><pre id="ai-core-log">暂无运行记录。</pre></details></section><details id="mail-settings-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>报销邮箱</strong><p id="mail-settings-current">尚未连接邮箱</p></div></div><span class="model-settings-action">只读获取报销附件</span></summary><div class="model-form"><div class="model-explainer"><strong>只读连接收件箱</strong><p>请使用邮箱的客户端授权码、三方客户端安全密码或应用专用密码，不要填写网页登录密码。工作台不会标记已读、移动、删除或发送邮件。</p></div><div class="model-grid"><label>邮箱类型<select id="mail-provider"><option value="qq">QQ 邮箱</option><option value="163">163 邮箱</option><option value="126">126 邮箱</option><option value="aliyun">阿里企业邮箱</option><option value="gmail">Gmail</option><option value="custom">其他 IMAP 邮箱</option><option value="outlook" disabled>Outlook / Microsoft 365（暂需 OAuth，后续支持）</option></select></label><label>邮箱地址<input id="mail-email-address" type="email" maxlength="254" autocomplete="username" placeholder="name@example.com"></label><label>登录账号<input id="mail-username" maxlength="254" autocomplete="username" placeholder="通常与邮箱地址相同"></label><label>IMAP 服务器<input id="mail-host" maxlength="253" placeholder="选择邮箱类型后自动填写"></label><label class="span-2">客户端授权码 / 应用专用密码<input id="mail-credential" type="password" maxlength="4096" autocomplete="new-password" placeholder="只保存在本机系统保护存储中"></label><label class="model-private span-2"><input id="mail-private-network" type="checkbox">允许连接本机或局域网中的可信 IMAP 服务器</label></div><div class="form-actions"><button id="save-mail-settings" type="button" class="primary">验证并连接</button><button id="reset-mail-settings" type="button" class="secondary">移除邮箱连接</button><span id="mail-settings-status" class="hint">连接时会进行一次只读登录验证。</span></div></div></details><details id="search-settings-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>公开检索</strong><p id="search-current">正在读取检索配置…</p></div></div><span class="model-settings-action">配置政策与行业资料检索</span></summary><div class="model-form"><div class="model-explainer"><strong>场景化公开检索</strong><p>默认即可使用免密公共检索；助手会按广泛发现、官方资料、中文政策和近期信息选择策略，控制结果数量与摘要长度。候选结果仍需读取正文后才能作为依据。</p></div><div class="model-grid"><label class="span-2">专用 Brave Search 接口密钥（可选）<input id="search-api-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写后验证并保存；不会显示在页面或日志中"></label></div><div class="form-actions"><button id="save-search-settings" type="button" class="primary">验证并保存专用密钥</button><button id="reset-search-settings" type="button" class="secondary">改用免密检索</button><a class="secondary external-link" href="https://api-dashboard.search.brave.com/app/keys" target="_blank" rel="noopener noreferrer">申请专用密钥</a><span id="search-settings-status" class="hint">免密模式使用共享公共额度；专用密钥可提高稳定性。</span></div></div></details><details id="search-gateway-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>搜索聚合网关</strong><p id="search-gateway-current">未启用；继续使用上方公开检索</p></div></div><span class="model-settings-action">连接 One Search</span></summary><div class="model-form"><div class="model-explainer"><strong>多提供商聚合检索</strong><p>连接你单独部署的 One Search。启用后公开检索优先走该网关；故障时会明确停止，不会把同一检索词静默转发到其他服务。</p></div><div class="model-grid"><label class="span-2">One Search 地址<input id="search-gateway-url" maxlength="500" placeholder="例如 http://127.0.0.1:5173（不要填写 /v1/search）"></label><label class="span-2">检索令牌<input id="search-gateway-token" type="password" maxlength="4096" autocomplete="new-password" placeholder="只填写 osr_ 开头的业务令牌；不要填写 oak_ 管理凭据"></label><label>搜索策略<select id="search-gateway-mode"><option value="parallel">自动聚合（推荐）</option><option value="fallback">稳定优先（依次尝试）</option><option value="single">只用一个来源</option></select></label><label>每次查询最多结果数<input id="search-gateway-max-results" type="number" min="1" max="10" value="8"></label><div class="span-2 gateway-provider-field"><strong>搜索来源</strong><p id="search-gateway-provider-help">首次连接默认使用全部可用来源；连接成功后可在这里指定。</p><div id="search-gateway-providers" class="gateway-provider-options"></div></div><label class="model-private span-2"><input id="search-gateway-private-network" type="checkbox">允许连接本机或局域网中的可信网关</label></div><div class="form-actions"><button id="save-search-gateway" type="button" class="primary">测试并启用</button><button id="reset-search-gateway" type="button" class="secondary">停用聚合网关</button><button id="open-search-gateway" type="button" class="secondary">打开管理页面</button><span id="search-gateway-status" class="hint">Agent4Market 不会安装或管理 One Search 服务本身。</span></div></div></details><details id="model-provider-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>模型提供者</strong><p id="provider-current">正在读取模型配置…</p></div></div><span class="model-settings-action">选择模型来源</span></summary><div class="model-form"><div class="model-explainer"><strong>模型接入与对话入口</strong><p>任务由 Pi 核心执行，可配置多个 API 供应商。Claude Code / Codex CLI 仍可作为受控对话入口，但尚不是本工作台的模型后端。</p></div><div class="provider-options"><label class="provider-card"><input type="radio" name="provider-type" value="newapi" checked><div class="provider-info"><strong>NewAPI 网关</strong><small>通过 NewAPI 兼容网关调用多种模型</small><span class="provider-status" id="newapi-status">未配置</span></div></label><label class="provider-card"><input type="radio" name="provider-type" value="claude-code" disabled><div class="provider-info"><strong>Claude Code</strong><small>使用本地 Claude Code CLI</small><span class="provider-status unavailable" id="claude-code-status">检测中…</span></div></label><label class="provider-card"><input type="radio" name="provider-type" value="codex-cli" disabled><div class="provider-info"><strong>Codex CLI</strong><small>使用本地 Codex CLI</small><span class="provider-status unavailable" id="codex-cli-status">检测中…</span></div></label></div><div id="claude-code-config" class="provider-config" hidden><div class="model-grid"><label class="span-2">Claude Code 路径<input id="claude-code-path" type="text" readonly></label><label class="span-2">选择模型<select id="claude-code-model"><option value="claude-opus-5">Claude Opus 5 (最强推理)</option><option value="claude-sonnet-5">Claude Sonnet 5 (平衡)</option><option value="claude-haiku-4.5">Claude Haiku 4.5 (快速)</option></select></label></div></div><div id="codex-cli-config" class="provider-config" hidden><div class="model-grid"><label class="span-2">Codex CLI 路径<input id="codex-cli-path" type="text" readonly></label><label class="span-2">选择模型<select id="codex-cli-model"><option value="claude-opus-5">Claude Opus 5</option><option value="claude-sonnet-5">Claude Sonnet 5</option></select></label></div></div><div class="form-actions"><button id="save-provider-settings" type="button" class="secondary">前往 API 供应商配置</button><button id="detect-coding-assistants" type="button" class="secondary">重新检测编码助手</button><span class="hint">切换提供者后需重启应用生效。</span></div></div></details><details id="model-settings-panel" class="panel model-panel" open>
-<summary><div><span class="model-dot"></span><div><strong>模型供应商与目录</strong><p id="model-current">正在读取模型配置…</p></div></div><span class="model-settings-action">独立凭据 · 按供应商选择模型</span></summary>
-<div class="model-form"><div class="model-explainer"><strong>配置供 Pi 使用的 API 模型</strong><p>每个实例独立保存接收地址和凭据。同一厂商可添加多个账号；不自动切换供应商。新增或修改后需重启 AI 核心。</p></div>
+<section class="page" data-page="settings"><div class="page-heading"><div><p class="section-kicker">SETTINGS</p><h1>设置</h1><p>模型、公开检索、邮箱与本地运行配置。</p></div></div><section id="runtime-settings-panel" class="panel runtime-panel"><div class="panel-heading"><div><h2>AI 核心</h2><p id="runtime-settings-status" class="hint">正在读取运行状态…</p></div><span id="runtime-mode-badge" class="period-badge">嵌入运行</span></div><label class="runtime-toggle"><input id="show-ai-core-window" type="checkbox"><span><strong>显示 AI 核心调试窗口</strong><small>默认关闭。只有排查启动或模型问题时才建议打开，保存后重启应用生效。</small></span></label><div class="form-actions"><button id="save-runtime-settings" type="button" class="secondary">保存运行方式</button><span class="hint">隐藏时 AI 核心仍在应用内正常处理任务。</span></div><details class="runtime-log"><summary>查看内嵌运行记录</summary><pre id="ai-core-log">暂无运行记录。</pre></details></section><details id="mail-settings-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>报销邮箱</strong><p id="mail-settings-current">尚未连接邮箱</p></div></div><span class="model-settings-action">只读获取报销附件</span></summary><div class="model-form"><div class="model-explainer"><strong>只读连接收件箱</strong><p>请使用邮箱的客户端授权码、三方客户端安全密码或应用专用密码，不要填写网页登录密码。工作台不会标记已读、移动、删除或发送邮件。</p></div><div class="model-grid"><label>邮箱类型<select id="mail-provider"><option value="qq">QQ 邮箱</option><option value="163">163 邮箱</option><option value="126">126 邮箱</option><option value="aliyun">阿里企业邮箱</option><option value="gmail">Gmail</option><option value="custom">其他 IMAP 邮箱</option><option value="outlook" disabled>Outlook / Microsoft 365（暂需 OAuth，后续支持）</option></select></label><label>邮箱地址<input id="mail-email-address" type="email" maxlength="254" autocomplete="username" placeholder="name@example.com"></label><label>登录账号<input id="mail-username" maxlength="254" autocomplete="username" placeholder="通常与邮箱地址相同"></label><label>IMAP 服务器<input id="mail-host" maxlength="253" placeholder="选择邮箱类型后自动填写"></label><label class="span-2">客户端授权码 / 应用专用密码<input id="mail-credential" type="password" maxlength="4096" autocomplete="new-password" placeholder="只保存在本机系统保护存储中"></label><label class="model-private span-2"><input id="mail-private-network" type="checkbox">允许连接本机或局域网中的可信 IMAP 服务器</label></div><div class="form-actions"><button id="save-mail-settings" type="button" class="primary">验证并连接</button><button id="reset-mail-settings" type="button" class="secondary">移除邮箱连接</button><span id="mail-settings-status" class="hint">连接时会进行一次只读登录验证。</span></div></div></details><details id="search-settings-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>公开检索</strong><p id="search-current">正在读取检索配置…</p></div></div><span class="model-settings-action">配置政策与行业资料检索</span></summary><div class="model-form"><div class="model-explainer"><strong>场景化公开检索</strong><p>默认即可使用免密公共检索；助手会按广泛发现、官方资料、中文政策和近期信息选择策略，控制结果数量与摘要长度。候选结果仍需读取正文后才能作为依据。</p></div><div class="model-grid"><label class="span-2">专用 Brave Search 接口密钥（可选）<input id="search-api-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="填写后验证并保存；不会显示在页面或日志中"></label></div><div class="form-actions"><button id="save-search-settings" type="button" class="primary">验证并保存专用密钥</button><button id="reset-search-settings" type="button" class="secondary">改用免密检索</button><a class="secondary external-link" href="https://api-dashboard.search.brave.com/app/keys" target="_blank" rel="noopener noreferrer">申请专用密钥</a><span id="search-settings-status" class="hint">免密模式使用共享公共额度；专用密钥可提高稳定性。</span></div></div></details><details id="search-gateway-panel" class="panel model-panel" open><summary><div><span class="model-dot"></span><div><strong>搜索聚合网关</strong><p id="search-gateway-current">未启用；继续使用上方公开检索</p></div></div><span class="model-settings-action">连接 One Search</span></summary><div class="model-form"><div class="model-explainer"><strong>多提供商聚合检索</strong><p>连接你单独部署的 One Search。启用后公开检索优先走该网关；故障时会明确停止，不会把同一检索词静默转发到其他服务。</p></div><div class="model-grid"><label class="span-2">One Search 地址<input id="search-gateway-url" maxlength="500" placeholder="例如 http://127.0.0.1:5173（不要填写 /v1/search）"></label><label class="span-2">检索令牌<input id="search-gateway-token" type="password" maxlength="4096" autocomplete="new-password" placeholder="只填写 osr_ 开头的业务令牌；不要填写 oak_ 管理凭据"></label><label>搜索策略<select id="search-gateway-mode"><option value="parallel">自动聚合（推荐）</option><option value="fallback">稳定优先（依次尝试）</option><option value="single">只用一个来源</option></select></label><label>每次查询最多结果数<input id="search-gateway-max-results" type="number" min="1" max="10" value="8"></label><div class="span-2 gateway-provider-field"><strong>搜索来源</strong><p id="search-gateway-provider-help">首次连接默认使用全部可用来源；连接成功后可在这里指定。</p><div id="search-gateway-providers" class="gateway-provider-options"></div></div><label class="model-private span-2"><input id="search-gateway-private-network" type="checkbox">允许连接本机或局域网中的可信网关</label></div><div class="form-actions"><button id="save-search-gateway" type="button" class="primary">测试并启用</button><button id="reset-search-gateway" type="button" class="secondary">停用聚合网关</button><button id="open-search-gateway" type="button" class="secondary">打开管理页面</button><span id="search-gateway-status" class="hint">Agent4Market 不会安装或管理 One Search 服务本身。</span></div></div></details><details id="model-provider-panel" class="panel model-panel" open>
+<summary><div><span class="model-dot"></span><div><strong>模型提供者</strong><p id="provider-current">正在读取模型配置…</p></div></div><span class="model-settings-action">API 或本机 CLI</span></summary>
+<div class="model-form">
+<div class="model-explainer"><strong>选择 Pi 的模型执行后端</strong><p>普通业务任务可使用 API 供应商、Claude Code 或 Codex CLI。CLI 登录由本机程序自行管理；“已安装”不代表已经登录。无论选择哪种后端，工作台工具调用和审批仍由 Pi 控制，不会授予 CLI 自带的文件、Shell 或 MCP 权限。</p></div>
+<div class="provider-options">
+<label class="provider-card"><input type="radio" name="provider-type" value="newapi" checked><div class="provider-info"><strong>API 供应商</strong><small>管理 NewAPI、OpenAI、Anthropic 或兼容 API</small><span class="provider-status" id="newapi-status">未配置</span></div></label>
+<label class="provider-card"><input type="radio" name="provider-type" value="claude-code"><div class="provider-info"><strong>Claude Code</strong><small>由 Pi 通过受控适配器调用本机 CLI</small><span class="provider-status unavailable" id="claude-code-status">检测中…</span></div></label>
+<label class="provider-card"><input type="radio" name="provider-type" value="codex-cli"><div class="provider-info"><strong>Codex CLI</strong><small>由 Pi 通过受控适配器调用本机 CLI</small><span class="provider-status unavailable" id="codex-cli-status">检测中…</span></div></label>
+</div>
+<div id="api-provider-config" class="provider-config"><p class="hint">API 供应商在下方按实例管理，可分别保存凭据、模型目录与默认模型。</p></div>
+<div id="claude-code-config" class="provider-config" hidden><div class="model-grid">
+<label class="span-2">自动检测的 Claude Code 路径<input id="claude-code-path" type="text" readonly placeholder="请先检测本机 Claude Code"></label>
+<label class="span-2">真实完整模型 ID<input id="claude-code-model" type="text" maxlength="200" autocomplete="off" spellcheck="false" placeholder="按本机 CLI 账号实际可用的完整模型 ID 填写"></label>
+<p id="claude-code-config-status" class="hint span-2">只登记检测到的程序路径和你填写的完整模型 ID；不会读取或验证 CLI 登录账号。</p>
+</div></div>
+<div id="codex-cli-config" class="provider-config" hidden><div class="model-grid">
+<label class="span-2">自动检测的 Codex CLI 路径<input id="codex-cli-path" type="text" readonly placeholder="请先检测本机 Codex CLI"></label>
+<label>Codex 模型<select id="codex-cli-model" disabled><option value="">等待自动读取 CLI 模型目录</option></select></label>
+<label>新任务默认思考强度<select id="codex-cli-thinking" disabled><option value="">请先选择模型</option></select></label>
+<div class="form-actions span-2"><button id="refresh-codex-models" type="button" class="secondary">刷新模型目录</button><span id="codex-cli-catalog-status" class="hint">从隔离的 CLI 内置目录读取模型与思考档位，不读取登录文件，不代表当前账号有权限使用。</span></div>
+<p id="codex-cli-config-status" class="hint span-2">选择模型及其支持的思考强度后保存。已有配置不会自动改动。</p>
+</div></div>
+<div class="form-actions"><button id="save-provider-settings" type="button" class="secondary">管理 API 供应商</button><button id="reset-cli-provider" type="button" class="secondary" hidden>移除此 CLI 供应商</button><button id="detect-coding-assistants" type="button" class="secondary">重新检测本机 CLI</button><span class="hint">保存 CLI 会将其模型设为新任务默认值；重启应用或智能核心后生效，不会自动启动任务。微信会话整理首版仅支持 API 模型。</span></div>
+</div>
+</details><details id="model-settings-panel" class="panel model-panel" open>
+<summary><div><span class="model-dot"></span><div><strong>API 供应商与模型目录</strong><p id="model-current">正在读取模型配置…</p></div></div><span class="model-settings-action">独立凭据 · 按 API 实例管理</span></summary>
+<div class="model-form"><div class="model-explainer"><strong>配置供 Pi 使用的 API 模型</strong><p>这里仅显示 API 实例；Claude Code 与 Codex CLI 在上方独立管理，不会被转换成 API 配置。每个 API 实例独立保存接收地址和凭据，新增或修改后需重启 AI 核心。</p></div>
 <div class="model-grid">
 <label>供应商实例<select id="model-instance"><option value="">新增供应商</option></select></label><div class="form-actions"><button id="add-model-provider" type="button" class="secondary">新增供应商</button></div>
 <label>服务类型<select id="model-vendor"><option value="newapi">NewAPI / 聚合网关</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="custom">自定义兼容 API</option></select></label>
@@ -324,7 +403,24 @@
   <input id="library-version-input" type="file" accept=".pdf,.ofd,.docx,.xlsx,.xls,.csv,.txt,.md,.pptx,.png,.jpg,.jpeg,.heic,.zip" hidden>
   <input id="bid-file-input" type="file" accept=".pdf,.ofd,.docx,.xls,.xlsx,.csv,.txt,.md,.pptx,.png,.jpg,.jpeg,.heic,.zip" hidden>
   <input id="wechat-file-input" type="file" accept=".json,.jsonl,.csv" hidden>
+  <input id="wxdecipher-file-input" type="file" accept=".db,.sqlite,.sqlite3,.db-wal,.sqlite-wal,.sqlite3-wal" multiple hidden>
+  <input id="wxdecipher-media-input" type="file" accept=".dat,.jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.wav,.silk" multiple hidden>
   <template id="task-template"><article class="task"><div class="task-title"><strong></strong><span class="status"></span></div><p class="task-meta"></p><p class="task-request"></p><div class="task-actions"></div></article></template>
+  <template id="app-update-panel-template">
+    <section id="app-update-panel" class="panel app-update-panel" aria-labelledby="app-update-title">
+      <div class="panel-heading"><div><h2 id="app-update-title">应用更新</h2><p class="hint">GitHub Releases · 正式版本频道</p></div><span id="app-update-current-version" class="period-badge">正在读取版本…</span></div>
+      <div id="app-update-status" class="app-update-status" role="status" aria-live="polite">尚未检查更新</div>
+      <p id="app-update-checked-at" class="hint">仅检查公共发布信息，不上传用户配置或业务数据。</p>
+      <div id="app-update-release" class="app-update-release" hidden>
+        <strong id="app-update-release-name"></strong><small id="app-update-release-date"></small>
+        <details><summary>更新说明</summary><pre id="app-update-release-notes"></pre></details>
+      </div>
+      <label class="runtime-toggle"><input id="app-update-auto" type="checkbox" checked><span><strong>自动检查更新</strong><small>启动时及应用打开期间每 5 分钟检查；不会自动下载、安装或重启。</small></span></label>
+      <div class="form-actions"><button id="app-update-check" class="secondary" type="button">立即检查</button><button id="app-update-open-release" class="primary" type="button" disabled>查看发布页</button><span id="app-update-action-status" class="hint" aria-live="polite"></span></div>
+      <p class="safety-note">发布源：WH2020/WorkFlow_Market。发布页会在系统浏览器中打开，请确认该版本已提供适合本机的安装包。不要直接覆盖正在运行的程序；当前程序和数据不会在后台被替换。</p>
+    </section>
+  </template>
+  <script src="/free-chat.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

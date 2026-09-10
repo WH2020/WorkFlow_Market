@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
-import type { WorkflowTask } from "./task-runtime.ts";
+import type { TaskThinkingLevel, WorkflowTask } from "./task-runtime.ts";
+import { cliRecipientThinking } from "./cli-model-provider.ts";
 
 export type ModelRecipient = { provider_id: string; base_url: string; api: string; model_id: string };
 
@@ -26,17 +27,21 @@ export function modelRecipient(key: string | undefined): ModelRecipient | undefi
   return key ? managedModelCatalog()?.[key] : undefined;
 }
 
-export function frozenRoleConfiguration(): { roleModels: Record<string, string>; roleRecipients: Record<string, ModelRecipient> } {
+export function frozenRoleConfiguration(): { roleModels: Record<string, string>; roleRecipients: Record<string, ModelRecipient>; roleThinkingLevels?: Record<string, TaskThinkingLevel> } {
   const roles = JSON.parse(process.env.AGENT4MARKET_ROLE_MODELS || "{}") as Record<string, string>;
   const catalog = managedModelCatalog();
   const recipients: Record<string, ModelRecipient> = {};
+  const thinking: Record<string, TaskThinkingLevel> = {};
   for (const [role, key] of Object.entries(roles)) {
     if (!["director-research-scout", "director-readonly-reviewer"].includes(role) || typeof key !== "string" || (catalog && !catalog[key])) {
       throw new Error("只读角色的模型配置无效");
     }
     if (catalog?.[key]) recipients[role] = { ...catalog[key] };
+    const policy = cliRecipientThinking(catalog?.[key]);
+    if (policy) thinking[role] = policy.defaultLevel;
   }
-  return { roleModels: { ...roles }, roleRecipients: recipients };
+  return { roleModels: { ...roles }, roleRecipients: recipients,
+    ...(Object.keys(thinking).length ? { roleThinkingLevels: thinking } : {}) };
 }
 
 export function runtimeModelRecipient(model: { provider: string; id: string; api: string; baseUrl: string } | undefined): ModelRecipient | undefined {
@@ -93,6 +98,8 @@ export function taskCheckpoint(task: WorkflowTask) {
   const summary = "当前受管任务的本地检查点；这是状态摘要，不是新增业务事实。继续前核对 DAG 和本地资料；未保存的长篇分析需重新核验。\n" + JSON.stringify({
     task_id: task.task_id, workflow_id: task.workflow_id, request: task.request.slice(0, 8000),
     status: task.status, current_node: task.current_node, waiting_nodes: task.waiting_nodes,
+    effective_model: task.effective_model, effective_thinking_level: task.effective_thinking_level,
+    role_models: task.role_models, role_thinking_levels: task.role_thinking_levels,
     completed_nodes: task.completed_nodes, artifacts: task.artifacts.slice(-30).map((path) => path.slice(0, 250)),
     recent_audit: task.audit.slice(-8).map((event) => ({ ...event, note: event.note?.slice(0, 800) })),
     pending_write: task.pending_write ? { intent_id: task.pending_write.intent_id, logical_tool: task.pending_write.logical_tool,
@@ -100,5 +107,6 @@ export function taskCheckpoint(task: WorkflowTask) {
   });
   return { summary, details: { schema_version: "1.0", kind: "agent4market-task-checkpoint", task_id: task.task_id,
     task_version: task.version, effective_model: task.effective_model, effective_recipient: task.effective_recipient,
+    effective_thinking_level: task.effective_thinking_level, role_thinking_levels: task.role_thinking_levels,
     summary_sha256: hash(summary) } };
 }

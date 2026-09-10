@@ -1,0 +1,4 @@
+# Local-only database decoding; the workbench still starts without these extras.
+pycryptodome==3.23.0
+zstandard==0.25.0
+Pillow==12.3.0

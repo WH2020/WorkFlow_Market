@@ -1,8 +1,8 @@
 """Local-only control centre for the vertical director agents.
 
 This is deliberately a small, dependency-free HTTP server.  It is a control
-surface, not an agent executor: task and lifecycle requests are picked up by
-Pi, while the UI only records version-bound user decisions.
+surface, not a task executor: task and lifecycle requests are picked up by
+Pi. The separate free-chat route streams a tool-free, ephemeral model turn.
 """
 from __future__ import annotations
 
@@ -43,6 +43,10 @@ from agent_platform.model_provider import (  # noqa: E402
     model_settings_summary,
     normalize_base_url,
 )
+from agent_platform.app_updates import UpdateChecker, application_version  # noqa: E402
+from agent_platform.free_chat import ChatError, ChatManager  # noqa: E402
+
+FREE_CHAT = ChatManager()
 from agent_platform.search_provider import (  # noqa: E402
     SearchProviderError,
     clear_search_provider,
@@ -111,16 +115,21 @@ from agent_platform.wechat_store import (  # noqa: E402
     cleanup_expired as cleanup_expired_wechat,
     create_review_scope as create_wechat_review_scope,
     dashboard as wechat_dashboard,
+    export_selection as export_wechat_selection,
     import_export as import_wechat_export,
     list_conversations as list_wechat_conversations,
     read_messages as read_wechat_messages,
     review_scope_summary as wechat_review_scope_summary,
 )
+from agent_platform import wxdecipher, wxdecipher_media  # noqa: E402
+from agent_platform.local_http_security import LocalAccessError, require_local_user, wechat_http_supported  # noqa: E402
 from agent_platform.a4_api import create_api_handler  # noqa: E402
-from agent_platform.a4_store import create_store as create_a4_store  # noqa: E402
+from agent_platform.a4_store import create_store as create_a4_store, default_store_path as a4_store_path  # noqa: E402
 
 
 UI_ROOT = Path(__file__).resolve().parent
+APP_UPDATES = UpdateChecker(application_version(ROOT))
+SCHEDULER_ENABLED = True
 RUNTIME = ROOT / ".pi" / "director-runtime"
 TASKS = RUNTIME / "tasks"
 REQUESTS = RUNTIME / "requests"
@@ -379,12 +388,27 @@ def task_runtime_selection(payload: dict[str, Any]) -> dict[str, str]:
             providers = [{**settings, "id": settings.get("provider_id")}]
         allowed = {
             f"{provider['id']}/{item['id']}"
-            for provider in providers if provider.get("status") == "configured" and provider.get("has_api_key")
+            for provider in providers if provider.get("status") == "configured" and (
+                provider.get("has_api_key") or provider.get("api") in {"claude-code", "codex-cli"}
+            )
             for item in provider.get("models", [])
             if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("enabled", True) and item.get("tools", True)
         }
         if requested_model not in allowed:
             raise ValueError("所选任务模型不在当前已配置的模型列表中")
+        for provider in providers:
+            if provider.get("api") not in {"claude-code", "codex-cli"}:
+                continue
+            item = next((item for item in provider.get("models", []) if f"{provider['id']}/{item['id']}" == requested_model), None)
+            if item is None:
+                continue
+            from agent_platform.cli_model_catalog import thinking_levels, validate_reasoning
+            levels = thinking_levels(validate_reasoning(item["cli_reasoning"])) if "cli_reasoning" in item else ["off"]
+            requested_level = selection.get("requested_thinking_level", item.get("default_thinking_level", "off"))
+            if requested_level not in levels:
+                raise ValueError("该 CLI 模型不支持所选思考强度，请选择支持的档位")
+            if "cli_reasoning" in item:
+                selection["requested_thinking_level"] = requested_level
     elif settings.get("status") in {"unconfigured", "unsupported_backend", "error", "missing_default"}:
         raise ValueError(settings.get("error") or "请先配置默认任务模型")
     return selection
@@ -2663,13 +2687,21 @@ class ControlHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; frame-ancestors 'none'")
         self.send_header("Referrer-Policy", "no-referrer")
         super().end_headers()
 
     def local_host(self) -> bool:
         host = self.headers.get("Host", "").split(":", 1)[0].lower()
         return host in {"127.0.0.1", "localhost"}
+
+    def local_user(self) -> bool:
+        try:
+            require_local_user(getattr(self, "connection", None))
+            return True
+        except LocalAccessError as error:
+            self.send_json(HTTPStatus.FORBIDDEN, {"error": str(error), "code": "LOCAL_USER_REQUIRED"})
+            return False
 
     def send_json(self, status: HTTPStatus, value: Any) -> None:
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -2721,21 +2753,21 @@ class ControlHandler(SimpleHTTPRequestHandler):
         code = error.code if isinstance(error, WechatStoreError) else "INVALID_INPUT"
         if code in {"NOT_FOUND", "NOT_CONFIGURED"}:
             status = HTTPStatus.NOT_FOUND
-        elif code in {"STORE_ERROR"}:
+        elif code in {"STORE_ERROR", "DEPENDENCY_MISSING"}:
             status = HTTPStatus.SERVICE_UNAVAILABLE
         elif code in {"FILE_TOO_LARGE", "ROW_LIMIT", "SCOPE_TOO_LARGE"}:
             status = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
-        elif code in {"SCHEMA_MISMATCH"}:
+        elif code in {"SCHEMA_MISMATCH", "DECIPHER_BUSY", "SESSION_LIMIT"}:
             status = HTTPStatus.CONFLICT
         else:
             status = HTTPStatus.BAD_REQUEST
         self.send_json(status, {"error": str(error), "code": code})
 
-    def body(self) -> dict[str, Any]:
+    def body(self, *, limit: int = 16_384) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
             raise ValueError("请求体不能为空")
-        if length > 16_384:
+        if length > limit:
             raise ValueError("请求过大")
         value = json.loads(self.rfile.read(length).decode("utf-8"))
         if not isinstance(value, dict):
@@ -2906,22 +2938,25 @@ class ControlHandler(SimpleHTTPRequestHandler):
         filename = unquote(encoded_name).strip()
         suffix = Path(filename).suffix.lower()
         if suffix not in {".json", ".jsonl", ".csv"}:
-            raise WechatStoreError("UNSUPPORTED_FORMAT", "请选择 WXDecipher 结构化导出的 JSON、JSONL 或 CSV 文件")
+            raise WechatStoreError("UNSUPPORTED_FORMAT", "请选择 JSON、JSONL 或 CSV 结构化导出；数据库请使用 WXDecipher 数据库入口")
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > MAX_WECHAT_IMPORT_BYTES:
             raise WechatStoreError("FILE_TOO_LARGE", "微信导出文件必须为 1 字节至 64 兆字节")
         ownership_confirmed = self.headers.get("X-Wechat-Ownership", "").strip().lower() == "confirmed"
+        if not ownership_confirmed:
+            raise WechatStoreError("AUTHORIZATION_REQUIRED", "请先确认本人账号且有权处理所选聊天内容")
         auto_cleanup = self.headers.get("X-Wechat-Auto-Cleanup", "true").strip().lower() == "true"
         try:
             retention_days = int(self.headers.get("X-Wechat-Retention-Days", "7"))
         except ValueError as error:
             raise WechatStoreError("INVALID_RETENTION", "原文保留时间必须是整数天") from error
         account_label = unquote(self.headers.get("X-Wechat-Account", "")).strip() or "本机微信"
-        descriptor, temporary_name = tempfile.mkstemp(prefix="agent4market-wechat-", suffix=suffix)
-        temporary = Path(temporary_name)
-        received = 0
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
+        if hasattr(self, "connection"):
+            self.connection.settimeout(120)
+        with wxdecipher.structured_upload_directory(ROOT) as staging:
+            temporary = staging / ("structured-upload" + suffix)
+            received = 0
+            with temporary.open("xb") as handle:
                 while received < length:
                     block = self.rfile.read(min(1024 * 1024, length - received))
                     if not block:
@@ -2935,13 +2970,44 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 temporary,
                 source_name=filename,
                 account_label=account_label,
+                account_id=unquote(self.headers.get("X-Wechat-Self-Id", "")).strip(),
                 retention_days=retention_days,
                 auto_cleanup=auto_cleanup,
                 ownership_confirmed=ownership_confirmed,
             )
-        finally:
-            temporary.unlink(missing_ok=True)
         self.send_json(HTTPStatus.OK if result.get("duplicate_file") else HTTPStatus.CREATED, result)
+
+    def upload_wxdecipher_database(self) -> None:
+        if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+            raise WechatStoreError("PROFILE_FORBIDDEN", "WXDecipher 只在销售总监版本中提供")
+        if hasattr(self, "connection"):
+            self.connection.settimeout(120)
+        result = wxdecipher.upload_database(
+            ROOT, self.headers.get("X-WXDecipher-Session", ""),
+            unquote(self.headers.get("X-File-Name", "")), self.rfile,
+            int(self.headers.get("Content-Length", "0")),
+        )
+        self.send_json(HTTPStatus.CREATED, result)
+
+    def restore_wxdecipher_media(self) -> None:
+        if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+            raise WechatStoreError("PROFILE_FORBIDDEN", "WXDecipher 只在销售总监版本中提供")
+        self.connection.settimeout(60)
+        with wxdecipher_media.restore_upload(
+            self.rfile, int(self.headers.get("Content-Length", "0")),
+            ownership_confirmed=self.headers.get("X-Wechat-Ownership") == "true",
+            image_key=self.headers.get("X-WXDecipher-Image-Key", ""),
+            xor_key=self.headers.get("X-WXDecipher-Xor-Key", ""),
+        ) as (content, report):
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", report["mime_type"])
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Content-Disposition", f'attachment; filename="{report["filename"]}"')
+            self.send_header("X-WXDecipher-Media", json.dumps(report, ensure_ascii=True, separators=(",", ":")))
+            self.end_headers()
+            # Send binary bytes. The decode lock also covers a slow response.
+            for offset in range(0, len(content), 64 * 1024):
+                self.wfile.write(content[offset:offset + 64 * 1024])
 
     def upload_bid_file(self) -> None:
         bid_id = safe_id(self.headers.get("X-Bid-Id", ""))
@@ -3024,12 +3090,25 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             return
         if route == "/api/health":
-            self.send_json(HTTPStatus.OK, {"status": "ok", "profile_id": ACTIVE_PROFILE_ID})
+            health = {"status": "ok", "profile_id": ACTIVE_PROFILE_ID}
+            startup_token = os.environ.get("AGENT4MARKET_DESKTOP_STARTUP_TOKEN")
+            if startup_token:
+                health["desktop_startup_token"] = startup_token
+            self.send_json(HTTPStatus.OK, health)
+            return
+        if not self.local_user():
+            return
+        if route.startswith("/api/wechat/") and not wechat_http_supported():
+            self.send_json(HTTPStatus.FORBIDDEN, {"error": "当前平台尚无经过验证的本机用户隔离，微信 HTTP 入口暂不开放", "code": "LOCAL_ISOLATION_UNSUPPORTED"})
             return
         if route == "/api/bootstrap":
-            process_due_schedules()
+            if SCHEDULER_ENABLED:
+                process_due_schedules()
             try:
+                if not wechat_http_supported():
+                    raise WechatStoreError("LOCAL_ISOLATION_UNSUPPORTED", "当前平台尚无经过验证的本机用户隔离，微信 HTTP 入口暂不开放")
                 cleanup_expired_wechat(ROOT)
+                wxdecipher.cleanup_sessions(ROOT)
                 wechat = wechat_dashboard(ROOT)
             except WechatStoreError as error:
                 wechat = {
@@ -3037,6 +3116,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "conversation_count": 0, "message_count": 0, "batch_count": 0,
                     "batches": [], "revision": "error",
                 }
+            wechat["decipher"] = wxdecipher.capabilities()
+            wechat["http_available"] = wechat_http_supported()
             tasks = task_summaries()
             files = project_files()
             outputs = output_summary()
@@ -3057,10 +3138,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
                                             "wechat": wechat,
                                             "bidding": bid_dashboard(ROOT),
                                             "desktop_runtime": desktop_runtime_summary(),
+                                            "app_updates": APP_UPDATES.snapshot(),
                                             "request_token": SERVER_TOKEN})
             return
         if route == "/api/desktop-settings":
             self.send_json(HTTPStatus.OK, desktop_runtime_summary())
+            return
+        if route == "/api/app-updates":
+            self.send_json(HTTPStatus.OK, APP_UPDATES.snapshot())
             return
         if route == "/api/model-settings":
             self.send_json(HTTPStatus.OK, model_settings_summary(ROOT))
@@ -3262,14 +3347,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if route == "/api/coding-assistants/detect":
             try:
                 from agent_platform.model_provider import detect_coding_assistants
-                assistants = detect_coding_assistants()
+                assistants = detect_coding_assistants(project_root=ROOT)
                 self.send_json(HTTPStatus.OK, {"status": "ok", **assistants})
             except Exception as error:
                 self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "error": str(error)})
             return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
-        elif route not in ("/app.js", "/styles.css"):
+        elif route not in ("/app.js", "/styles.css", "/wxdecipher.css", "/free-chat.js", "/free-chat.css"):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         super().do_GET()
@@ -3279,10 +3364,15 @@ class ControlHandler(SimpleHTTPRequestHandler):
             if not self.local_host():
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
+            if not self.local_user():
+                return
             if not secrets.compare_digest(self.headers.get("X-Director-Token", ""), SERVER_TOKEN):
                 self.send_json(HTTPStatus.FORBIDDEN, {"error": "工作台令牌无效，请刷新页面"})
                 return
             route = urlparse(self.path).path
+            if route.startswith("/api/wechat/") and not wechat_http_supported():
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "当前平台尚无经过验证的本机用户隔离，微信 HTTP 入口暂不开放", "code": "LOCAL_ISOLATION_UNSUPPORTED"})
+                return
             if route == "/api/project-files":
                 if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
                     self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "项目资料上传只接受二进制文件"})
@@ -3310,6 +3400,18 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     return
                 self.upload_wechat_export()
                 return
+            if route == "/api/wechat/decipher/upload":
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+                    self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "数据库上传只接受二进制副本"})
+                    return
+                self.upload_wxdecipher_database()
+                return
+            if route == "/api/wechat/decipher/media":
+                if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+                    self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "媒体恢复只接受用户选择的二进制副本"})
+                    return
+                self.restore_wxdecipher_media()
+                return
             if route == "/api/bid-files":
                 if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
                     self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "投标资料上传只接受二进制文件"})
@@ -3319,8 +3421,25 @@ class ControlHandler(SimpleHTTPRequestHandler):
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "只接受 JSON 请求"})
                 return
-            payload = self.body()
-            if route == "/api/task-requests":
+            payload = self.body(limit=65_536) if route == "/api/chat/messages" else self.body()
+            if route in {"/api/chat/messages", "/api/chat/cancel", "/api/chat/close"}:
+                self.handle_free_chat(route, payload)
+            elif route in {"/api/wechat/decipher/sessions", "/api/wechat/decipher/run", "/api/wechat/decipher/discard", "/api/wechat/decipher/processes", "/api/wechat/decipher/capture-consent", "/api/wechat/export"}:
+                if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+                    raise WechatStoreError("PROFILE_FORBIDDEN", "微信会话功能只在销售总监版本中提供")
+                if route == "/api/wechat/decipher/sessions":
+                    self.send_json(HTTPStatus.CREATED, wxdecipher.create_session(ROOT, payload))
+                elif route == "/api/wechat/decipher/run":
+                    self.send_json(HTTPStatus.OK, wxdecipher.run_session(ROOT, payload))
+                elif route == "/api/wechat/decipher/discard":
+                    self.send_json(HTTPStatus.OK, wxdecipher.discard_session(ROOT, payload.get("session_id", "")))
+                elif route == "/api/wechat/decipher/processes":
+                    self.send_json(HTTPStatus.OK, wxdecipher.wxdecipher_capture.list_processes(payload))
+                elif route == "/api/wechat/decipher/capture-consent":
+                    self.send_json(HTTPStatus.CREATED, wxdecipher.issue_capture_consent(ROOT, payload))
+                else:
+                    self.send_json(HTTPStatus.OK, export_wechat_selection(ROOT, payload))
+            elif route == "/api/task-requests":
                 self.create_request(payload)
             elif route == "/api/a4/match-play":
                 response = A4_API_HANDLER.handle_match_play(payload)
@@ -3448,6 +3567,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 if not webbrowser.open(base_url, new=2):
                     raise RuntimeError("无法打开系统浏览器；请手动访问 One Search 网关地址")
                 self.send_json(HTTPStatus.OK, {"message": "已在系统浏览器中打开 One Search。"})
+            elif route == "/api/app-updates/check":
+                if set(payload) - {"manual"} or type(payload.get("manual", False)) is not bool:
+                    raise ValueError("更新检测请求无效")
+                self.send_json(HTTPStatus.OK, APP_UPDATES.check(manual=payload.get("manual", False)))
+            elif route == "/api/app-updates/open-release":
+                if set(payload) != {"tag"} or not isinstance(payload.get("tag"), str):
+                    raise ValueError("请选择已检测到的发布版本")
+                self.send_json(HTTPStatus.OK, APP_UPDATES.open_release(payload["tag"]))
             elif route == "/api/data-directory/open":
                 directory = open_data_directory()
                 self.send_json(HTTPStatus.OK, {
@@ -3540,8 +3667,13 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.handle_coding_agent_chat(payload)
             elif route == "/api/coding-agent/submit":
                 self.handle_coding_agent_submit(payload)
-            elif route == "/api/model-provider/configure":
+            elif route in {"/api/model-provider/configure", "/api/model-provider-choice"}:
                 self.configure_model_provider_choice(payload)
+            elif route == "/api/coding-assistants/models":
+                if payload.get("provider") != "codex-cli":
+                    raise ModelProviderError("自动模型目录当前仅支持 Codex CLI")
+                from agent_platform.cli_model_catalog import discover_codex_models
+                self.send_json(HTTPStatus.OK, discover_codex_models(ROOT, payload.get("executable_path", "")))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except BidStoreError as error:
@@ -3680,6 +3812,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 raise ValueError("微信会话授权范围与当前项目空间不一致")
             from agent_platform.model_registry import available_models
             recipient = available_models(ROOT).get(runtime_selection.get("requested_model", ""))
+            if recipient and recipient.get("api") in {"claude-code", "codex-cli"}:
+                raise ValueError("微信授权会话暂不支持 CLI 后端，请选择 API 模型")
             if not recipient or scope.get("model_recipient") != recipient:
                 raise ValueError("微信授权与当前任务模型接收方不一致，请重新选择并确认")
         if service_id in PUBLIC_SEARCH_SERVICES:
@@ -4224,6 +4358,39 @@ class ControlHandler(SimpleHTTPRequestHandler):
             "message": "已保留修订大纲并请求结束旧任务；Pi 将在旧任务关闭后接手新版本。",
         })
 
+    def handle_free_chat(self, route: str, payload: dict[str, Any]) -> None:
+        try:
+            if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
+                raise ChatError("自由聊天仅在当前销售总监工作台中提供", "PROFILE_FORBIDDEN", 403)
+            if route == "/api/chat/cancel":
+                self.send_json(HTTPStatus.OK, FREE_CHAT.cancel(payload))
+                return
+            if route == "/api/chat/close":
+                self.send_json(HTTPStatus.OK, FREE_CHAT.close(payload))
+                return
+            turn = FREE_CHAT.begin(ROOT, payload)
+        except ChatError as error:
+            self.send_json(error.status, {"error": str(error), "code": error.code})
+            return
+        events = FREE_CHAT.events(ROOT, turn)
+        try:
+            self.connection.settimeout(5)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for event in events:
+                self.wfile.write((json.dumps(event, ensure_ascii=True) + "\n").encode("utf-8"))
+                self.wfile.flush()
+        except (OSError, ValueError):
+            pass  # A disconnected page cancels only this owned request.
+        finally:
+            events.close()
+            FREE_CHAT.finish(turn)
+            self.close_connection = True
+
     def handle_coding_agent_chat(self, payload: dict[str, Any]) -> None:
         """处理 AI 对话助手的消息并返回回复和可能的操作"""
         message = str(payload.get("message", "")).strip()
@@ -4313,7 +4480,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
 
     def configure_model_provider_choice(self, payload: dict[str, Any]) -> None:
         """配置模型提供者（NewAPI / Claude Code / Codex CLI）"""
-        provider_type = str(payload.get("provider_type", "")).strip()
+        provider_type = str(payload.get("provider", payload.get("provider_type", ""))).strip()
 
         if provider_type not in {"newapi", "claude-code", "codex-cli"}:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": "无效的模型提供者类型"})
@@ -4347,6 +4514,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     provider_type=provider_type,
                     executable_path=executable_path,
                     selected_model=selected_model,
+                    provider_id=payload.get("provider_id"),
+                    **{key: payload[key] for key in ("discovery_id", "selected_thinking_level") if key in payload},
                 )
 
                 provider_names = {
@@ -4356,6 +4525,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {
                     "status": "ok",
                     "message": f"{provider_names[provider_type]} 已配置为模型提供者，重启应用后生效。",
+                    "restart_required": True,
+                    "model": result,
                     **result,
                 })
 
@@ -4385,12 +4556,13 @@ def main() -> None:
     parser.add_argument("--profile", default=os.environ.get("WORKFLOW_AGENT_EDITION_PROFILE", "sales-director"))
     parser.add_argument("--disable-scheduler", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    global ACTIVE_PROFILE_ID, A4_API_HANDLER
+    global ACTIVE_PROFILE_ID, A4_API_HANDLER, SCHEDULER_ENABLED
     ACTIVE_PROFILE_ID = safe_id(args.profile)
+    SCHEDULER_ENABLED = not args.disable_scheduler
     if not (PROFILES / ACTIVE_PROFILE_ID / "profile.json").is_file():
         parser.error(f"未知发行版角色：{ACTIVE_PROFILE_ID}")
     try:
-        a4_store = create_a4_store(ROOT)
+        a4_store = create_a4_store(database_path=a4_store_path(ROOT))
         A4_API_HANDLER = create_api_handler(store=a4_store)
     except Exception as error:
         console_message(
@@ -4401,7 +4573,7 @@ def main() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ControlHandler)
     schedule_stop = threading.Event()
     schedule_thread = None
-    if not args.disable_scheduler:
+    if SCHEDULER_ENABLED:
         schedule_thread = threading.Thread(target=schedule_loop, args=(schedule_stop,), name="director-daily-scheduler", daemon=True)
         schedule_thread.start()
     console_message(

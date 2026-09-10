@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { acquireTaskLock, releaseTaskLock } from "./task-runtime.ts";
+import { acquireTaskLock, releaseTaskLock, type TaskThinkingLevel } from "./task-runtime.ts";
 import { sameRecipient, type ModelRecipient } from "./model-selection.ts";
 
 const CONTRACT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
@@ -52,6 +52,7 @@ export type GovernedSubagentContract = {
   role: GovernedSubagentRole;
   objective: string;
   expected_model?: string;
+  expected_thinking_level?: TaskThinkingLevel;
   model_recipient?: ModelRecipient;
   allowed_tools: string[];
   authorized_urls: string[];
@@ -71,6 +72,7 @@ export type GovernedSubagentResult = {
   role: GovernedSubagentRole;
   agent: string;
   model?: string;
+  thinking_level?: TaskThinkingLevel;
   model_recipient?: ModelRecipient;
   run_id?: string;
   output: string;
@@ -189,6 +191,10 @@ function assertContract(value: unknown, expectedId: string): GovernedSubagentCon
   if (item.expected_model !== undefined && (typeof item.expected_model !== "string" || !item.expected_model.includes("/"))) {
     throw new Error("Governed subagent model binding is invalid");
   }
+  if (item.expected_thinking_level !== undefined && (!item.expected_model ||
+      !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(item.expected_thinking_level))) {
+    throw new Error("Governed subagent thinking binding is invalid");
+  }
   if (item.model_recipient !== undefined && (!sameRecipient(item.model_recipient, item.model_recipient) ||
       item.expected_model !== `${item.model_recipient.provider_id}/${item.model_recipient.model_id}`)) {
     throw new Error("Governed subagent recipient binding is invalid");
@@ -292,6 +298,7 @@ export function updateGovernedSubagentContract(
       next.task_version !== current.task_version ||
       next.role !== current.role ||
       next.expected_model !== current.expected_model ||
+      next.expected_thinking_level !== current.expected_thinking_level ||
       canonical(next.model_recipient ?? null) !== canonical(current.model_recipient ?? null) ||
       canonical(next.allowed_tools) !== canonical(current.allowed_tools) ||
       canonical(next.authorized_urls) !== canonical(current.authorized_urls) ||
@@ -365,6 +372,7 @@ export function writeGovernedSubagentResult(
     role: contract.role,
     agent: input.agent,
     ...(input.model ? { model: input.model } : {}),
+    ...(contract.expected_thinking_level ? { thinking_level: contract.expected_thinking_level } : {}),
     ...(contract.model_recipient ? { model_recipient: contract.model_recipient } : {}),
     ...(input.run_id ? { run_id: input.run_id } : {}),
     output,
@@ -415,6 +423,7 @@ export function loadGovernedSubagentResult(projectRoot: string, contractId: stri
     !/^[a-f0-9]{64}$/u.test(item.receipt_sha256 ?? "") ||
     typeof item.completed_at !== "string" || !Number.isFinite(Date.parse(item.completed_at)) ||
     (item.model !== undefined && (typeof item.model !== "string" || item.model.length > 256)) ||
+    (item.thinking_level !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(item.thinking_level)) ||
     (item.run_id !== undefined && (typeof item.run_id !== "string" || item.run_id.length > 256))
   ) throw new Error("Governed subagent result has an invalid schema");
   for (const source of item.sources) assertGovernedSource(source);

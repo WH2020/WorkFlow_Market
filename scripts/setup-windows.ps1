@@ -166,6 +166,7 @@ function Get-IndependentPnpm {
 $PnpmCommand = Get-IndependentPnpm
 if (-not $SkipDependencies) {
     Invoke-Checked -FilePath $PnpmCommand.Source -Arguments @("install", "--frozen-lockfile", "--ignore-scripts")
+    Invoke-ProjectPython -Arguments @("-m", "pip", "install", "-r", "requirements-wxdecipher.txt")
 }
 
 function Install-IndependentCli {
