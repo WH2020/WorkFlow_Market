@@ -14,7 +14,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 
 BID_SCHEMA_VERSION = 1
-BID_APPLICATION_VERSION = "0.20.3"
+BID_APPLICATION_VERSION = "0.20.4"
 BID_DATABASE_RELATIVE_PATH = Path("data/bids/bidding.sqlite3")
 BID_MIGRATIONS = Path(__file__).resolve().parent / "bid_migrations"
 BID_MANIFEST = BID_MIGRATIONS / "manifest.json"
