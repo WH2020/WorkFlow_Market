@@ -32,6 +32,18 @@ jobs:
           from agent_platform import wechat_privacy as p
           current = p._win_current_sid()
           print("current_sid", p._win_sid_text(current), flush=True)
+          token = ctypes.c_void_p()
+          if not p._advapi.OpenProcessToken(p._kernel.GetCurrentProcess(), 0x0080 | 0x0008, ctypes.byref(token)):
+              raise ctypes.WinError(ctypes.get_last_error())
+          try:
+              sid_buffer = ctypes.create_string_buffer(current)
+              owner = ctypes.c_void_p(ctypes.addressof(sid_buffer))
+              p._advapi.SetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
+              p._advapi.SetTokenInformation.restype = ctypes.c_int
+              if not p._advapi.SetTokenInformation(token, 4, ctypes.byref(owner), ctypes.sizeof(owner)):
+                  raise ctypes.WinError(ctypes.get_last_error())
+          finally:
+              p._win_close(token.value)
           def snapshot(path):
               handle = p._win_open_directory(path, p._READ_CONTROL)
               try:
@@ -59,6 +71,8 @@ jobs:
                       traceback.print_exc()
                   if target.exists():
                       snapshot(target)
+          import subprocess, sys
+          subprocess.run([sys.executable, "-m", "unittest", "tests.test_wechat_privacy", "tests.test_wechat_store"], check=True)
           '@ | python -
   sqlite-driver-gate:
     if: ${{ !inputs.windows_privacy_diagnostic }}
