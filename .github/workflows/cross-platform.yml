@@ -2,6 +2,11 @@ name: Cross-platform validation
 
 on:
   workflow_dispatch:
+    inputs:
+      windows_privacy_diagnostic:
+        description: Run only the synthetic Windows private-path diagnostic
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
@@ -10,7 +15,53 @@ permissions:
   contents: read
 
 jobs:
+  windows-privacy-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_privacy_diagnostic
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Inspect synthetic directory ownership and private creation
+        shell: pwsh
+        run: |
+          @'
+          import ctypes, json, tempfile, traceback
+          from pathlib import Path
+          from agent_platform import wechat_privacy as p
+          current = p._win_current_sid()
+          print("current_sid", p._win_sid_text(current), flush=True)
+          def snapshot(path):
+              handle = p._win_open_directory(path, p._READ_CONTROL)
+              try:
+                  owner, protected, aces = p._win_security_snapshot(handle)
+                  print(json.dumps({"path": str(path), "owner": p._win_sid_text(owner),
+                      "protected": protected, "aces": [(kind, flags, hex(mask), p._win_sid_text(sid) if sid else "")
+                                                       for kind, flags, mask, sid in aces]}), flush=True)
+                  try:
+                      p._win_check_parent(handle, current)
+                      print("parent_check PASS", flush=True)
+                  except Exception:
+                      traceback.print_exc()
+              finally:
+                  p._win_close(handle)
+          with tempfile.TemporaryDirectory(prefix="a4m-acl-diagnostic-", dir=Path.home()) as temporary:
+              base = Path(temporary)
+              for path in p._win_parent_paths(base / "child"):
+                  snapshot(path)
+              for label, target in [("existing", base), ("new", base / "child")]:
+                  print("ENSURE", label, flush=True)
+                  try:
+                      p._windows_ensure(target)
+                      print("ensure PASS", flush=True)
+                  except Exception:
+                      traceback.print_exc()
+                  if target.exists():
+                      snapshot(target)
+          '@ | python -
   sqlite-driver-gate:
+    if: ${{ !inputs.windows_privacy_diagnostic }}
     name: SQLite gate · ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -52,6 +103,7 @@ jobs:
           retention-days: 14
 
   validate:
+    if: ${{ !inputs.windows_privacy_diagnostic }}
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
