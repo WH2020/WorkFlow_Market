@@ -2,11 +2,6 @@ name: Cross-platform validation
 
 on:
   workflow_dispatch:
-    inputs:
-      windows_privacy_diagnostic:
-        description: Run only the synthetic Windows private-path diagnostic
-        type: boolean
-        default: false
   push:
     branches: [main]
   pull_request:
@@ -15,67 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  windows-privacy-diagnostic:
-    if: github.event_name == 'workflow_dispatch' && inputs.windows_privacy_diagnostic
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Inspect synthetic directory ownership and private creation
-        shell: pwsh
-        run: |
-          @'
-          import ctypes, json, tempfile, traceback
-          from pathlib import Path
-          from agent_platform import wechat_privacy as p
-          current = p._win_current_sid()
-          print("current_sid", p._win_sid_text(current), flush=True)
-          token = ctypes.c_void_p()
-          if not p._advapi.OpenProcessToken(p._kernel.GetCurrentProcess(), 0x0080 | 0x0008, ctypes.byref(token)):
-              raise ctypes.WinError(ctypes.get_last_error())
-          try:
-              sid_buffer = ctypes.create_string_buffer(current)
-              owner = ctypes.c_void_p(ctypes.addressof(sid_buffer))
-              p._advapi.SetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
-              p._advapi.SetTokenInformation.restype = ctypes.c_int
-              if not p._advapi.SetTokenInformation(token, 4, ctypes.byref(owner), ctypes.sizeof(owner)):
-                  raise ctypes.WinError(ctypes.get_last_error())
-          finally:
-              p._win_close(token.value)
-          def snapshot(path):
-              handle = p._win_open_directory(path, p._READ_CONTROL)
-              try:
-                  owner, protected, aces = p._win_security_snapshot(handle)
-                  print(json.dumps({"path": str(path), "owner": p._win_sid_text(owner),
-                      "protected": protected, "aces": [(kind, flags, hex(mask), p._win_sid_text(sid) if sid else "")
-                                                       for kind, flags, mask, sid in aces]}), flush=True)
-                  try:
-                      p._win_check_parent(handle, current)
-                      print("parent_check PASS", flush=True)
-                  except Exception:
-                      traceback.print_exc()
-              finally:
-                  p._win_close(handle)
-          with tempfile.TemporaryDirectory(prefix="a4m-acl-diagnostic-", dir=Path.home()) as temporary:
-              base = Path(temporary)
-              for path in p._win_parent_paths(base / "child"):
-                  snapshot(path)
-              for label, target in [("existing", base), ("new", base / "child")]:
-                  print("ENSURE", label, flush=True)
-                  try:
-                      p._windows_ensure(target)
-                      print("ensure PASS", flush=True)
-                  except Exception:
-                      traceback.print_exc()
-                  if target.exists():
-                      snapshot(target)
-          import subprocess, sys
-          subprocess.run([sys.executable, "-m", "unittest", "tests.test_wechat_privacy", "tests.test_wechat_store"], check=True)
-          '@ | python -
   sqlite-driver-gate:
-    if: ${{ !inputs.windows_privacy_diagnostic }}
     name: SQLite gate · ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -117,7 +52,6 @@ jobs:
           retention-days: 14
 
   validate:
-    if: ${{ !inputs.windows_privacy_diagnostic }}
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -197,34 +131,8 @@ jobs:
           else
             printf '%s\n' '::notice title=PPT render test skipped::LibreOffice is not preinstalled on this runner; deterministic deck tests still run in pnpm test:runtime.'
           fi
-      - name: Run Python and workbench tests on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $PrivateTemp = Join-Path $env:SystemDrive "agent4market-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          New-Item -ItemType Directory -Path $PrivateTemp | Out-Null
-          $Account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-          icacls.exe $PrivateTemp /inheritance:r /grant:r "${Account}:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Could not protect the Python test root" }
-          if (Test-Path -LiteralPath "P:\") { throw "Private test drive P: is already in use" }
-          subst.exe P: $PrivateTemp
-          if ($LASTEXITCODE -ne 0) { throw "Could not mount the private Python test root" }
-          try {
-            $env:TEMP = "P:\"
-            $env:TMP = "P:\"
-            $env:USERPROFILE = "P:\"
-            python -m unittest discover -s tests -t . -v
-            if ($LASTEXITCODE -ne 0) { throw "Python tests failed" }
-            python -m unittest ui.test_server -v
-            if ($LASTEXITCODE -ne 0) { throw "Workbench tests failed" }
-          } finally {
-            subst.exe P: /D
-          }
-      - name: Run Python and workbench tests on macOS
-        if: runner.os == 'macOS'
-        run: |
-          python -m unittest discover -s tests -t . -v
-          python -m unittest ui.test_server -v
+      - name: Run Python and workbench tests
+        run: python scripts/run-ci-python-tests.py
       - name: Upload universal macOS desktop package
         if: runner.os == 'macOS' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
