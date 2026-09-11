@@ -131,7 +131,22 @@ jobs:
           else
             printf '%s\n' '::notice title=PPT render test skipped::LibreOffice is not preinstalled on this runner; deterministic deck tests still run in pnpm test:runtime.'
           fi
-      - name: Run Python and workbench tests
+      - name: Run Python and workbench tests on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $PrivateTemp = Join-Path $env:SystemDrive "agent4market-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $PrivateTemp | Out-Null
+          $Account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+          icacls.exe $PrivateTemp /inheritance:r /grant:r "${Account}:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Could not protect the Python test root" }
+          $env:TEMP = $PrivateTemp
+          $env:TMP = $PrivateTemp
+          $env:USERPROFILE = $PrivateTemp
+          python -m unittest discover -s tests -t . -v
+          python -m unittest ui.test_server -v
+      - name: Run Python and workbench tests on macOS
+        if: runner.os == 'macOS'
         run: |
           python -m unittest discover -s tests -t . -v
           python -m unittest ui.test_server -v

@@ -2954,9 +2954,12 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if hasattr(self, "connection"):
             self.connection.settimeout(120)
         with wxdecipher.structured_upload_directory(ROOT) as staging:
+            from agent_platform.wechat_privacy import create_private_file
+
             temporary = staging / ("structured-upload" + suffix)
+            create_private_file(temporary)
             received = 0
-            with temporary.open("xb") as handle:
+            with temporary.open("wb") as handle:
                 while received < length:
                     block = self.rfile.read(min(1024 * 1024, length - received))
                     if not block:
