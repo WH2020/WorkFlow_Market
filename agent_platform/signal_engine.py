@@ -14,8 +14,9 @@ Agent4Market 阶段 A4: 信号引擎
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,6 +29,19 @@ SignalType = Literal[
 ]
 
 SignalSeverity = Literal["high", "medium", "low"]
+
+
+def _utc_datetime(value: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp and normalize legacy naive values to UTC."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 @dataclass
@@ -89,7 +103,7 @@ class OverdueActionRule(SignalRule):
 
     def evaluate(self, account_data: dict[str, Any]) -> list[Signal]:
         signals = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         open_actions = account_data.get("open_actions", [])
         for action in open_actions:
@@ -97,9 +111,8 @@ class OverdueActionRule(SignalRule):
             if not due_at:
                 continue
 
-            try:
-                due_datetime = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
+            due_datetime = _utc_datetime(due_at)
+            if due_datetime is None:
                 continue
 
             if due_datetime < now:
@@ -147,16 +160,15 @@ class LongInactiveRule(SignalRule):
 
     def evaluate(self, account_data: dict[str, Any]) -> list[Signal]:
         signals = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         threshold_days = self.config["threshold_days"]
 
         last_activity_at = account_data.get("last_effective_activity_at")
         if not last_activity_at:
             return signals
 
-        try:
-            last_datetime = datetime.fromisoformat(last_activity_at.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
+        last_datetime = _utc_datetime(last_activity_at)
+        if last_datetime is None:
             return signals
 
         inactive_days = (now - last_datetime).days
@@ -204,7 +216,7 @@ class CommitmentDueRule(SignalRule):
 
     def evaluate(self, account_data: dict[str, Any]) -> list[Signal]:
         signals = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         warning_days = self.config["warning_days"]
 
         open_commitments = account_data.get("open_commitments", [])
@@ -213,12 +225,17 @@ class CommitmentDueRule(SignalRule):
             if not due_at:
                 continue
 
-            try:
-                due_datetime = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
+            due_datetime = _utc_datetime(due_at)
+            if due_datetime is None:
                 continue
 
-            days_until_due = (due_datetime - now).days
+            seconds_until_due = (due_datetime - now).total_seconds()
+            if seconds_until_due < 0:
+                continue
+            # A deadline three days from the caller's observation remains
+            # "3 days away" even though a few microseconds elapse before this
+            # rule evaluates it.  Floor division made that boundary flaky.
+            days_until_due = math.ceil(seconds_until_due / 86_400)
 
             if 0 <= days_until_due <= warning_days:
                 severity: SignalSeverity = "high" if days_until_due <= 3 else "medium"

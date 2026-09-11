@@ -20,7 +20,7 @@ from agent_platform import wechat_store, wxdecipher
 from agent_platform.wechat_store import WechatStoreError
 from agent_platform.wxdecipher_crypto import decrypt_database, derive_keys, open_readonly, parse_key
 from agent_platform.wxdecipher_reader import convert_databases
-from wxdecipher_fixture import CLIENT, EPOCH, KEY, KEY_HEX, SELF, encrypt_fixture, make_database, table_for
+from tests.wxdecipher_fixture import CLIENT, EPOCH, KEY, KEY_HEX, SELF, encrypt_fixture, make_database, table_for
 
 
 class WxDecipherTests(unittest.TestCase):

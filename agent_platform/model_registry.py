@@ -103,6 +103,11 @@ def configuration_transaction(root: Path | str, provider_ids: list[str], *, envi
     if legacy.platform.system().lower() == "darwin":
         for item in provider_ids:
             service = legacy._keychain_service(Path(root).resolve(), item)
+            # Snapshot the canonical destination derived from trusted root and
+            # provider identity.  A corrupt or mismatched metadata file must
+            # never choose the lookup target, but save_model_secret() can still
+            # overwrite this canonical keychain entry before a later file write
+            # fails, so it must always be part of the transaction rollback set.
             response = subprocess.run(["security", "find-generic-password", "-s", service, "-a", item, "-w"], capture_output=True, text=True, check=False)
             if response.returncode not in {0, 44}:  # errSecItemNotFound is the only safe missing-credential case.
                 raise legacy.ModelProviderError("无法读取原钥匙串凭据，配置未修改")

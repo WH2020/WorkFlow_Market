@@ -8,14 +8,29 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("free_chat_hotfix_tests", ROOT / "scripts/apply-windows-free-chat-hotfix.py")
-H = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(H)
-SPEC = importlib.util.spec_from_file_location("free_chat_hotfix_fixtures", ROOT / "tests/test_windows_app_updates_apply.py")
-FIXTURES = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(FIXTURES)
+REQUIRED_ARCHIVES = (
+    ROOT / "outputs/releases/0.20.2-free-chat-hotfix-20260910-r2.zip",
+    ROOT / "outputs/releases/0.20.2-app-updates-hotfix-20260910.zip",
+)
+RUN_LEGACY_RELEASE_TESTS = (
+    os.environ.get("AGENT4MARKET_RUN_LEGACY_RELEASE_TESTS") == "1"
+    and all(path.is_file() for path in REQUIRED_ARCHIVES)
+)
+if RUN_LEGACY_RELEASE_TESTS:
+    SPEC = importlib.util.spec_from_file_location("free_chat_hotfix_tests", ROOT / "scripts/apply-windows-free-chat-hotfix.py")
+    H = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(H)
+    SPEC = importlib.util.spec_from_file_location("free_chat_hotfix_fixtures", ROOT / "tests/test_windows_app_updates_apply.py")
+    FIXTURES = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(FIXTURES)
+else:
+    H = FIXTURES = None
 
 
+@unittest.skipUnless(
+    RUN_LEGACY_RELEASE_TESTS,
+    "legacy release validation is explicit opt-in and requires its ignored archives",
+)
 class FreeChatHotfixTests(unittest.TestCase):
     def test_frozen_bundle_changes_only_seven_program_files_and_inventory(self):
         manifest, contents = H.load_patch()

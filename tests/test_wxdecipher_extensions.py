@@ -27,7 +27,7 @@ from agent_platform import wxdecipher, wxdecipher_capture as capture, wxdecipher
 from agent_platform.wechat_store import WechatStoreError
 from agent_platform.wxdecipher_crypto import decrypt_database, open_readonly
 from agent_platform.wxdecipher_wal import replay_wal
-from wxdecipher_fixture import CLIENT, EPOCH, KEY, KEY_HEX, SELF, make_database, reserved_plaintext, encrypt_fixture, table_for
+from tests.wxdecipher_fixture import CLIENT, EPOCH, KEY, KEY_HEX, SELF, make_database, reserved_plaintext, encrypt_fixture, table_for
 
 
 SALT = bytes(range(16, 32))

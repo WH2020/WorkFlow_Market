@@ -369,6 +369,43 @@ class NativeChatTransportTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 7)
         self.assertTrue(all(child.poll() is not None for child in children))
 
+    def test_native_python_entry_is_shared_by_outer_and_nested_hosts(self):
+        native_python = r"C:\synthetic\python.exe"
+
+        class Child:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO(
+                    b'{"type":"done","text":"synthetic response","limited":false}\n'
+                )
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                raise AssertionError("completed synthetic child must not be killed")
+
+        request = selection()["transport"]
+        request["messages"] = [{"role": "user", "content": "synthetic"}]
+        with (
+            patch.object(chat, "cli_python_executable", return_value=native_python),
+            patch.object(chat, "_node_command", return_value=ROOT / "runtime/node/node.exe"),
+            patch.object(chat.subprocess, "Popen", return_value=Child()) as launch,
+        ):
+            events = list(chat.transport_events(ROOT, request, threading.Event()))
+
+        self.assertEqual(
+            [{"type": "done", "text": "synthetic response", "limited": False}],
+            events,
+        )
+        arguments = launch.call_args.args[0]
+        environment = launch.call_args.kwargs["env"]
+        self.assertEqual(native_python, arguments[0])
+        self.assertEqual(native_python, environment["AGENT4MARKET_CLI_PYTHON"])
+
 
 if __name__ == "__main__":
     unittest.main()

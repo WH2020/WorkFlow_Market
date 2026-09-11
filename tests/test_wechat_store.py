@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -109,6 +115,187 @@ class WechatStoreTests(unittest.TestCase):
         self.assertTrue(second["duplicate_file"])
         self.assertEqual(3, dashboard(self.root)["message_count"])
 
+    def test_first_writable_connection_creates_private_db_wal_and_shm(self) -> None:
+        from agent_platform.wechat_privacy import verify_private_file
+
+        previous_umask = os.umask(0o022) if os.name != "nt" else None
+        try:
+            connection = wechat_store._connect(self.root, writable=True)
+        finally:
+            if previous_umask is not None:
+                os.umask(previous_umask)
+        try:
+            database = wechat_store.database_path(self.root)
+            files = [database, Path(str(database) + "-wal"), Path(str(database) + "-shm")]
+            self.assertTrue(all(candidate.is_file() for candidate in files))
+            for candidate in files:
+                verify_private_file(candidate)
+                if os.name != "nt":
+                    self.assertEqual(0o600, candidate.stat().st_mode & 0o777)
+        finally:
+            connection.close()
+
+    def test_orphan_sqlite_auxiliary_is_never_attached_to_a_new_database(self) -> None:
+        from agent_platform.wechat_privacy import create_private_file, ensure_private_directory
+
+        data = self.root / "data"
+        data.mkdir()
+        private_root = data / "wechat"
+        ensure_private_directory(private_root)
+        database = private_root / "chat-index.sqlite3"
+        orphan = Path(str(database) + "-wal")
+        create_private_file(orphan)
+        orphan.write_bytes(b"orphan-state")
+
+        with self.assertRaises(WechatStoreError) as raised:
+            wechat_store._connect(self.root, writable=True)
+        self.assertEqual("UNSAFE_PATH", raised.exception.code)
+        self.assertFalse(database.exists())
+        self.assertEqual(b"orphan-state", orphan.read_bytes())
+
+    def test_parallel_first_connections_are_linearized(self) -> None:
+        from agent_platform import wechat_privacy
+
+        original_create = wechat_privacy.create_private_file_if_absent
+
+        def delayed_create(path):
+            time.sleep(0.005)
+            return original_create(path)
+
+        project = self.root / "parallel"
+        project.mkdir()
+        barrier = threading.Barrier(8)
+
+        def open_once(_index):
+            barrier.wait(timeout=5)
+            connection = wechat_store._connect(project, writable=True)
+            try:
+                return connection.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                connection.close()
+
+        with (patch.object(wechat_privacy, "create_private_file_if_absent",
+                           side_effect=delayed_create),
+              ThreadPoolExecutor(max_workers=8) as executor):
+            versions = list(executor.map(open_once, range(8)))
+        self.assertEqual([wechat_store.SCHEMA_VERSION] * 8, versions)
+
+    def test_parallel_first_connections_across_processes(self) -> None:
+        project = self.root / "parallel-processes"
+        project.mkdir()
+        start_at = time.time() + 1.0
+        program = (
+            "import sys,time; "
+            "from agent_platform.wechat_store import _connect; "
+            "start=float(sys.argv[2]); "
+            "time.sleep(max(0,start-time.time())); "
+            "c=_connect(sys.argv[1],writable=True); "
+            "print(c.execute('PRAGMA user_version').fetchone()[0]); c.close()"
+        )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", program, str(project), str(start_at)],
+                cwd=Path.cwd(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _index in range(12)
+        ]
+        results = [process.communicate(timeout=20) for process in processes]
+        for process, (stdout, stderr) in zip(processes, results):
+            self.assertEqual(0, process.returncode, stderr)
+            self.assertEqual(str(wechat_store.SCHEMA_VERSION), stdout.strip())
+
+    def test_exclusive_create_loser_revalidates_cross_process_winner(self) -> None:
+        from agent_platform import wechat_privacy
+
+        original_create = wechat_privacy.create_private_file
+
+        def competing_create(path):
+            original_create(path)
+            return False
+
+        with patch.object(wechat_privacy, "create_private_file_if_absent",
+                          side_effect=competing_create):
+            connection = wechat_store._connect(self.root, writable=True)
+        try:
+            self.assertEqual(
+                wechat_store.SCHEMA_VERSION,
+                connection.execute("PRAGMA user_version").fetchone()[0],
+            )
+        finally:
+            connection.close()
+
+    def test_private_create_failure_is_not_treated_as_a_race_loser(self) -> None:
+        from agent_platform import wechat_privacy
+
+        failure = WechatStoreError("UNSAFE_PATH", "synthetic rollback failure")
+        with (patch.object(wechat_privacy, "create_private_file_if_absent",
+                           side_effect=failure),
+              patch.object(wechat_store.sqlite3, "connect") as connect):
+            with self.assertRaises(WechatStoreError) as raised:
+                wechat_store._connect(self.root, writable=True)
+        self.assertIs(failure, raised.exception)
+        connect.assert_not_called()
+
+    def test_database_identity_change_during_open_is_rejected(self) -> None:
+        from agent_platform import wechat_privacy
+
+        identity = wechat_privacy.private_file_identity
+
+        def changed_identity(path):
+            actual = identity(path)
+            return (*actual, 1)
+
+        with patch.object(wechat_privacy, "private_file_identity",
+                          side_effect=changed_identity):
+            with self.assertRaises(WechatStoreError) as raised:
+                wechat_store._connect(self.root, writable=True)
+        self.assertEqual("UNSAFE_PATH", raised.exception.code)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode regression")
+    def test_existing_broad_database_is_rejected_without_repair(self) -> None:
+        from agent_platform.wechat_privacy import ensure_private_directory
+
+        data = self.root / "data"
+        data.mkdir()
+        private_root = data / "wechat"
+        ensure_private_directory(private_root)
+        database = private_root / "chat-index.sqlite3"
+        database.write_bytes(b"legacy")
+        database.chmod(0o644)
+
+        with self.assertRaises(WechatStoreError) as raised:
+            wechat_store._connect(self.root, writable=True)
+        self.assertEqual("UNSAFE_PATH", raised.exception.code)
+        self.assertEqual(0o644, database.stat().st_mode & 0o777)
+        self.assertEqual(b"legacy", database.read_bytes())
+
+    def test_malformed_version_zero_database_is_not_silently_upgraded(self) -> None:
+        from agent_platform.wechat_privacy import create_private_file, ensure_private_directory
+
+        data = self.root / "data"
+        data.mkdir()
+        private_root = data / "wechat"
+        ensure_private_directory(private_root)
+        database = private_root / "chat-index.sqlite3"
+        create_private_file(database)
+        malformed = wechat_store.sqlite3.connect(database)
+        try:
+            malformed.execute("CREATE TABLE import_batches(wrong_column TEXT)")
+            malformed.commit()
+        finally:
+            malformed.close()
+
+        with self.assertRaises(WechatStoreError):
+            wechat_store._connect(self.root, writable=True)
+        check = wechat_store.sqlite3.connect(database)
+        try:
+            self.assertEqual(0, check.execute("PRAGMA user_version").fetchone()[0])
+            columns = check.execute("PRAGMA table_info(import_batches)").fetchall()
+            self.assertEqual(["wrong_column"], [column[1] for column in columns])
+        finally:
+            check.close()
+
     def test_copy_verification_failure_removes_unregistered_copy(self) -> None:
         from agent_platform.wechat_privacy import verify_private_file
         original_source = self.source.read_bytes()
@@ -133,14 +320,20 @@ class WechatStoreTests(unittest.TestCase):
         self.assertEqual(0, dashboard(self.root)["message_count"])
 
     def test_copy_cleanup_failure_is_explicit(self) -> None:
+        from agent_platform.wechat_privacy import verify_private_file
         unlink = Path.unlink
+
+        def fail_published_copy(path):
+            if Path(path).name == self.source.name:
+                raise RuntimeError("synthetic verify")
+            return verify_private_file(path)
 
         def deny_published_unlink(path, *args, **kwargs):
             if path.name == self.source.name and "imports" in path.parts:
                 raise PermissionError("synthetic cleanup denial")
             return unlink(path, *args, **kwargs)
 
-        with (patch("agent_platform.wechat_privacy.verify_private_file", side_effect=RuntimeError("synthetic verify")),
+        with (patch("agent_platform.wechat_privacy.verify_private_file", side_effect=fail_published_copy),
               patch.object(Path, "unlink", deny_published_unlink)):
             with self.assertRaises(WechatStoreError) as raised:
                 self.import_sample()

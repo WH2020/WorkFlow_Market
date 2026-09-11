@@ -18,13 +18,13 @@ import secrets
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 from typing import Any, Iterator
 
 from . import model_registry
 from .cli_provider import CLI_APIS, _node_command, backend_files_available
+from .environment import cli_python_executable
 from .model_provider import ModelProviderError, load_model_secret
 from . import wechat_privacy
 
@@ -145,15 +145,19 @@ def transport_events(root: Path, request: dict, cancel: threading.Event) -> Iter
     host = root / "agent_platform/cli_process_host.py"
     if not script.is_file() or not host.is_file():
         raise ChatError("自由聊天组件不完整，请检查安装。", "RUNTIME_UNAVAILABLE", 503)
+    try:
+        python = cli_python_executable()
+    except (OSError, RuntimeError) as error:
+        raise ChatError("找不到可用的 Python 运行环境，请检查安装。", "RUNTIME_UNAVAILABLE", 503) from error
     environment.update({"A4M_CLI_LAUNCH": json.dumps([str(node), "--disable-warning=ExperimentalWarning", str(script)]),
-                        "A4M_CLI_SCHEMA": "{}", "AGENT4MARKET_CLI_PYTHON": sys.executable, "NO_COLOR": "1"})
+                        "A4M_CLI_SCHEMA": "{}", "AGENT4MARKET_CLI_PYTHON": python, "NO_COLOR": "1"})
     if cancel.is_set():
         yield {"type": "error", "code": "CANCELLED"}
         return
     encoded = (json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8")
     if len(encoded) > 512 * 1024:
         raise ChatError("本次对话已达到上下文上限，请开始新对话。", "CONTEXT_LIMIT", 409)
-    process = subprocess.Popen([sys.executable, "-I", "-B", str(host)], cwd=host.parent, env=environment,
+    process = subprocess.Popen([python, "-I", "-B", str(host)], cwd=host.parent, env=environment,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                                start_new_session=os.name != "nt")

@@ -9,6 +9,8 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import threading
+import time
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -27,6 +29,7 @@ MAX_EXPORT_ROWS = 50_000
 MAX_EXPORT_BYTES = 16 * 1024 * 1024
 ALLOWED_IMPORT_SUFFIXES = {".json", ".jsonl", ".csv"}
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_DATABASE_OPEN_LOCK = threading.Lock()
 
 
 class WechatStoreError(ValueError):
@@ -148,7 +151,22 @@ def _safe_filename(value: str) -> str:
 
 
 def _connect(project_root: Path | str, *, writable: bool) -> sqlite3.Connection:
-    from .wechat_privacy import ensure_private_directory, verify_private_file
+    # ThreadingHTTPServer can dispatch several first-use requests at once.
+    # Serialise only open/initialisation; returned connections remain fully
+    # independent and SQLite continues to coordinate their transactions.
+    with _DATABASE_OPEN_LOCK:
+        return _connect_locked(project_root, writable=writable)
+
+
+def _connect_locked(project_root: Path | str, *, writable: bool) -> sqlite3.Connection:
+    from .wechat_privacy import (
+        create_private_file_if_absent,
+        ensure_private_directory,
+        hold_private_file,
+        private_file_identity,
+        verify_private_file,
+        verify_private_file_if_present,
+    )
     root = _wechat_root(project_root)
     if root.exists() and (root.is_symlink() or not root.is_dir()):
         raise WechatStoreError("UNSAFE_PATH", "微信资料目录必须是应用内的普通目录")
@@ -161,28 +179,108 @@ def _connect(project_root: Path | str, *, writable: bool) -> sqlite3.Connection:
         raise WechatStoreError("UNSAFE_PATH", "微信会话索引必须是普通文件")
     if not path.exists() and not writable:
         raise WechatStoreError("NOT_CONFIGURED", "尚未导入微信会话")
-    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm"), Path(str(path) + "-journal")):
-        if candidate.exists() or candidate.is_symlink():
-            verify_private_file(candidate)
+    auxiliary_paths = (
+        Path(str(path) + "-wal"),
+        Path(str(path) + "-shm"),
+        Path(str(path) + "-journal"),
+    )
+    database_present = path.exists() or path.is_symlink()
+    auxiliary_present = [
+        verify_private_file_if_present(candidate) for candidate in auxiliary_paths
+    ]
+    if writable and not database_present and any(auxiliary_present):
+        # A concurrent creator publishes the DB before any auxiliary file, so
+        # recheck once after observing auxiliary state.  A persistent aux-only
+        # set is stale or prepositioned and must never seed a fresh database.
+        database_present = path.exists() or path.is_symlink()
+        if not database_present:
+            raise WechatStoreError("UNSAFE_PATH", "微信会话索引存在孤立的辅助文件")
+    create_before_open: list[Path] = []
+    if database_present:
+        verify_private_file(path)
+    elif writable:
+        create_before_open.append(path)
+    if create_before_open:
+        # Secure the main DB before SQLite opens it. SQLite creates transient
+        # WAL/SHM files inside the already-private directory and derives their
+        # POSIX mode from this 0600 DB; every extant aux is verified below.
+        for candidate in create_before_open:
+            if not create_private_file_if_absent(candidate):
+                # Another process may have won the same exclusive creation.
+                # Reuse only a file that already satisfies the full policy;
+                # a symlink, hard link or broad permission still fails here.
+                verify_private_file(candidate)
+    connection: sqlite3.Connection | None = None
     try:
-        if writable:
-            connection = sqlite3.connect(path, timeout=5)
-        else:
-            connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=5)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=5000")
-        if writable:
-            connection.execute("PRAGMA journal_mode=WAL")
-            _initialize(connection)
-        elif connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
-            raise WechatStoreError("SCHEMA_MISMATCH", "微信会话索引版本不受支持")
+        # Keep the verified original open until SQLite has opened the DB and
+        # the path has been checked again.  POSIX cannot reuse its inode while
+        # held; Windows additionally denies rename/delete through share flags.
+        with hold_private_file(path) as database_identity:
+            if writable:
+                connection = sqlite3.connect(
+                    f"{path.as_uri()}?mode=rw", uri=True, timeout=5,
+                )
+            else:
+                connection = sqlite3.connect(
+                    f"{path.as_uri()}?mode=ro", uri=True, timeout=5,
+                )
+            if private_file_identity(path) != database_identity:
+                raise WechatStoreError("UNSAFE_PATH", "微信会话索引在打开期间发生替换")
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
+            if writable:
+                _enable_wal(connection)
+                _initialize(connection)
+            elif connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                raise WechatStoreError("SCHEMA_MISMATCH", "微信会话索引版本不受支持")
+            # Validate the actual files while SQLite still holds its handles.
+            verify_private_file(path)
+            for candidate in auxiliary_paths:
+                verify_private_file_if_present(candidate)
+            if private_file_identity(path) != database_identity:
+                raise WechatStoreError("UNSAFE_PATH", "微信会话索引在打开期间发生替换")
         return connection
-    except sqlite3.Error as error:
-        raise WechatStoreError("STORE_ERROR", f"无法打开微信会话索引：{error}") from error
+    except BaseException as error:
+        if connection is not None:
+            connection.close()
+        if isinstance(error, sqlite3.Error):
+            raise WechatStoreError("STORE_ERROR", f"无法打开微信会话索引：{error}") from error
+        raise
+
+
+def _enable_wal(connection: sqlite3.Connection) -> None:
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        except sqlite3.OperationalError as error:
+            # journal_mode does not consistently honor busy_timeout while
+            # another process is completing the first WAL transition.
+            if (getattr(error, "sqlite_errorcode", None) not in
+                    {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} or
+                    time.monotonic() >= deadline):
+                raise
+            time.sleep(0.025)
+            continue
+        if str(mode).casefold() != "wal":
+            raise WechatStoreError("STORE_ERROR", "微信会话索引无法启用 WAL 模式")
+        return
 
 
 def _initialize(connection: sqlite3.Connection) -> None:
+    # Serialize first-use schema creation across processes.  The version must
+    # be read only after BEGIN IMMEDIATE has acquired SQLite's writer lock.
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _initialize_locked(connection)
+    except BaseException:
+        connection.rollback()
+        raise
+    connection.commit()
+
+
+def _initialize_locked(connection: sqlite3.Connection) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     if version not in {0, SCHEMA_VERSION}:
         raise WechatStoreError("SCHEMA_MISMATCH", "微信会话索引版本不受支持")
@@ -193,10 +291,8 @@ def _initialize(connection: sqlite3.Connection) -> None:
             recipient_json TEXT NOT NULL CHECK (json_valid(recipient_json))
         ) STRICT""")
         _initialize_account_bindings(connection)
-        connection.commit()
         return
-    connection.executescript(
-        """
+    schema = """
         CREATE TABLE import_batches (
           batch_id TEXT PRIMARY KEY,
           source_name TEXT NOT NULL,
@@ -275,9 +371,10 @@ def _initialize(connection: sqlite3.Connection) -> None:
           scope_id TEXT PRIMARY KEY REFERENCES review_scopes(scope_id) ON DELETE CASCADE,
           recipient_json TEXT NOT NULL CHECK (json_valid(recipient_json))
         ) STRICT;
-        PRAGMA user_version=1;
         """
-    )
+    for statement in schema.split(";"):
+        if statement.strip():
+            connection.execute(statement)
     try:
         connection.execute(
             "CREATE VIRTUAL TABLE message_fts USING fts5(message_id UNINDEXED, conversation_id UNINDEXED, sender_name, content, tokenize='unicode61')"
@@ -286,7 +383,7 @@ def _initialize(connection: sqlite3.Connection) -> None:
         connection.execute("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT")
         connection.execute("INSERT INTO settings VALUES('fts','unavailable')")
     _initialize_account_bindings(connection)
-    connection.commit()
+    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 def _initialize_account_bindings(connection: sqlite3.Connection) -> None:

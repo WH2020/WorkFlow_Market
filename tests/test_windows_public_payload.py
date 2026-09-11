@@ -15,12 +15,21 @@ M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
 
 
+requires_frozen_release_inputs = unittest.skipUnless(
+    os.environ.get("AGENT4MARKET_RUN_LEGACY_RELEASE_TESTS") == "1"
+    and (ROOT / "outputs/releases/0.20.2/install-manifest.json").is_file()
+    and M.PATCH.ZIP_PATH.is_file(),
+    "legacy release validation is explicit opt-in and requires local ignored inputs",
+)
+
+
 class WindowsPublicPayloadTests(unittest.TestCase):
     def inputs(self):
         _raw, original = M.BASE.read_manifest(ROOT / "outputs/releases/0.20.2/install-manifest.json")
         manifest, contents = M.PATCH.load_patch()
         return original, manifest, contents
 
+    @requires_frozen_release_inputs
     def test_real_closed_plan_contains_updates_and_no_runtime_inventory(self):
         original, manifest, contents = self.inputs()
         plan = M.planned_records(original, manifest, contents, b"Public installation notes")
@@ -35,6 +44,7 @@ class WindowsPublicPayloadTests(unittest.TestCase):
         for relative in (".pi/settings.json", "data/private.json", "outputs/result.txt", "library/templates/company/template.pptx"):
             self.assertNotIn(relative, rows)
 
+    @requires_frozen_release_inputs
     def test_changed_baseline_or_patch_bytes_are_refused(self):
         original, manifest, contents = self.inputs()
         changed = copy.deepcopy(manifest)
@@ -45,6 +55,7 @@ class WindowsPublicPayloadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "content"):
             M.planned_records(original, manifest, changed_bytes, b"notes")
 
+    @requires_frozen_release_inputs
     def test_real_working_source_drift_is_refused(self):
         _original, manifest, contents = self.inputs()
         with tempfile.TemporaryDirectory(prefix="a4m-public-source-") as directory:

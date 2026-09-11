@@ -3,7 +3,7 @@
 """
 
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from agent_platform.signal_engine import (
     SignalEngine,
@@ -117,6 +117,39 @@ class TestSignalEngine(unittest.TestCase):
         self.assertEqual(signal.signal_type, "commitment_due")
         self.assertEqual(signal.severity, "high")  # 3天内为高优先级
         self.assertEqual(signal.evidence["days_until_due"], 3)
+
+    def test_timezone_aware_iso_dates_are_normalized_without_dropping_signals(self):
+        now = datetime.now(timezone.utc)
+        account_data = {
+            "account_id": "acc_tz",
+            "account_name": "时区测试客户",
+            "open_actions": [{
+                "action_id": "act_tz",
+                "title": "UTC 行动",
+                "due_at": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+            }],
+            "last_effective_activity_at": (
+                now - timedelta(days=40)
+            ).astimezone(timezone(timedelta(hours=8))).isoformat(),
+            "open_commitments": [{
+                "commitment_id": "com_tz",
+                "title": "东八区承诺",
+                "due_at": (now + timedelta(days=3)).astimezone(
+                    timezone(timedelta(hours=8))
+                ).isoformat(),
+            }],
+        }
+
+        signals = SignalEngine().evaluate_account(account_data)
+
+        self.assertEqual(
+            {"overdue_action", "long_inactive", "commitment_due"},
+            {signal.signal_type for signal in signals},
+        )
+        commitment = next(
+            signal for signal in signals if signal.signal_type == "commitment_due"
+        )
+        self.assertEqual(3, commitment.evidence["days_until_due"])
 
     def test_evaluate_account(self):
         """测试评估单个客户"""

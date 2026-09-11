@@ -10,12 +10,20 @@ from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("a4_json_hotfix_tests", ROOT / "scripts/apply-windows-a4-json-hotfix.py")
-H = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(H)
-SPEC = importlib.util.spec_from_file_location("a4_json_transaction_fixtures", ROOT / "tests/test_windows_app_updates_apply.py")
-FIXTURES = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(FIXTURES)
+SOURCE_ARCHIVE = ROOT / "outputs/releases/0.20.2-app-updates-hotfix-20260910.zip"
+RUN_LEGACY_RELEASE_TESTS = (
+    os.environ.get("AGENT4MARKET_RUN_LEGACY_RELEASE_TESTS") == "1"
+    and SOURCE_ARCHIVE.is_file()
+)
+if RUN_LEGACY_RELEASE_TESTS:
+    SPEC = importlib.util.spec_from_file_location("a4_json_hotfix_tests", ROOT / "scripts/apply-windows-a4-json-hotfix.py")
+    H = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(H)
+    SPEC = importlib.util.spec_from_file_location("a4_json_transaction_fixtures", ROOT / "tests/test_windows_app_updates_apply.py")
+    FIXTURES = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(FIXTURES)
+else:
+    H = FIXTURES = None
 
 
 @contextmanager
@@ -25,6 +33,10 @@ def fixture():
         yield values
 
 
+@unittest.skipUnless(
+    RUN_LEGACY_RELEASE_TESTS,
+    "legacy release validation is explicit opt-in and requires its ignored archive",
+)
 class A4JsonHotfixTests(unittest.TestCase):
     def test_fixed_plan_reconstructs_tested_ui_and_changes_only_its_inventory_row(self):
         manifest, contents = H.load_patch()

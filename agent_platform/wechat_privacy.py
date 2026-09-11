@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import stat
-from typing import NoReturn
+import time
+from typing import Iterator, NoReturn
 
 
 _ERROR_CODE = "UNSAFE_PATH"
@@ -21,6 +23,18 @@ _ERROR_MESSAGE = "微信资料目录不安全或无法设置私有权限"
 
 class _PrivacyFailure(RuntimeError):
     """An internal error whose details must not cross the API boundary."""
+
+
+class _PrivateFileExists(_PrivacyFailure):
+    """The exclusive file creation lost to an existing directory entry."""
+
+
+class _PrivateFileMissing(_PrivacyFailure):
+    """The final file disappeared while its already-safe parent was held."""
+
+
+class _PrivateFileChanged(_PrivacyFailure):
+    """The final entry changed between its handle and name-based checks."""
 
 
 def _fail() -> NoReturn:
@@ -120,11 +134,130 @@ def verify_private_file(path: os.PathLike[str] | str) -> Path:
 
     try:
         target = _normalise_path(path)
-        if os.name == "nt":
-            _windows_verify_file(target)
-        else:
-            _posix_verify_file(target)
+        _private_file_identity(target)
         return target
+    except Exception as error:
+        from .wechat_store import WechatStoreError
+
+        if isinstance(error, WechatStoreError):
+            raise
+        raise _public_error() from None
+
+
+def private_file_identity(path: os.PathLike[str] | str) -> tuple[int, ...]:
+    """Return a verified file identity suitable for before/after comparison."""
+
+    try:
+        return _private_file_identity(_normalise_path(path))
+    except Exception as error:
+        from .wechat_store import WechatStoreError
+
+        if isinstance(error, WechatStoreError):
+            raise
+        raise _public_error() from None
+
+
+def verify_private_file_if_present(path: os.PathLike[str] | str) -> bool:
+    """Verify a file atomically if present; return false only for ENOENT."""
+
+    try:
+        target = _normalise_path(path)
+        # SQLite may unlink and immediately recreate WAL/SHM entries. Retry
+        # only a verified identity change; every attempt repeats all checks.
+        for attempt in range(3):
+            try:
+                _private_file_identity_if_present(target)
+                return True
+            except _PrivateFileChanged:
+                if attempt == 2:
+                    raise
+                time.sleep(0.001)
+    except _PrivateFileMissing:
+        return False
+    except Exception as error:
+        from .wechat_store import WechatStoreError
+
+        if isinstance(error, WechatStoreError):
+            raise
+        raise _public_error() from None
+
+
+@contextmanager
+def hold_private_file(path: os.PathLike[str] | str) -> Iterator[tuple[int, ...]]:
+    """Verify and hold a file so its identity cannot be reused during open."""
+
+    resource: tuple[int, ...] = ()
+    try:
+        target = _normalise_path(path)
+        if os.name == "nt":
+            identity, resource = _windows_hold_private_file(target)
+        else:
+            identity, resource = _posix_hold_private_file(target)
+    except Exception as error:
+        from .wechat_store import WechatStoreError
+
+        if isinstance(error, WechatStoreError):
+            raise
+        raise _public_error() from None
+    try:
+        yield identity
+    finally:
+        if os.name == "nt":
+            for handle in resource:
+                _win_close(handle)
+        else:
+            for descriptor in resource:
+                os.close(descriptor)
+
+
+def _private_file_identity(target: Path) -> tuple[int, ...]:
+    if os.name == "nt":
+        return _windows_private_file_identity(target)
+    return _posix_private_file_identity(target)
+
+
+def _private_file_identity_if_present(target: Path) -> tuple[int, ...]:
+    if os.name == "nt":
+        return _windows_private_file_identity_if_present(target)
+    return _posix_private_file_identity(target)
+
+
+def create_private_file(path: os.PathLike[str] | str) -> Path:
+    """Atomically create one empty private regular file.
+
+    Existing paths are always rejected rather than repaired.  The creation
+    handle stays open until the file's type, owner, link count and permissions
+    have been checked, and a failed hardening attempt rolls back only the file
+    created by this call.
+    """
+
+    try:
+        target = _normalise_path(path)
+        if os.name == "nt":
+            _windows_create_file(target)
+        else:
+            _posix_create_file(target)
+        return target
+    except Exception as error:
+        from .wechat_store import WechatStoreError
+
+        if isinstance(error, WechatStoreError):
+            raise
+        raise _public_error() from None
+
+
+def create_private_file_if_absent(path: os.PathLike[str] | str) -> bool:
+    """Exclusively create a private file, returning false only on collision."""
+
+    try:
+        target = _normalise_path(path)
+        if os.name == "nt":
+            _windows_create_file(target)
+        else:
+            _posix_create_file(target)
+        return True
+    except _PrivateFileExists:
+        return False
     except Exception as error:
         from .wechat_store import WechatStoreError
 
@@ -168,6 +301,12 @@ def _posix_check_target(info: os.stat_result) -> None:
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
         _fail()
     if stat.S_IMODE(info.st_mode) != 0o700:
+        _fail()
+
+
+def _posix_check_file(info: os.stat_result) -> None:
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+            info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
         _fail()
 
 
@@ -221,16 +360,69 @@ def _posix_verify(target: Path) -> None:
         os.close(parent_fd)
 
 
-def _posix_verify_file(target: Path) -> None:
+def _posix_private_file_identity(target: Path) -> tuple[int, ...]:
+    identity, descriptors = _posix_hold_private_file(target)
+    for descriptor in descriptors:
+        os.close(descriptor)
+    return identity
+
+
+def _posix_hold_private_file(target: Path) -> tuple[tuple[int, ...], tuple[int, ...]]:
     parent_fd, name = _posix_open_parent(target)
     target_fd = -1
     flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
-        target_fd = os.open(name, flags, dir_fd=parent_fd)
-        info = os.fstat(target_fd)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
-                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o077):
-            _fail()
+        try:
+            target_fd = os.open(name, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            raise _PrivateFileMissing() from None
+        opened = os.fstat(target_fd)
+        _posix_check_file(opened)
+        try:
+            named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise _PrivateFileMissing() from None
+        if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            raise _PrivateFileChanged()
+        return (opened.st_dev, opened.st_ino), (target_fd, parent_fd)
+    except Exception:
+        if target_fd >= 0:
+            os.close(target_fd)
+        os.close(parent_fd)
+        raise
+
+
+def _posix_create_file(target: Path) -> None:
+    parent_fd, name = _posix_open_parent(target)
+    target_fd = -1
+    created = False
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW |
+             getattr(os, "O_CLOEXEC", 0))
+    try:
+        # O_EXCL makes a pre-existing regular file, hard link or symlink a
+        # collision.  Supplying 0600 makes the file private at creation time;
+        # fchmod below is an explicit postcondition, not a legacy repair path.
+        try:
+            target_fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        except FileExistsError:
+            raise _PrivateFileExists() from None
+        created = True
+        os.fchmod(target_fd, 0o600)
+        _posix_check_file(os.fstat(target_fd))
+    except Exception:
+        if created and target_fd >= 0:
+            try:
+                opened = os.fstat(target_fd)
+                named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or
+                        not stat.S_ISREG(named.st_mode)):
+                    _fail()
+                os.unlink(name, dir_fd=parent_fd)
+            except OSError:
+                # A 0600 creation cannot expose contents, but rollback failure
+                # must remain visible to the caller.
+                _fail()
+        raise
     finally:
         if target_fd >= 0:
             os.close(target_fd)
@@ -246,12 +438,17 @@ if os.name == "nt":
     _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _FILE_ATTRIBUTE_NORMAL = 0x00000080
+    _CREATE_NEW = 1
     _OPEN_EXISTING = 3
     _FILE_SHARE_READ = 0x1
     _FILE_SHARE_WRITE = 0x2
+    _FILE_SHARE_DELETE = 0x4
     _READ_CONTROL = 0x00020000
     _WRITE_DAC = 0x00040000
     _DELETE = 0x00010000
+    _GENERIC_READ = 0x80000000
+    _GENERIC_WRITE = 0x40000000
     _TOKEN_QUERY = 0x0008
     _TOKEN_USER = 1
     _SE_FILE_OBJECT = 1
@@ -322,6 +519,13 @@ if os.name == "nt":
         # FILE_DISPOSITION_INFO uses Win32 BOOLEAN (BYTE), not BOOL (LONG).
         _fields_ = [("delete_file", ctypes.c_ubyte)]
 
+    class _SECURITY_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.DWORD),
+            ("security_descriptor", ctypes.c_void_p),
+            ("inherit_handle", wintypes.BOOL),
+        ]
+
     _kernel.GetCurrentProcess.restype = wintypes.HANDLE
     _advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
                                          ctypes.POINTER(wintypes.HANDLE)]
@@ -340,6 +544,8 @@ if os.name == "nt":
     _kernel.CreateDirectoryW.restype = wintypes.BOOL
     _kernel.RemoveDirectoryW.argtypes = [wintypes.LPCWSTR]
     _kernel.RemoveDirectoryW.restype = wintypes.BOOL
+    _kernel.DeleteFileW.argtypes = [wintypes.LPCWSTR]
+    _kernel.DeleteFileW.restype = wintypes.BOOL
     _kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE,
                                                     ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION)]
     _kernel.GetFileInformationByHandle.restype = wintypes.BOOL
@@ -418,17 +624,28 @@ def _win_open_directory(path: Path, access: int) -> int:
     return handle
 
 
-def _win_open_file(path: Path, access: int) -> int:
+def _win_open_file(path: Path, access: int, *, share_delete: bool = False) -> int:
+    share_mode = _FILE_SHARE_READ | _FILE_SHARE_WRITE
+    if share_delete:
+        share_mode |= _FILE_SHARE_DELETE
     handle = _kernel.CreateFileW(
-        str(path), access, _FILE_SHARE_READ | _FILE_SHARE_WRITE, None,
+        str(path), access, share_mode, None,
         _OPEN_EXISTING, _FILE_FLAG_OPEN_REPARSE_POINT, None,
     )
     if handle in (None, _INVALID_HANDLE_VALUE):
+        error = ctypes.get_last_error()
+        if error in (2, 3):  # ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND
+            raise _PrivateFileMissing()
+        if share_delete and error == 5:  # delete-pending is reported as ACCESS_DENIED
+            raise _PrivateFileChanged()
         _fail()
     info = _BY_HANDLE_FILE_INFORMATION()
     if not _kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
         _win_close(handle)
         _fail()
+    if info.links == 0:
+        _win_close(handle)
+        raise _PrivateFileMissing()
     if (info.attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT) or
             info.links != 1):
         _win_close(handle)
@@ -565,7 +782,7 @@ def _win_security_snapshot(handle: int) -> tuple[bytes, bool, list[tuple[int, in
         _kernel.LocalFree(descriptor)
 
 
-def _win_check_parent(handle: int, current_sid: bytes, *, inheritance_source: bool = False) -> None:
+def _win_check_parent(handle: int, current_sid: bytes) -> None:
     system_sid = _win_well_known_sid(22)  # WinLocalSystemSid
     administrators_sid = _win_well_known_sid(26)  # WinBuiltinAdministratorsSid
     trusted_installer_sid = _win_sid_from_text(_TRUSTED_INSTALLER_SID)
@@ -579,11 +796,8 @@ def _win_check_parent(handle: int, current_sid: bytes, *, inheritance_source: bo
                     mask & _DANGEROUS_PARENT_ACCESS):
                 _fail()
             # A create-only ACE on a parent cannot replace an existing child.
-            # For the immediate creation parent, however, any untrusted ACE
-            # that applies to child directories can be inherited during the
-            # short create/harden interval and used to retain an open handle.
-            if inheritance_source and ace_flags & _CONTAINER_INHERIT_ACE and mask:
-                _fail()
+            # New children receive a protected DACL atomically through
+            # SECURITY_ATTRIBUTES, so inheritable ACEs never apply to them.
 
 
 def _win_check_target(handle: int, current_sid: bytes) -> None:
@@ -656,6 +870,48 @@ def _win_set_private_dacl(handle: int, current_sid: bytes) -> None:
         _kernel.LocalFree(descriptor)
 
 
+def _win_set_private_file_dacl(handle: int, current_sid: bytes) -> None:
+    sid_text = _win_sid_text(current_sid)
+    sddl = f"D:P(A;;FA;;;SY)(A;;FA;;;{sid_text})"
+    descriptor = ctypes.c_void_p()
+    if not _advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, _SECURITY_DESCRIPTOR_REVISION, ctypes.byref(descriptor), None):
+        _fail()
+    try:
+        present = wintypes.BOOL()
+        defaulted = wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        if not _advapi.GetSecurityDescriptorDacl(
+                descriptor, ctypes.byref(present), ctypes.byref(dacl),
+                ctypes.byref(defaulted)) or not present.value or not dacl.value:
+            _fail()
+        status = _advapi.SetSecurityInfo(
+            handle, _SE_FILE_OBJECT,
+            _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION,
+            None, None, dacl, None,
+        )
+        if status != 0:
+            _fail()
+    finally:
+        _kernel.LocalFree(descriptor)
+
+
+def _win_private_security_attributes(
+    current_sid: bytes, *, directory: bool,
+) -> tuple[ctypes.c_void_p, _SECURITY_ATTRIBUTES]:
+    sid_text = _win_sid_text(current_sid)
+    flags = "OICI" if directory else ""
+    sddl = f"D:P(A;{flags};FA;;;SY)(A;{flags};FA;;;{sid_text})"
+    descriptor = ctypes.c_void_p()
+    if not _advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl, _SECURITY_DESCRIPTOR_REVISION, ctypes.byref(descriptor), None):
+        _fail()
+    attributes = _SECURITY_ATTRIBUTES(
+        ctypes.sizeof(_SECURITY_ATTRIBUTES), descriptor.value, False,
+    )
+    return descriptor, attributes
+
+
 def _win_parent_paths(target: Path) -> list[Path]:
     parent = target.parent
     anchor = Path(parent.anchor)
@@ -671,17 +927,20 @@ def _win_parent_paths(target: Path) -> list[Path]:
     return result
 
 
-def _win_open_safe_parents(target: Path, current_sid: bytes, *, for_ensure: bool = False) -> list[int]:
+def _win_open_safe_parents(
+    target: Path, current_sid: bytes, *, for_ensure: bool = False,
+) -> list[int]:
+    # Keep the keyword for the atomic installer caller.  All current creation
+    # paths pass a protected DACL in SECURITY_ATTRIBUTES, so ancestor safety
+    # depends on replacement rights, not on child-inheritance flags.
+    del for_ensure
     handles: list[int] = []
     try:
         paths = _win_parent_paths(target)
-        for index, parent in enumerate(paths):
+        for parent in paths:
             handle = _win_open_directory(parent, _READ_CONTROL)
             handles.append(handle)
-            _win_check_parent(
-                handle, current_sid,
-                inheritance_source=for_ensure and index == len(paths) - 1,
-            )
+            _win_check_parent(handle, current_sid)
         return handles
     except Exception:
         for handle in reversed(handles):
@@ -696,16 +955,73 @@ def _win_mark_created_for_deletion(handle: int) -> bool:
     ))
 
 
-def _windows_ensure(target: Path) -> None:
+def _windows_create_file(target: Path) -> None:
     current_sid = _win_current_sid()
-    parents = _win_open_safe_parents(target, current_sid, for_ensure=True)
+    parents = _win_open_safe_parents(target, current_sid)
     handle: int | None = None
     created = False
     try:
-        if _kernel.CreateDirectoryW(str(target), None):
-            created = True
-        elif ctypes.get_last_error() != 183:  # ERROR_ALREADY_EXISTS
+        descriptor, attributes = _win_private_security_attributes(
+            current_sid, directory=False,
+        )
+        try:
+            handle = _kernel.CreateFileW(
+                str(target),
+                _GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _WRITE_DAC | _DELETE,
+                _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                ctypes.byref(attributes), _CREATE_NEW,
+                _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+            creation_error = ctypes.get_last_error()
+        finally:
+            _kernel.LocalFree(descriptor)
+        if handle in (None, _INVALID_HANDLE_VALUE):
+            if creation_error in (80, 183):  # ERROR_FILE_EXISTS / ALREADY_EXISTS
+                raise _PrivateFileExists()
             _fail()
+        created = True
+        info = _BY_HANDLE_FILE_INFORMATION()
+        if not _kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            _fail()
+        if (info.attributes & (_FILE_ATTRIBUTE_DIRECTORY | _FILE_ATTRIBUTE_REPARSE_POINT) or
+                info.links != 1):
+            _fail()
+        owner, _protected, _aces = _win_security_snapshot(handle)
+        if owner != current_sid:
+            _fail()
+        _win_set_private_file_dacl(handle, current_sid)
+        _win_check_file(handle, current_sid)
+    except Exception:
+        if created and handle not in (None, _INVALID_HANDLE_VALUE):
+            if not _win_mark_created_for_deletion(handle):
+                _win_close(handle)
+                handle = None
+                if not _kernel.DeleteFileW(str(target)):
+                    _fail()
+        raise
+    finally:
+        _win_close(handle)
+        for parent_handle in reversed(parents):
+            _win_close(parent_handle)
+
+
+def _windows_ensure(target: Path) -> None:
+    current_sid = _win_current_sid()
+    parents = _win_open_safe_parents(target, current_sid)
+    handle: int | None = None
+    created = False
+    try:
+        descriptor, attributes = _win_private_security_attributes(
+            current_sid, directory=True,
+        )
+        try:
+            if _kernel.CreateDirectoryW(str(target), ctypes.byref(attributes)):
+                created = True
+            elif ctypes.get_last_error() != 183:  # ERROR_ALREADY_EXISTS
+                _fail()
+        finally:
+            _kernel.LocalFree(descriptor)
         access = _READ_CONTROL | _WRITE_DAC | (_DELETE if created else 0)
         handle = _win_open_directory(target, access)
         owner, _protected, _aces = _win_security_snapshot(handle)
@@ -723,10 +1039,10 @@ def _windows_ensure(target: Path) -> None:
                 handle = None
                 if not _kernel.RemoveDirectoryW(str(target)):
                     # Never conceal a rollback failure as a successful ensure.
-                    # The creation parent was checked before mkdir to prevent
-                    # untrusted inheritable ACEs, so a residual empty directory
-                    # is not accepted by this API and did not silently expose
-                    # contents, but it may require caller-owned cleanup.
+                    # The residual directory received its protected DACL in
+                    # CreateDirectoryW itself, so it did not silently expose
+                    # contents, but it is not accepted by this API and may
+                    # require caller-owned cleanup.
                     _fail()
         elif created:
             if not _kernel.RemoveDirectoryW(str(target)):
@@ -751,14 +1067,44 @@ def _windows_verify(target: Path) -> None:
             _win_close(parent_handle)
 
 
+def _windows_private_file_identity(target: Path) -> tuple[int, ...]:
+    identity, handles = _windows_hold_private_file(target)
+    for handle in handles:
+        _win_close(handle)
+    return identity
+
+
+def _windows_private_file_identity_if_present(target: Path) -> tuple[int, ...]:
+    identity, handles = _windows_hold_private_file(target, share_delete=True)
+    for handle in handles:
+        _win_close(handle)
+    return identity
+
+
 def _windows_verify_file(target: Path) -> None:
+    """Compatibility entry point used by the signed Windows updater."""
+
+    _windows_private_file_identity(target)
+
+
+def _windows_hold_private_file(
+    target: Path, *, share_delete: bool = False
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
     current_sid = _win_current_sid()
     parents = _win_open_safe_parents(target, current_sid)
     handle: int | None = None
     try:
-        handle = _win_open_file(target, _READ_CONTROL)
+        handle = _win_open_file(target, _READ_CONTROL, share_delete=share_delete)
         _win_check_file(handle, current_sid)
-    finally:
+        info = _BY_HANDLE_FILE_INFORMATION()
+        if not _kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            _fail()
+        if info.links == 0:
+            raise _PrivateFileMissing()
+        identity = (info.volume_serial, info.file_index_high, info.file_index_low)
+        return identity, (handle, *reversed(parents))
+    except Exception:
         _win_close(handle)
         for parent_handle in reversed(parents):
             _win_close(parent_handle)
+        raise

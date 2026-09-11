@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent_platform import model_provider as provider
 from agent_platform import model_registry as registry
@@ -72,9 +72,51 @@ class ModelRegistryTests(unittest.TestCase):
         secret = provider._read_object(provider.secret_path(self.root, a))
         secret.update(backend="macos-keychain", service="unrelated-service", account="unrelated-account")
         provider._atomic_json(provider.secret_path(self.root, a), secret)
-        with patch.object(provider.subprocess, "run", side_effect=AssertionError("unrelated keychain lookup")):
+        run = Mock(return_value=Mock(returncode=44, stdout=""))
+        with (patch.object(provider.platform, "system", return_value="Darwin"),
+              patch.object(provider.subprocess, "run", run)):
             self.assertIsNone(provider.load_model_secret(self.root, "https://example.com", provider_id=a))
             registry.remove_provider(self.root, a, environ={}, home=self.home)
+        canonical = provider._keychain_service(self.root.resolve(), a)
+        self.assertEqual(
+            [["security", "find-generic-password", "-s", canonical, "-a", a, "-w"]],
+            [call.args[0] for call in run.call_args_list],
+        )
+
+    def test_mac_corrupt_secret_rolls_back_canonical_keychain_after_later_failure(self):
+        a = self.configure()["saved_provider_id"]
+        secret_path = provider.secret_path(self.root, a)
+        secret_path.write_text("{broken", encoding="utf-8")
+        corrupt_bytes = secret_path.read_bytes()
+        canonical = provider._keychain_service(self.root.resolve(), a)
+        keychain = {canonical: "old-key"}
+        commands = []
+
+        def security(command, **_options):
+            commands.append(command)
+            service = command[command.index("-s") + 1]
+            self.assertEqual(canonical, service)
+            self.assertEqual(a, command[command.index("-a") + 1])
+            if command[1] == "find-generic-password":
+                value = keychain.get(service)
+                return Mock(returncode=0 if value is not None else 44, stdout=(value or "") + ("\n" if value else ""))
+            if command[1] == "add-generic-password":
+                keychain[service] = command[command.index("-w") + 1]
+                return Mock(returncode=0, stdout="")
+            raise AssertionError(command)
+
+        with (patch.object(provider.platform, "system", return_value="Darwin"),
+              patch.object(provider.subprocess, "run", side_effect=security),
+              patch.object(registry, "sync_pi_catalog", side_effect=OSError("synthetic later failure"))):
+            with self.assertRaisesRegex(OSError, "synthetic later failure"):
+                self.configure(provider_id=a, api_key="new-key")
+
+        self.assertEqual("old-key", keychain[canonical])
+        self.assertEqual(corrupt_bytes, secret_path.read_bytes())
+        self.assertEqual(
+            ["find-generic-password", "add-generic-password", "add-generic-password"],
+            [command[1] for command in commands],
+        )
 
     def test_disabled_or_deleted_default_never_falls_back_to_another_provider(self):
         first = self.configure()

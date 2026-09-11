@@ -21,7 +21,9 @@ from agent_platform import wechat_privacy as privacy
 
 _HOST_PATH = Path(host.__file__).resolve()
 _TEST_EXECUTABLE = (
-    str(Path(sys.base_prefix) / "python.exe") if os.name == "nt" else sys.executable
+    str((Path(sys.base_prefix) / "python.exe").resolve())
+    if os.name == "nt"
+    else str(Path(sys.executable).resolve())
 )
 
 

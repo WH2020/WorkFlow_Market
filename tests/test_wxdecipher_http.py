@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 from ui import server
 from agent_platform.local_http_security import LocalAccessError
-from wxdecipher_fixture import KEY_HEX, SELF, encrypt_fixture, make_database
-from test_wxdecipher_extensions import image_fixture, v2_fixture, sqlite_wal_fixture
+from tests.wxdecipher_fixture import KEY_HEX, SELF, encrypt_fixture, make_database
+from tests.test_wxdecipher_extensions import image_fixture, v2_fixture, sqlite_wal_fixture
 
 
 class WxDecipherHttpTests(unittest.TestCase):
