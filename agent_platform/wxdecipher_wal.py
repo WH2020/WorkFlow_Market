@@ -124,8 +124,10 @@ Only app staging uses this function; it does not expose an unverified download.
                     warnings.append("WAL 没有有效提交，恢复结果仅来自主数据库。")
             if db_pages > base_pages and any(number not in latest for number in range(base_pages + 1, db_pages + 1)):
                 raise WechatStoreError("WAL_MISMATCH", "WAL 扩展数据库时缺少必要页，请重新取得同一时点的 DB/WAL 副本")
-            with destination.open("xb") as output:
-                created = True
+            from .wechat_privacy import create_private_file
+            create_private_file(destination)
+            created = True
+            with destination.open("wb") as output:
                 main.seek(0)
                 shutil.copyfileobj(main, output, length=1024 * 1024)
                 applied = 0

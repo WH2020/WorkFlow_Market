@@ -155,8 +155,10 @@ def decrypt_database(source: Path, destination: Path, key_text: str = "", mode: 
                 if int.from_bytes(first_plain[16:18], "big") != PAGE_SIZE or first_plain[20] != RESERVE:
                     raise WechatStoreError("INVALID_DATABASE", "解密页头参数与支持的 SQLCipher 4 格式不符")
                 page_size = PAGE_SIZE
-            with destination.open("xb") as writer:
-                created = True
+            from .wechat_privacy import create_private_file
+            create_private_file(destination)
+            created = True
+            with destination.open("wb") as writer:
                 if plain:
                     writer.write(first)
                     for block in iter(lambda: reader.read(1024 * 1024), b""):

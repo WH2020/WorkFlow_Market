@@ -242,6 +242,19 @@ class WindowsPrivatePathTests(_PrivatePathMixin, unittest.TestCase):
         finally:
             privacy._win_close(root_handle)
 
+    def test_owner_rights_applies_only_after_owner_is_trusted(self):
+        current = privacy._win_current_sid()
+        owner_rights = privacy._win_sid_from_text(privacy._OWNER_RIGHTS_SID)
+        ace = (privacy._ACCESS_ALLOWED_ACE_TYPE, 0,
+               privacy._DANGEROUS_PARENT_ACCESS, owner_rights)
+        with patch.object(privacy, "_win_security_snapshot",
+                          return_value=(current, True, [ace])):
+            privacy._win_check_parent(1, current)
+        with patch.object(privacy, "_win_security_snapshot",
+                          return_value=(owner_rights, True, [])):
+            with self.assertRaises(privacy._PrivacyFailure):
+                privacy._win_check_parent(1, current)
+
     def test_file_disposition_abi_and_rollback_fallbacks(self):
         self.assertEqual(1, ctypes.sizeof(privacy._FILE_DISPOSITION_INFO))
 
@@ -277,11 +290,14 @@ class WindowsPrivatePathTests(_PrivatePathMixin, unittest.TestCase):
             data.mkdir()
             target = data / "wechat"
             current = privacy._win_current_sid()
-            trusted = {
+            trusted_owners = {
                 current,
                 privacy._win_well_known_sid(22),
                 privacy._win_well_known_sid(26),
                 privacy._win_sid_from_text(privacy._TRUSTED_INSTALLER_SID),
+            }
+            trusted_access = trusted_owners | {
+                privacy._win_sid_from_text(privacy._OWNER_RIGHTS_SID),
             }
             parent = target.parent
             current_path = Path(parent.anchor)
@@ -297,11 +313,12 @@ class WindowsPrivatePathTests(_PrivatePathMixin, unittest.TestCase):
                     owner, _protected, aces = privacy._win_security_snapshot(handle)
                 finally:
                     privacy._win_close(handle)
-                if owner not in trusted:
+                if owner not in trusted_owners:
                     unsafe = True
                     break
                 for ace_type, ace_flags, mask, sid in aces:
-                    if ace_type not in privacy._ACCESS_ALLOWED_ACE_TYPES or sid in trusted:
+                    if (ace_type not in privacy._ACCESS_ALLOWED_ACE_TYPES or
+                            sid in trusted_access):
                         continue
                     applies = not (ace_flags & privacy._INHERIT_ONLY_ACE)
                     replaces = applies and bool(mask & privacy._DANGEROUS_PARENT_ACCESS)

@@ -472,6 +472,7 @@ if os.name == "nt":
     _TRUSTED_INSTALLER_SID = (
         "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
     )
+    _OWNER_RIGHTS_SID = "S-1-3-4"
     _DANGEROUS_PARENT_ACCESS = (
         0x00000040 |  # FILE_DELETE_CHILD
         _DELETE | _WRITE_DAC | 0x00080000 |  # WRITE_OWNER
@@ -786,12 +787,23 @@ def _win_check_parent(handle: int, current_sid: bytes) -> None:
     system_sid = _win_well_known_sid(22)  # WinLocalSystemSid
     administrators_sid = _win_well_known_sid(26)  # WinBuiltinAdministratorsSid
     trusted_installer_sid = _win_sid_from_text(_TRUSTED_INSTALLER_SID)
-    trusted = {current_sid, system_sid, administrators_sid, trusted_installer_sid}
+    # OWNER RIGHTS is a placeholder for the object's owner, which is checked
+    # against this trusted set before any ACE is accepted.  Windows runner and
+    # enterprise profile ACLs commonly use it instead of spelling out the
+    # user's SID.
+    owner_rights_sid = _win_sid_from_text(_OWNER_RIGHTS_SID)
+    trusted_owners = {
+        current_sid,
+        system_sid,
+        administrators_sid,
+        trusted_installer_sid,
+    }
     owner, _protected, aces = _win_security_snapshot(handle)
-    if owner not in trusted:
+    if owner not in trusted_owners:
         _fail()
+    trusted_access = trusted_owners | {owner_rights_sid}
     for ace_type, ace_flags, mask, sid in aces:
-        if ace_type in _ACCESS_ALLOWED_ACE_TYPES and sid not in trusted:
+        if ace_type in _ACCESS_ALLOWED_ACE_TYPES and sid not in trusted_access:
             if (not (ace_flags & _INHERIT_ONLY_ACE) and
                     mask & _DANGEROUS_PARENT_ACCESS):
                 _fail()

@@ -119,15 +119,22 @@ def _read_session(path: Path) -> dict:
 
 
 def _save_session(path: Path, data: dict) -> None:
+    from .wechat_privacy import create_private_file
+
     temporary = path / ("manifest-" + uuid.uuid4().hex + ".tmp")
+    created = False
     try:
-        with temporary.open("x", encoding="utf-8") as writer:
+        create_private_file(temporary)
+        created = True
+        with temporary.open("w", encoding="utf-8") as writer:
             json.dump(data, writer, ensure_ascii=False)
             writer.flush()
             os.fsync(writer.fileno())
         os.replace(temporary, path / "session.json")
+        created = False
     finally:
-        temporary.unlink(missing_ok=True)
+        if created:
+            temporary.unlink(missing_ok=True)
 
 
 def _remove_session(path: Path) -> None:
@@ -241,6 +248,8 @@ def structured_upload_directory(project_root: Path | str) -> Iterator[Path]:
 
 
 def upload_database(project_root: Path | str, session_id: str, filename: str, stream: BinaryIO, length: int) -> dict:
+    from .wechat_privacy import create_private_file
+
     filename = _source_name(filename)
     minimum = 0 if filename.lower().endswith("-wal") else 512
     if not minimum <= length <= MAX_DATABASE_BYTES:
@@ -257,8 +266,11 @@ def upload_database(project_root: Path | str, session_id: str, filename: str, st
         target = path / stored_name
         digest = hashlib.sha256()
         received = 0
+        created = False
         try:
-            with target.open("xb") as writer:
+            create_private_file(target)
+            created = True
+            with target.open("wb") as writer:
                 while received < length:
                     block = stream.read(min(1024 * 1024, length - received))
                     if not block:
@@ -274,7 +286,8 @@ def upload_database(project_root: Path | str, session_id: str, filename: str, st
                                   "bytes": received, "sha256": digest.hexdigest()})
             _save_session(path, data)
         except BaseException:
-            target.unlink(missing_ok=True)
+            if created:
+                target.unlink(missing_ok=True)
             raise
     return {"source_name": filename, "bytes": received, "file_count": len(data["files"])}
 

@@ -29,14 +29,15 @@ class WxDecipherHttpTests(unittest.TestCase):
 
         self.root_patch = patch.object(server, "ROOT", self.root)
         self.profile_patch = patch.object(server, "ACTIVE_PROFILE_ID", "sales-director")
-        self.root_patch.start(); self.profile_patch.start()
+        self.isolation_patch = patch.object(server, "wechat_http_supported", return_value=True)
+        self.root_patch.start(); self.profile_patch.start(); self.isolation_patch.start()
         self.http = server.ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
 
     def tearDown(self):
         self.http.shutdown(); self.http.server_close(); self.thread.join(timeout=3)
-        self.profile_patch.stop(); self.root_patch.stop()
+        self.isolation_patch.stop(); self.profile_patch.stop(); self.root_patch.stop()
         self.temporary.cleanup()
 
     def request(self, route, payload=None, *, body=None, headers=None, token=True):

@@ -184,8 +184,10 @@ def convert_databases(databases: list[tuple[str, Path]], output: Path, *, self_u
     source_reports = []
     created = False
     try:
-        with output.open("x", encoding="utf-8", newline="\n") as writer:
-            created = True
+        from .wechat_privacy import create_private_file
+        create_private_file(output)
+        created = True
+        with output.open("w", encoding="utf-8", newline="\n") as writer:
             for source_name, database in sorted(databases, key=lambda item: item[0]):
                 source_count = 0
                 with open_readonly(database, timeout_seconds=90) as connection:
