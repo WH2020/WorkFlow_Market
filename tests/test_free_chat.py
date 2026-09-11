@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import threading
 import time
@@ -256,7 +257,9 @@ class NativeChatTransportTests(unittest.TestCase):
     def cli_selection(self, api):
         chosen = selection()
         executable = str(ROOT / "pi/tests/fixtures/free-chat-cli-fixture.mjs")
-        command = str(ROOT / "runtime/node/node.exe")
+        node = chat._node_command(ROOT, os.environ, shutil.which)
+        self.assertIsNotNone(node, "Native CLI fixtures require a Node runtime")
+        command = str(node)
         base = "https://api.anthropic.com" if api == "claude-code" else "https://chatgpt.com/backend-api/codex"
         entry = {"id": "agent4market-chat-fixture", "api": api, "base_url": base, "executable_path": executable, "command": command,
                  "args": [executable], "version": "synthetic", "runner_policy_version": 1, "models": [{"id": "synthetic-model"}],
