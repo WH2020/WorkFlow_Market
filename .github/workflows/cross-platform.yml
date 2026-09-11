@@ -140,11 +140,20 @@ jobs:
           $Account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
           icacls.exe $PrivateTemp /inheritance:r /grant:r "${Account}:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Could not protect the Python test root" }
-          $env:TEMP = $PrivateTemp
-          $env:TMP = $PrivateTemp
-          $env:USERPROFILE = $PrivateTemp
-          python -m unittest discover -s tests -t . -v
-          python -m unittest ui.test_server -v
+          if (Test-Path -LiteralPath "P:\") { throw "Private test drive P: is already in use" }
+          subst.exe P: $PrivateTemp
+          if ($LASTEXITCODE -ne 0) { throw "Could not mount the private Python test root" }
+          try {
+            $env:TEMP = "P:\"
+            $env:TMP = "P:\"
+            $env:USERPROFILE = "P:\"
+            python -m unittest discover -s tests -t . -v
+            if ($LASTEXITCODE -ne 0) { throw "Python tests failed" }
+            python -m unittest ui.test_server -v
+            if ($LASTEXITCODE -ne 0) { throw "Workbench tests failed" }
+          } finally {
+            subst.exe P: /D
+          }
       - name: Run Python and workbench tests on macOS
         if: runner.os == 'macOS'
         run: |
