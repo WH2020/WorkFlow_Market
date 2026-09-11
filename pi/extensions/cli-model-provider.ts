@@ -307,18 +307,25 @@ export function parseCliResult(api: CliApi, stdout: string, context: Context): {
       let final: string | undefined;
       for (const line of lines) {
         const event = JSON.parse(line);
-        if (!object(event)) fail("CLI 响应格式无效");
-        if (["error", "turn.failed"].includes(event.type)) fail(HELP);
-        if (event.type === "item.completed") {
-          if (event.item?.type === "agent_message") {
+        if (!object(event) || typeof event.type !== "string") fail("CLI 响应格式无效");
+        if (event.type === "turn.failed") fail(HELP);
+        if (completed) fail("CLI 在完成后返回了额外事件，未接受本次输出");
+        // Codex emits non-terminal `error` events while reconnecting, and an
+        // `error` item can describe transport recovery. Never expose their raw
+        // messages. Success still requires exit code 0 (checked by the caller),
+        // one validated response and a final turn.completed; turn.failed is fatal.
+        if (event.type === "error") continue;
+        if (["item.started", "item.updated", "item.completed"].includes(event.type)) {
+          if (!object(event.item)) fail("CLI 响应格式无效");
+          if (!["agent_message", "reasoning", "error"].includes(event.item.type)) fail("CLI 尝试使用原生工具，已拒绝本次输出");
+          if (event.type === "item.completed" && event.item.type === "agent_message") {
+            if (typeof event.item.text !== "string") fail("CLI 响应格式无效");
             if (final !== undefined) fail("CLI 返回了多个最终响应");
             final = event.item.text;
-          } else if (event.item?.type !== "reasoning") fail("CLI 尝试使用原生工具，已拒绝本次输出");
-        }
-        if (event.type === "turn.completed") {
-          if (completed) fail("CLI 返回了重复完成事件");
+          }
+        } else if (event.type === "turn.completed") {
           completed = true; usage = object(event.usage) ? event.usage : undefined;
-        }
+        } else if (!["thread.started", "turn.started"].includes(event.type)) fail("CLI 响应包含不支持的事件");
       }
       if (!completed || typeof final !== "string") fail("CLI 未返回完整结果，未执行任何工具");
       envelope = JSON.parse(final);

@@ -290,6 +290,23 @@ class NativeChatTransportTests(unittest.TestCase):
                     events = list(manager.events(ROOT, third))
                     self.assertEqual(events[-1]["type"], "error", events)
 
+    def test_codex_reconnect_through_nested_hosts_commits_only_the_completed_reply(self):
+        chosen = self.cli_selection("codex-cli")
+        manager = chat.ChatManager(resolver=lambda *_: copy.deepcopy(chosen))
+        turn = manager.begin(ROOT, payload(message="fixture:reconnect 合成名字：小松"))
+        events = list(manager.events(ROOT, turn))
+        self.assertEqual(events[-1]["type"], "done", events)
+        self.assertEqual(turn.session.version, 1)
+        self.assertEqual(len(turn.session.messages), 2)
+        result = json.loads(turn.session.messages[-1]["content"])
+        self.assertEqual(result["messages"], 1)
+        self.assertTrue(result["remembers"])
+        self.assertFalse(Path(result["cwd"]).exists())
+        self.assertEqual(manager.active, {})
+        visible = json.dumps([events, turn.session.messages])
+        self.assertNotIn("Reconnecting", visible)
+        self.assertNotIn("PRIVATE_DIAGNOSTIC_CANARY", visible)
+
     def test_nested_cli_cancel_releases_runtime_without_committing_history(self):
         for api in ("claude-code", "codex-cli"):
             with self.subTest(api=api):

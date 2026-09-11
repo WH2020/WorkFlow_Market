@@ -138,9 +138,87 @@ for (const api of ["claude-code", "codex-cli"] as const) {
   });
 }
 
-test("Codex native tool items are not interpreted as workbench tool requests", () => {
-  const bad = JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "not-run" } });
-  assert.throws(() => parseCliResult("codex-cli", bad, context), /原生工具/);
+const codexEvents = (...events: unknown[]) => events.map((event) => JSON.stringify(event)).join("\n");
+const reconnect = { type: "error", message: "Reconnecting... 2/5 (request timed out)" };
+const transportWarning = { type: "item.completed", item: { id: "diagnostic", type: "error", message: "Synthetic transport fallback warning" } };
+
+test("Codex reconnect diagnostics do not discard one subsequently completed structured response", () => {
+  for (const diagnostics of [[reconnect], [transportWarning], [reconnect, reconnect, transportWarning]]) {
+    for (const value of [envelope(), envelope("", [call])]) {
+      const result = parseCliResult("codex-cli", codexEvents(...diagnostics) + "\n" + wire("codex-cli", value), context);
+      assert.equal(result.text, value.text);
+      assert.equal(result.calls.length, value.tool_calls.length);
+      assert.deepEqual(result.usage, { input_tokens: 12, output_tokens: 8 });
+    }
+  }
+});
+
+test("Codex diagnostics alone, missing completion, and terminal failures still fail closed", () => {
+  const reply = { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(envelope()) } };
+  const failed = { type: "turn.failed", error: { message: "PRIVATE_DIAGNOSTIC_CANARY" } };
+  for (const stdout of [
+    codexEvents(reconnect), codexEvents(transportWarning), codexEvents(reconnect, reply),
+    codexEvents(reconnect, { type: "turn.completed" }),
+    codexEvents(reconnect, failed) + "\n" + wire("codex-cli", envelope()),
+    wire("codex-cli", envelope()) + "\n" + codexEvents(failed),
+  ]) {
+    assert.throws(() => parseCliResult("codex-cli", stdout, context), (error: Error) => {
+      assert.ok(!error.message.includes("PRIVATE_DIAGNOSTIC_CANARY")); return true;
+    });
+  }
+});
+
+test("Codex text and reasoning lifecycle events remain compatible during recovery", () => {
+  const stdout = codexEvents(
+    { type: "thread.started", thread_id: "synthetic" }, { type: "turn.started" }, reconnect,
+    ...["item.started", "item.updated", "item.completed"].map((type) => ({ type, item: { id: "thinking", type: "reasoning", text: "Synthetic reasoning" } })),
+    { type: "item.started", item: { id: "reply", type: "agent_message", text: "" } },
+    { type: "item.updated", item: { id: "reply", type: "agent_message", text: "{partial" } },
+    { type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(envelope()) } },
+    { type: "turn.completed" },
+  );
+  assert.deepEqual(parseCliResult("codex-cli", stdout, context), { text: "完成", calls: [], usage: undefined });
+});
+
+test("Codex recovery rejects malformed and unknown events rather than guessing their meaning", () => {
+  for (const event of [null, [], {}, { type: 1 }, { type: "unknown" }, { type: "item.unknown", item: { type: "error" } },
+    { type: "item.started", item: null }, { type: "item.completed", item: { type: "agent_message" } }]) {
+    assert.throws(() => parseCliResult("codex-cli", codexEvents(reconnect, event) + "\n" + wire("codex-cli", envelope()), context));
+  }
+});
+
+test("Codex recovery cannot hide malformed envelopes, multiple replies, or events after completion", () => {
+  const reply = { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(envelope()) } };
+  for (const stdout of [
+    codexEvents(reconnect, { ...reply, item: { ...reply.item, text: "not-json" } }, { type: "turn.completed" }),
+    codexEvents(reconnect, reply, reply, { type: "turn.completed" }),
+    codexEvents(reconnect, { ...reply, item: { ...reply.item, text: JSON.stringify(envelope("", [{ ...call, name: "Bash" }])) } }, { type: "turn.completed" }),
+    ...[reconnect, transportWarning, reply, { type: "turn.started" }, { type: "turn.completed" }]
+      .map((trailing) => wire("codex-cli", envelope()) + "\n" + codexEvents(trailing)),
+  ]) assert.throws(() => parseCliResult("codex-cli", stdout, context));
+});
+
+test("Codex native tool items at every lifecycle stage remain forbidden after a reconnect", () => {
+  for (const type of ["item.started", "item.updated", "item.completed"]) {
+    for (const itemType of ["command_execution", "file_change", "mcp_tool_call", "web_search", "todo_list", "unknown_tool"]) {
+      const bad = { type, item: { id: "forbidden", type: itemType, command: "not-run" } };
+      const stdout = codexEvents(reconnect, bad) + "\n" + wire("codex-cli", envelope("", [call]));
+      assert.throws(() => parseCliResult("codex-cli", stdout, context), /原生工具/);
+    }
+  }
+});
+
+test("Codex stream emits only validated content after recovery and never exposes diagnostics", async () => {
+  const { entry, model } = fixture("codex-cli"); let executions = 0;
+  const diagnostic = { type: "error", message: "PRIVATE_DIAGNOSTIC_CANARY" };
+  const stdout = codexEvents(diagnostic, transportWarning) + "\n" + wire("codex-cli", envelope());
+  for (const code of [0, 1]) {
+    const result = await createCliStream(entry, async () => { executions++; return { code, stdout }; }, () => {})(model, context).result();
+    assert.equal(result.stopReason, code === 0 ? "stop" : "error");
+    assert.deepEqual(result.content, code === 0 ? [{ type: "text", text: "完成" }] : []);
+    assert.ok(!JSON.stringify(result).includes("PRIVATE_DIAGNOSTIC_CANARY"));
+  }
+  assert.equal(executions, 2, "exactly one execution per request; no adapter retry or fallback");
 });
 
 test("tool schemas close nested object fields but preserve explicitly declared maps", () => {

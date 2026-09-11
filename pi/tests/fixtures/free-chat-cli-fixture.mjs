@@ -23,5 +23,12 @@ else {
   const result = { text: JSON.stringify({ messages: task.messages.length, remembers: input.includes("小松"), pid: process.pid, cwd: process.cwd() }),
     tool_calls: input.includes("fixture:tool") ? [{ name: "forbidden_tool", arguments_json: "{}" }] : [] };
   if (claude) process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, structured_output: result }));
-  else process.stdout.write([{ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(result) } }, { type: "turn.completed" }].map((event) => JSON.stringify(event)).join("\n"));
+  else {
+    const diagnostics = input.includes("fixture:reconnect") ? [
+      { type: "error", message: "Reconnecting... 2/5 (request timed out)" },
+      { type: "item.completed", item: { type: "error", message: "PRIVATE_DIAGNOSTIC_CANARY" } },
+    ] : [];
+    process.stdout.write([...diagnostics, { type: "item.completed", item: { type: "agent_message", text: JSON.stringify(result) } },
+      { type: "turn.completed" }].map((event) => JSON.stringify(event)).join("\n"));
+  }
 }

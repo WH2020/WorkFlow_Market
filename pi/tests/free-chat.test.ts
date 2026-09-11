@@ -72,3 +72,37 @@ test("pre-cancelled requests and invalid role injection never reach fetch", asyn
   await runChatTurn(input(), (event) => events.push(event), controller.signal, { fetch: async () => { calls++; throw new Error("should not run"); } });
   assert.equal(calls, 0); assert.deepEqual(events, [{ type: "error", code: "CANCELLED" }]);
 });
+
+test("Codex free chat recovers after connection diagnostics without exposing them or retrying", async () => {
+  const request = input(); delete request.api_key;
+  const base = "https://chatgpt.com/backend-api/codex";
+  request.model = { ...request.model, api: "codex-cli", baseUrl: base };
+  request.cli = { id: "fixture", api: "codex-cli", base_url: base, command: process.execPath, executable_path: process.execPath,
+    args: [], version: "synthetic", runner_policy_version: 1, launch_sha256: "0".repeat(64), models: [{ id: "synthetic-model" }] };
+  const diagnostics = [
+    { type: "thread.started", thread_id: "synthetic" }, { type: "turn.started" },
+    ...[2, 3, 4, 5].map((attempt) => ({ type: "error", message: `Reconnecting... ${attempt}/5 (request timed out)` })),
+    { type: "item.completed", item: { id: "warning", type: "error", message: "PRIVATE_DIAGNOSTIC_CANARY" } },
+  ];
+  const reply = (value: unknown) => ({ type: "item.completed", item: { id: "reply", type: "agent_message", text: JSON.stringify(value) } });
+  for (const scenario of [
+    { code: 0, tail: [reply({ text: "合成恢复成功", tool_calls: [] }), { type: "turn.completed" }], success: true },
+    { code: 0, tail: [{ type: "turn.failed", error: { message: "PRIVATE_DIAGNOSTIC_CANARY" } }], success: false },
+    { code: 0, tail: [reply({ text: "未完成", tool_calls: [] })], success: false },
+    { code: 1, tail: [reply({ text: "不可接受", tool_calls: [] }), { type: "turn.completed" }], success: false },
+    { code: 0, tail: [reply({ text: "", tool_calls: [{ name: "Bash", arguments_json: "{}" }] }), { type: "turn.completed" }], success: false },
+  ]) {
+    const events: ChatEvent[] = []; let calls = 0;
+    await runChatTurn(request, (event) => events.push(event), new AbortController().signal, {
+      verifyCli: async () => {}, cliExecutor: async () => {
+        calls++;
+        return { code: scenario.code, stdout: [...diagnostics, ...scenario.tail].map((event) => JSON.stringify(event)).join("\n") };
+      },
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(events, scenario.success
+      ? [{ type: "delta", text: "合成恢复成功" }, { type: "done", text: "合成恢复成功", limited: false }]
+      : [{ type: "error", code: "MODEL_ERROR" }]);
+    assert.ok(!JSON.stringify(events).includes("PRIVATE_DIAGNOSTIC_CANARY"));
+  }
+});
