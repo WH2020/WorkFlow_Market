@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "application_version": "0.20.4",
+  "application_version": "0.20.5",
   "migrations": [
     {
       "version": 1,

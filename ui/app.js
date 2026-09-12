@@ -19,6 +19,8 @@
   let appUpdateState = null;
   let appUpdateRequestBusy = false;
   let appUpdateOpening = false;
+  let appUpdateInstalling = false;
+  let appUpdatePolling = false;
   let appUpdateLocalError = "";
   let appUpdateAutoEnabled = true;
   let appUpdateLastAutoAttempt = null;
@@ -390,7 +392,7 @@
     if ((configured.method || "GET").toUpperCase() !== "GET") configured.headers["X-Director-Token"] = requestToken || "";
     const response = await fetch(path, configured);
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "操作未完成");
+    if (!response.ok) throw Object.assign(new Error(data.error || "操作未完成"), { code: data.code });
     return data;
   }
 
@@ -1099,9 +1101,12 @@
 
   function syncAppUpdateState(snapshot) {
     if (!snapshot || typeof snapshot !== "object") return;
-    if (appUpdateState?.instance_id === snapshot.instance_id && appUpdateState.revision > snapshot.revision) return;
+    const baseline = appUpdateState?.instance_id === snapshot.instance_id && appUpdateState.revision > snapshot.revision ? appUpdateState : snapshot;
     if (!appUpdateState || appUpdateState.instance_id !== snapshot.instance_id || appUpdateState.revision < snapshot.revision) appUpdateLocalError = "";
-    appUpdateState = snapshot;
+    const installation = appUpdateState?.instance_id === snapshot.instance_id &&
+      (appUpdateState.installation?.revision ?? -1) > (snapshot.installation?.revision ?? -1)
+      ? appUpdateState.installation : snapshot.installation;
+    appUpdateState = { ...baseline, installation };
   }
 
   function appUpdateTime(value) {
@@ -1135,6 +1140,61 @@
     $("app-update-open-release").disabled = !state.can_open_release || appUpdateOpening;
     $("app-update-open-release").textContent = appUpdateOpening ? "正在打开…" : "查看发布页";
     $("app-update-auto").checked = appUpdateAutoEnabled;
+    const installation = state.installation || {};
+    const updating = ["confirming", "downloading", "staging", "verifying", "ready", "installing", "starting"].includes(installation.phase);
+    const phases = { confirming: "请在 macOS 系统确认框中批准本次程序更新…", downloading: "正在下载并校验更新包…", staging: "正在隔离目录准备新版，当前程序未被替换…",
+      verifying: "正在核验新版程序文件…", ready: "准备完成，即将安全退出、更新并重启…", installing: "正在更新程序；窗口会暂时关闭并重新打开。",
+      starting: "正在确认新版窗口和智能核心启动；完成前暂不开放业务操作。",
+      cancelled: "更新已取消，当前程序和数据未改动。" };
+    let installationText = installation.error?.message || phases[installation.phase];
+    if (!installationText && installation.previous_result?.status === "rolled_back") installationText = `上次更新未完成，已恢复 ${installation.previous_result.from_version}；配置和数据仍在原目录。`;
+    if (!installationText && installation.previous_result?.status === "complete") installationText = `已更新到 ${installation.previous_result.to_version}；配置和业务数据未迁移。`;
+    const updateAssets = installation.platform === "macos" ? state.latest?.macos_assets : state.latest?.windows_assets;
+    $("app-update-install-status").textContent = installationText || installation.unavailable_reason ||
+      (state.update_available && !updateAssets ? "此发布没有可校验的当前平台更新附件，请查看发布页。" : "确认后下载并校验，仅更新程序；配置和业务数据保留在原目录。首次使用此功能仍需手动安装支持一键更新的版本。");
+    $("app-update-install").disabled = !installation.can_start || appUpdateInstalling || Boolean(busy);
+    $("app-update-install").textContent = updating ? "正在更新…" : "一键更新并重启";
+    $("app-update-cancel").hidden = !installation.can_cancel;
+    $("app-update-cancel").disabled = appUpdateInstalling;
+    $("app-update-progress").hidden = installation.phase !== "downloading";
+    $("app-update-progress").value = installation.total_bytes ? Math.min(100, Math.round(installation.received_bytes / installation.total_bytes * 100)) : 0;
+    if (updating) $("app-update-check").disabled = true;
+  }
+
+  async function installAppUpdate() {
+    const tag = appUpdateState?.latest?.tag;
+    if (!tag || !appUpdateState?.installation?.can_start || appUpdateInstalling) return;
+    appUpdateInstalling = true; renderAppUpdates();
+    try {
+      const confirmed = await confirmAction({ title: "更新程序并重启", message: `下载并安装 ${appUpdateState.latest.version}？仅更新程序，配置、密钥和业务数据保留在原目录。准备完成后工作台会退出并重新启动，请先保存所需的临时聊天。备份和暂存文件暂不自动清理，会占用额外磁盘空间。`,
+        detail: "安装或启动校验失败时尝试恢复旧程序；遇到未知文件改动、备份损坏或程序仍占用，会停止并保留恢复材料。请先完成任务并停止生成。准备期间不能提交其他操作；不会自动安装以后的版本。", confirmText: "确认更新并重启" });
+      if (!confirmed) return;
+      const response = await api("/api/app-updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag, confirmed: true }) });
+      syncAppUpdateState(response);
+      $("app-update-action-status").textContent = "已开始更新准备。";
+    } catch (error) { $("app-update-action-status").textContent = `未开始更新：${error.message}`; }
+    finally { appUpdateInstalling = false; renderAppUpdates(); }
+  }
+
+  async function cancelAppUpdate() {
+    if (!appUpdateState?.installation?.can_cancel || appUpdateInstalling) return;
+    appUpdateInstalling = true;
+    try {
+      syncAppUpdateState(await api("/api/app-updates/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }));
+      $("app-update-action-status").textContent = "已请求取消，正在等待当前准备步骤停止；当前程序未改动。";
+    } catch (error) { $("app-update-action-status").textContent = error.message; }
+    finally { appUpdateInstalling = false; renderAppUpdates(); }
+  }
+
+  async function pollAppInstallation() {
+    if (appUpdatePolling || !["confirming", "downloading", "staging", "verifying", "ready", "installing", "starting"].includes(appUpdateState?.installation?.phase)) return;
+    appUpdatePolling = true;
+    try {
+      syncAppUpdateState(await api("/api/app-updates"));
+      renderAppUpdates();
+    } catch {
+      $("app-update-install-status").textContent = "工作台连接已断开；若正在切换程序，请等待新版重新打开。若未重新打开，请从原快捷方式启动以恢复。";
+    } finally { appUpdatePolling = false; }
   }
 
   async function checkAppUpdates(manual = false) {
@@ -1176,6 +1236,8 @@
     };
     $("app-update-check").onclick = () => checkAppUpdates(true);
     $("app-update-open-release").onclick = openAppUpdateRelease;
+    $("app-update-install").onclick = installAppUpdate;
+    $("app-update-cancel").onclick = cancelAppUpdate;
     $("app-update-auto").onchange = () => {
       appUpdateAutoEnabled = $("app-update-auto").checked;
       try { localStorage.setItem("agent4market-auto-updates", String(appUpdateAutoEnabled)); } catch { /* Session preference still applies. */ }
@@ -1184,6 +1246,7 @@
     document.addEventListener("visibilitychange", () => { if (!document.hidden) checkAppUpdates(false); });
     window.addEventListener("online", () => checkAppUpdates(false));
     setInterval(() => checkAppUpdates(false), 60000);
+    setInterval(pollAppInstallation, 2000);
   }
 
   function renderRuntimeSettings(force = false) {
@@ -4423,7 +4486,18 @@
   }
 
   async function load() {
-    model = await api("/api/bootstrap");
+    try {
+      model = await api("/api/bootstrap");
+    } catch (error) {
+      if (error.code !== "UPDATING") throw error;
+      syncAppUpdateState(await api("/api/app-updates"));
+      renderAppUpdates();
+      if (appUpdateState?.installation?.phase === "starting") {
+        switchView("settings");
+        note("正在确认新版启动，完成后将自动恢复工作台。", false);
+      }
+      return;
+    }
     const composerFocus = captureTaskComposerFocus();
     requestToken = model.request_token;
     if (!selectedProfile || !model.profiles.some((item) => item.id === selectedProfile)) { selectedProfile = model.profiles.find((item) => item.id === "sales-director")?.id || model.profiles[0]?.id; selectedService = currentProfile()?.default_service; }

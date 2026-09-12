@@ -1251,6 +1251,10 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   let unboundSensitiveHistory = false;
   let modelBoundaryError: string | undefined;
   let runtimeIsIdle = () => true;
+  const updatePaused = () => existsSync(resolve(projectRoot, ".pi", "app-updates", "active"));
+  const requireNotUpdating = () => {
+    if (updatePaused()) throw new Error("程序正在准备更新，暂不开始或提交新的任务操作");
+  };
   const pendingSubagentCalls = new Map<string, PendingGovernedSubagent>();
   const inFlightSubagentNodes = new Set<string>();
 
@@ -1430,6 +1434,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   };
 
   const persistNew = (state: WorkflowTask) => {
+    requireNotUpdating();
     taskStore.save(state);
     activeTask = state;
     pi.appendEntry("director-task-state", state);
@@ -1438,6 +1443,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   };
 
   const persistTransition = (previous: WorkflowTask, next: WorkflowTask) => {
+    requireNotUpdating();
     taskStore.save(next, previous.version);
     activeTask = next;
     pi.appendEntry("director-task-state", next);
@@ -1448,6 +1454,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   };
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow, recoveryNote = "") => {
+    requireNotUpdating();
     pi.sendUserMessage(
       `/skill:${service.skill} [DIRECTOR_TASK_CONTEXT ${task.task_id}]\n${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护资料库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}`,
       { expandPromptTemplates: true, deliverAs: "followUp" },
@@ -1692,6 +1699,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             !request.requested_by.startsWith("local-workbench-restart:")
           ) continue;
           const next = consumeApprovalRequest(task, workflowFor(task) as RuntimeWorkflow);
+          requireNotUpdating();
           taskStore.save(next, task.version);
           continue;
         }
@@ -1701,6 +1709,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           request.requested_by.startsWith("local-workbench-revision:");
         if (request.decision === "reject" && trustedDetachedDecision) {
           const next = consumeApprovalRequest(task, workflowFor(task) as RuntimeWorkflow);
+          requireNotUpdating();
           taskStore.save(next, task.version);
           continue;
         }
@@ -1751,7 +1760,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           requested_thinking_level: next.effective_thinking_level ?? next.requested_thinking_level,
           effective_recipient: next.effective_recipient, require_bound_recipient: true,
         });
-        try { taskStore.save(next, task.version); } catch (error) { await applied.rollback(); throw error; }
+        try { requireNotUpdating(); taskStore.save(next, task.version); } catch (error) { await applied.rollback(); throw error; }
         activeTask = next;
         pi.appendEntry("director-task-state", next);
         updateRuntimeLease();
@@ -1763,6 +1772,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   };
 
   const pollRuntime = async (): Promise<void> => {
+    if (updatePaused()) return;
     try {
       const previous = activeTask;
       const synchronized = consumeExternalDecision();
@@ -1786,6 +1796,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   };
 
   const requireLogicalTool = (logicalTool: string): { state: WorkflowTask; workflow: Workflow } => {
+    requireNotUpdating();
     consumeExternalDecision();
     assertRuntimeModelBoundary();
     if (!activeTask || isTerminal(activeTask)) throw new Error("当前会话没有运行中的受管任务");
@@ -1938,6 +1949,20 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   };
 
   pi.on("session_start", async (_event, ctx) => {
+    projectRoot = resolve(ctx.cwd);
+    // The trial proves that the core and extension load, but cannot recover
+    // tasks, append business state or call a model until update commit.
+    if (updatePaused()) {
+      const directory = join(projectRoot, ".pi", "app-updates");
+      const [id, version] = readFileSync(join(directory, "active"), "utf8").trim().split("\n");
+      if (!id || !/^[a-f0-9]{32}$/u.test(id) || !version || !/^\d+\.\d+\.\d+$/u.test(version)) throw new Error("更新启动标记无效");
+      const job = JSON.parse(readFileSync(join(directory, id, "job.json"), "utf8"));
+      if (job.job_id !== id || job.to_version !== version || !/^[a-f0-9]{64}$/u.test(job.nonce)) throw new Error("更新启动任务不一致");
+      atomicRuntimeJson(join(directory, id, "core-ready.json"), { nonce: job.nonce, pid: process.pid });
+      while (updatePaused()) await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+      const result = JSON.parse(readFileSync(join(directory, "last-result.json"), "utf8"));
+      if (result.job_id !== id || result.status !== "complete") throw new Error("更新尚未确认完成");
+    }
     clearRuntimeLease();
     runtimeLeaseNonce = randomUUID();
     profileSwitchQueued = false;
@@ -1990,6 +2015,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
         const detached = taskStore.findNonterminalForProfile(activeProfile.id);
         if (detached && !detached.approval_request) {
           const rebound = rebindTaskSession(detached, sessionKey, detached.version);
+          requireNotUpdating();
           taskStore.save(rebound, detached.version);
           activeTask = rebound;
           recoveredAcrossSession = true;

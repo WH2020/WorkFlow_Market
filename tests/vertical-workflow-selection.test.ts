@@ -231,6 +231,37 @@ function writeRequest(root: string, profileId: string): void {
   writeFileSync(join(directory, "request-profile-switch.json"), JSON.stringify(payload), "utf8");
 }
 
+test("update trial loads the core but pauses session writes and requests until commit", async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-update-trial-"));
+  const id = "a".repeat(32), nonce = "b".repeat(64);
+  const updates = join(root, ".pi", "app-updates");
+  mkdirSync(join(updates, id), { recursive: true });
+  writeFileSync(join(updates, "active"), `${id}\n1.0.1\n`);
+  writeFileSync(join(updates, id, "job.json"), JSON.stringify({ job_id: id, to_version: "1.0.1", nonce }));
+  const runtime = harness(root);
+  let completed = false;
+  const pending = Promise.resolve(runtime.handlers.get("session_start")?.({}, runtime.context)).then(() => { completed = true; });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(completed, false);
+    assert.equal(runtime.entries.length, 0);
+    assert.equal(runtime.messages.length, 0);
+    assert.equal(existsSync(join(root, ".pi", "director-runtime", "agent-leases", `${process.pid}.json`)), false);
+    assert.equal(JSON.parse(readFileSync(join(updates, id, "core-ready.json"), "utf8")).nonce, nonce);
+    writeFileSync(join(updates, "last-result.json"), JSON.stringify({ job_id: id, status: "complete" }));
+    rmSync(join(updates, "active"));
+    await pending;
+    assert.equal(completed, true);
+    assert.ok(runtime.entries.length > 0);
+    assert.equal(runtime.messages.length, 0);
+  } finally {
+    rmSync(join(updates, "active"), { force: true });
+    await pending.catch(() => {});
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("managed recovery freezes recipients, compacts locally, and keeps legacy cancellation available", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-managed-recovery-"));
   const names = ["WORKFLOW_AGENT_PROFILE", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE", "AGENT4MARKET_MANAGED_MODELS_SHA256", "AGENT4MARKET_ROLE_MODELS"];

@@ -9,7 +9,7 @@ const source = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
 const ids = [...html.matchAll(/\bid="([^"]+)"/gu)].map((match) => match[1]);
 const parsed = ts.createSourceFile("app.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-const names = new Set(["syncAppUpdateState", "appUpdateTime", "renderAppUpdates", "checkAppUpdates", "openAppUpdateRelease", "initializeAppUpdates"]);
+const names = new Set(["syncAppUpdateState", "appUpdateTime", "renderAppUpdates", "checkAppUpdates", "openAppUpdateRelease", "initializeAppUpdates", "installAppUpdate", "cancelAppUpdate", "pollAppInstallation"]);
 const pieces = [];
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) pieces.push(node.getText(parsed));
@@ -50,10 +50,11 @@ function fixture(preference = null) {
     confirmAction: async (options) => { confirmations.push(options); return confirm(options); },
   });
   vm.runInContext(`let model = { app_updates: ${JSON.stringify(snapshot())} }; let requestToken = "synthetic";
-    let appUpdateState = null, appUpdateRequestBusy = false, appUpdateOpening = false, appUpdateLocalError = "", appUpdateAutoEnabled = true, appUpdateLastAutoAttempt = null;
+    let appUpdateState = null, appUpdateRequestBusy = false, appUpdateOpening = false, appUpdateLocalError = "", appUpdateAutoEnabled = true, appUpdateLastAutoAttempt = null, appUpdateInstalling = false, appUpdatePolling = false;
     ${pieces.join("\n")}
     globalThis.testUI = { render: renderAppUpdates, check: checkAppUpdates, open: openAppUpdateRelease, init: initializeAppUpdates,
-      sync: syncAppUpdateState, setModel: (value) => { model.app_updates = value; }, state: () => appUpdateState,
+      sync: syncAppUpdateState, install: installAppUpdate, cancel: cancelAppUpdate, poll: pollAppInstallation,
+      setModel: (value) => { model.app_updates = value; }, state: () => appUpdateState,
       setEnabled: (value) => { appUpdateAutoEnabled = value; }, error: () => appUpdateLocalError };`, context);
   return { ui: context.testUI, $, calls, confirmations, timers, saved, documentEvents, windowEvents,
     advance: (milliseconds) => { now += milliseconds; }, respond: (fn) => { responder = fn; }, confirm: (fn) => { confirm = fn; } };
@@ -163,4 +164,41 @@ test("cancelled release opening and failed network checks remain visible and non
   assert.equal(f.calls.length, 1);
   f.ui.sync(snapshot({ revision: 3, status: "up_to_date" })); f.ui.render();
   assert.doesNotMatch(f.$("app-update-status").textContent, /Synthetic disconnected/u);
+});
+
+test("install requires confirmation, freezes the selected tag and suppresses duplicate clicks", async () => {
+  const f = fixture();
+  f.ui.setModel(null);
+  const ready = snapshot({ latest, update_available: true, installation: { can_start: true, revision: 1 } });
+  f.ui.sync(ready);
+  f.confirm(async () => false);
+  await f.ui.install();
+  assert.equal(f.calls.length, 0);
+  let finish;
+  f.confirm(() => new Promise((resolve) => { finish = resolve; }));
+  f.respond(async () => ({ ...ready, installation: { phase: "downloading", can_cancel: true, revision: 2 } }));
+  const pending = f.ui.install();
+  await f.ui.install();
+  finish(true); await pending;
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].path, "/api/app-updates/install");
+  assert.deepEqual(JSON.parse(f.calls[0].options.body), { tag: latest.tag, confirmed: true });
+  assert.match(f.$("app-update-install-status").textContent, /正在下载/u);
+  assert.equal(f.$("app-update-install").disabled, true);
+});
+
+test("installation progress has its own revision and cancellation uses no paths", async () => {
+  const f = fixture(); f.ui.setModel(null);
+  f.ui.sync(snapshot({ revision: 5, latest, installation: { phase: "downloading", revision: 2, can_cancel: true, received_bytes: 50, total_bytes: 100 } }));
+  f.ui.sync(snapshot({ revision: 4, installation: { phase: "verifying", revision: 3, can_cancel: true } }));
+  assert.equal(f.ui.state().revision, 5);
+  assert.equal(f.ui.state().installation.phase, "verifying");
+  f.ui.sync(snapshot({ revision: 6, installation: { phase: "downloading", revision: 1 } }));
+  assert.equal(f.ui.state().installation.phase, "verifying");
+  f.respond(async () => snapshot({ revision: 6, installation: { phase: "cancelled", revision: 4 } }));
+  await f.ui.cancel();
+  assert.equal(f.calls[0].path, "/api/app-updates/cancel");
+  assert.deepEqual(JSON.parse(f.calls[0].options.body), {});
+  assert.match(f.$("app-update-install-status").textContent, /更新已取消/u);
+  assert.equal(f.$("app-update-cancel").hidden, true);
 });

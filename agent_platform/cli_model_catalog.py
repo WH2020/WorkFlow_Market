@@ -157,7 +157,7 @@ def _query_model_list_at(backend: Mapping[str, Any], directory: str, *, environ:
             return item["result"]
 
     try:
-        request(1, "initialize", {"clientInfo": {"name": "Agent4Market", "title": "Agent4Market", "version": "0.20.4"},
+        request(1, "initialize", {"clientInfo": {"name": "Agent4Market", "title": "Agent4Market", "version": "0.20.5"},
                                   "capabilities": {"experimentalApi": False}})
         send({"method": "initialized", "params": {}})
         rows: list[Any] = []

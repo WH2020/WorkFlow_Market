@@ -59,7 +59,9 @@ class ControlCentreTests(unittest.TestCase):
         checker.snapshot.return_value = {"status": "not_checked", "current_version": "0.20.2"}
         with patch.object(server, "APP_UPDATES", checker):
             handler.do_GET()
-        self.assertEqual(replies, [(HTTPStatus.OK, checker.snapshot.return_value)])
+        self.assertEqual(replies[0][0], HTTPStatus.OK)
+        self.assertEqual({key: value for key, value in replies[0][1].items() if key != "installation"}, checker.snapshot.return_value)
+        self.assertIn("supported", replies[0][1]["installation"])
         checker.snapshot.assert_called_once_with()
         checker.check.assert_not_called()
         handler.local_user = lambda: False
@@ -84,6 +86,7 @@ class ControlCentreTests(unittest.TestCase):
                 handler.send_error = lambda status: replies.append((status, {}))
                 checker = Mock()
                 getattr(checker, method).return_value = {"status": "fixture"}
+                checker.snapshot.return_value = {"status": "fixture"}
                 with self.subTest(route=route, token=token), patch.object(server, "APP_UPDATES", checker):
                     handler.do_POST()
                     if token == server.SERVER_TOKEN:
@@ -112,6 +115,56 @@ class ControlCentreTests(unittest.TestCase):
                 self.assertEqual(replies[-1][0], HTTPStatus.BAD_REQUEST)
                 checker.check.assert_not_called()
                 checker.open_release.assert_not_called()
+
+    def test_install_cancel_and_native_handoff_have_separate_authority(self):
+        cases = [("install", {"tag": "v1.0.1", "confirmed": True}, "start", 202),
+                 ("install", {"tag": "v1.0.1", "confirmed": False}, None, 400),
+                 ("install", {"tag": "v1.0.1", "confirmed": True, "path": "C:/outside"}, None, 400),
+                 ("cancel", {}, "cancel_update", 200),
+                 ("native-abort", {}, "native_abort", 200)]
+        for route, payload, method, expected in cases:
+            for authority in ("none", "browser", "native"):
+                with self.subTest(route=route, payload=payload, authority=authority):
+                    encoded = json.dumps(payload).encode()
+                    handler = object.__new__(server.ControlHandler)
+                    handler.path, handler.rfile = "/api/app-updates/" + route, io.BytesIO(encoded)
+                    handler.local_host, handler.local_user = lambda: True, lambda: True
+                    handler.headers = {"Content-Type": "application/json", "Content-Length": str(len(encoded))}
+                    if authority == "browser":
+                        handler.headers["X-Director-Token"] = server.SERVER_TOKEN
+                    if authority == "native":
+                        handler.headers["X-Update-Control"] = "synthetic-native-nonce"
+                    replies = []
+                    handler.send_json = lambda status, value: replies.append((status, value))
+                    handler.send_error = lambda status: replies.append((status, {}))
+                    accepted = authority == ("native" if route.startswith("native-") else "browser")
+                    with patch.object(server, "WINDOWS_UPDATES") as manager, patch.object(server, "UPDATE_CONTROL", "synthetic-native-nonce"), patch.object(server, "app_update_snapshot", return_value={}):
+                        handler.do_POST()
+                        self.assertEqual(replies[-1][0], expected if accepted else 403)
+                        if accepted and method:
+                            getattr(manager, method).assert_called_once()
+                        else:
+                            self.assertEqual(manager.mock_calls, [])
+
+    def test_update_probe_and_pending_gate_prevent_business_dispatch(self):
+        handler = object.__new__(server.ControlHandler)
+        handler.path = "/api/bootstrap"
+        handler.send_json = Mock()
+        handler._do_GET, handler._do_POST = Mock(), Mock()
+        with patch.object(server, "UPDATE_PROBE", True), patch.object(server, "create_a4_store") as store:
+            handler.do_GET()
+            handler.do_POST()
+            self.assertEqual(server.process_due_schedules(), 0)
+            store.assert_not_called()
+            handler._do_GET.assert_not_called()
+            handler._do_POST.assert_not_called()
+        with patch.object(server.WINDOWS_UPDATES, "frozen", True), patch.object(server, "_process_due_schedules") as schedules:
+            handler.do_GET()
+            handler.do_POST()
+            self.assertEqual(server.process_due_schedules(), 0)
+            schedules.assert_not_called()
+            handler._do_GET.assert_not_called()
+            handler._do_POST.assert_not_called()
 
     def test_cli_catalog_post_is_authenticated_and_forwards_only_detected_path(self):
         payload = {"provider": "codex-cli", "executable_path": "C:/Synthetic/codex.exe", "args": ["untrusted"]}

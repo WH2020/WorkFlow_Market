@@ -44,6 +44,10 @@ from agent_platform.model_provider import (  # noqa: E402
     normalize_base_url,
 )
 from agent_platform.app_updates import UpdateChecker, application_version  # noqa: E402
+from agent_platform.windows_updates import WindowsUpdateManager, public_failure as update_public_failure  # noqa: E402
+if sys.platform == "darwin":
+    from agent_platform.macos_updates import MacOSUpdateManager, public_failure as update_public_failure  # noqa: E402
+from agent_platform.windows_update_engine import UpdateFailure  # noqa: E402
 from agent_platform.free_chat import ChatError, ChatManager  # noqa: E402
 
 FREE_CHAT = ChatManager()
@@ -129,6 +133,7 @@ from agent_platform.a4_store import create_store as create_a4_store, default_sto
 
 UI_ROOT = Path(__file__).resolve().parent
 APP_UPDATES = UpdateChecker(application_version(ROOT))
+UPDATE_PROBE = os.environ.get("AGENT4MARKET_UPDATE_PROBE") == "1"
 SCHEDULER_ENABLED = True
 RUNTIME = ROOT / ".pi" / "director-runtime"
 TASKS = RUNTIME / "tasks"
@@ -150,6 +155,7 @@ REIMBURSEMENT_BATCHES = RUNTIME / "reimbursement-batches"
 FILE_TRASH = RUNTIME / "file-trash"
 LIBRARY_INPUTS = INPUTS / "library"
 SERVER_TOKEN = secrets.token_urlsafe(32)
+UPDATE_CONTROL = os.environ.get("AGENT4MARKET_UPDATE_CONTROL", "")
 ACTIVE_PROFILE_ID: str | None = None
 A4_API_HANDLER = None  # Initialized after profile is set
 ACTIVE_PROFILE_ID: str | None = None
@@ -2080,6 +2086,16 @@ def _schedule_request(schedule: dict[str, Any], scheduled_date: str, *, manual: 
 
 
 def process_due_schedules(current: datetime | None = None) -> int:
+    if UPDATE_PROBE:
+        return 0
+    try:
+        with WINDOWS_UPDATES.operation():
+            return _process_due_schedules(current)
+    except UpdateFailure:
+        return 0
+
+
+def _process_due_schedules(current: datetime | None = None) -> int:
     current = current or datetime.now().astimezone()
     date_text = current.date().isoformat()
     time_text = current.strftime("%H:%M")
@@ -2677,6 +2693,59 @@ def local_search(payload: dict[str, Any]) -> dict[str, Any]:
     return {"query": query, "results": results, "truncated": len(results) >= 60}
 
 
+def update_idle() -> bool:
+    """Read only bounded lifecycle metadata; never inspect business content."""
+    if desktop_settings().get("show_ai_core_window"):
+        return False  # A detached diagnostic console has no owned EOF channel.
+    with FREE_CHAT.lock:
+        if FREE_CHAT.active:
+            return False
+    if any(lease.get("task_status") == "running" for lease in fresh_agent_leases()):
+        return False
+    for directory, kind in ((TASKS, "task"), (REQUESTS, "request")):
+        if directory.is_symlink():
+            return False
+        if not directory.is_dir():
+            continue
+        paths = list(directory.glob("*.json"))
+        if len(paths) > 2000:
+            return False
+        for path in paths:
+            try:
+                if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
+                    return False
+                record = load_json(path)
+                if kind == "request" and record.get("status") in {"requested", "prepared"}:
+                    return False
+                if kind == "task" and (record.get("status") == "running" or (record.get("pending_write") or {}).get("status") == "committing"):
+                    return False
+                if kind == "task" and record.get("approval_request"):
+                    return False
+            except (OSError, ValueError, TypeError, AttributeError):
+                return False
+    return True
+
+
+def initialize_a4_handler() -> bool:
+    global A4_API_HANDLER
+    try:
+        a4_store = create_a4_store(database_path=a4_store_path(ROOT))
+        A4_API_HANDLER = create_api_handler(store=a4_store)
+        return True
+    except Exception as error:
+        console_message(f"警告：A4 持久化初始化失败：{error}", f"Warning: A4 persistence initialization failed: {error}")
+        A4_API_HANDLER = create_api_handler()  # Same fallback on normal and update startup.
+        return False
+
+
+WINDOWS_UPDATES = (MacOSUpdateManager if sys.platform == "darwin" else WindowsUpdateManager)(ROOT, APP_UPDATES, idle=update_idle,
+    pending=os.environ.get("AGENT4MARKET_UPDATE_PENDING"), on_committed=initialize_a4_handler)
+
+
+def app_update_snapshot() -> dict:
+    return {**APP_UPDATES.snapshot(), "installation": WINDOWS_UPDATES.snapshot()}
+
+
 class ControlHandler(SimpleHTTPRequestHandler):
     server_version = "DirectorWorkbench/0.1"
 
@@ -3083,6 +3152,20 @@ class ControlHandler(SimpleHTTPRequestHandler):
         })
 
     def do_GET(self) -> None:
+        route = urlparse(self.path).path
+        if UPDATE_PROBE and route != "/api/health":
+            self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "程序自检期间不开放数据和操作接口"})
+            return
+        if route.startswith("/api/") and route not in {"/api/health", "/api/app-updates", "/api/app-updates/native"}:
+            try:
+                with WINDOWS_UPDATES.operation():
+                    self._do_GET()
+            except UpdateFailure as error:
+                self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": update_public_failure(error)["message"], "code": "UPDATING"})
+        else:
+            self._do_GET()
+
+    def _do_GET(self) -> None:
         if not self.local_host():
             self.send_error(HTTPStatus.FORBIDDEN)
             return
@@ -3100,6 +3183,17 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, health)
             return
         if not self.local_user():
+            return
+        if route == "/api/app-updates/native":
+            if not UPDATE_CONTROL or not secrets.compare_digest(self.headers.get("X-Update-Control", ""), UPDATE_CONTROL):
+                self.send_error(HTTPStatus.FORBIDDEN)
+                return
+            content = WINDOWS_UPDATES.native_request().encode("ascii")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
             return
         if route.startswith("/api/wechat/") and not wechat_http_supported():
             self.send_json(HTTPStatus.FORBIDDEN, {"error": "当前平台尚无经过验证的本机用户隔离，微信 HTTP 入口暂不开放", "code": "LOCAL_ISOLATION_UNSUPPORTED"})
@@ -3141,14 +3235,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
                                             "wechat": wechat,
                                             "bidding": bid_dashboard(ROOT),
                                             "desktop_runtime": desktop_runtime_summary(),
-                                            "app_updates": APP_UPDATES.snapshot(),
+                                            "app_updates": app_update_snapshot(),
                                             "request_token": SERVER_TOKEN})
             return
         if route == "/api/desktop-settings":
             self.send_json(HTTPStatus.OK, desktop_runtime_summary())
             return
         if route == "/api/app-updates":
-            self.send_json(HTTPStatus.OK, APP_UPDATES.snapshot())
+            self.send_json(HTTPStatus.OK, app_update_snapshot())
             return
         if route == "/api/model-settings":
             self.send_json(HTTPStatus.OK, model_settings_summary(ROOT))
@@ -3363,11 +3457,41 @@ class ControlHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self) -> None:
+        route = urlparse(self.path).path
+        if UPDATE_PROBE:
+            self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "程序自检期间不开放数据和操作接口"})
+            return
+        try:
+            if route.startswith("/api/app-updates/"):
+                self._do_POST()
+            else:
+                with WINDOWS_UPDATES.operation():
+                    self._do_POST()
+        except UpdateFailure as error:
+            failure = update_public_failure(error)
+            self.send_json(HTTPStatus.CONFLICT, {"error": failure["message"], "code": failure["code"]})
+
+    def _do_POST(self) -> None:
         try:
             if not self.local_host():
                 self.send_error(HTTPStatus.FORBIDDEN)
                 return
             if not self.local_user():
+                return
+            route = urlparse(self.path).path
+            if route in {"/api/app-updates/native-stop", "/api/app-updates/native-abort"}:
+                if not UPDATE_CONTROL or not secrets.compare_digest(self.headers.get("X-Update-Control", ""), UPDATE_CONTROL):
+                    self.send_error(HTTPStatus.FORBIDDEN)
+                    return
+                if self.body(limit=256) != {}:
+                    raise ValueError("更新控制请求无效")
+                if route.endswith("native-stop"):
+                    WINDOWS_UPDATES.native_stop()
+                    self.send_json(HTTPStatus.OK, {"status": "stopping"})
+                    threading.Thread(target=self.server.shutdown, name="update-server-shutdown", daemon=True).start()
+                else:
+                    WINDOWS_UPDATES.native_abort()
+                    self.send_json(HTTPStatus.OK, {"status": "cancelled"})
                 return
             if not secrets.compare_digest(self.headers.get("X-Director-Token", ""), SERVER_TOKEN):
                 self.send_json(HTTPStatus.FORBIDDEN, {"error": "工作台令牌无效，请刷新页面"})
@@ -3573,7 +3697,18 @@ class ControlHandler(SimpleHTTPRequestHandler):
             elif route == "/api/app-updates/check":
                 if set(payload) - {"manual"} or type(payload.get("manual", False)) is not bool:
                     raise ValueError("更新检测请求无效")
-                self.send_json(HTTPStatus.OK, APP_UPDATES.check(manual=payload.get("manual", False)))
+                APP_UPDATES.check(manual=payload.get("manual", False))
+                self.send_json(HTTPStatus.OK, app_update_snapshot())
+            elif route == "/api/app-updates/install":
+                if set(payload) != {"tag", "confirmed"} or not isinstance(payload.get("tag"), str) or payload.get("confirmed") is not True:
+                    raise ValueError("请明确确认所选版本的程序更新")
+                WINDOWS_UPDATES.start(payload["tag"], payload["confirmed"])
+                self.send_json(HTTPStatus.ACCEPTED, app_update_snapshot())
+            elif route == "/api/app-updates/cancel":
+                if payload != {}:
+                    raise ValueError("取消更新请求无效")
+                WINDOWS_UPDATES.cancel_update()
+                self.send_json(HTTPStatus.OK, app_update_snapshot())
             elif route == "/api/app-updates/open-release":
                 if set(payload) != {"tag"} or not isinstance(payload.get("tag"), str):
                     raise ValueError("请选择已检测到的发布版本")
@@ -3685,6 +3820,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_library_error(error)
         except WechatStoreError as error:
             self.send_wechat_error(error)
+        except UpdateFailure:
+            raise
         except (ValueError, KeyError, json.JSONDecodeError, ModelProviderError, SearchProviderError, SearchGatewayError, MailProviderError) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
         except RuntimeError as error:
@@ -4561,12 +4698,14 @@ def main() -> None:
     args = parser.parse_args()
     global ACTIVE_PROFILE_ID, A4_API_HANDLER, SCHEDULER_ENABLED
     ACTIVE_PROFILE_ID = safe_id(args.profile)
-    SCHEDULER_ENABLED = not args.disable_scheduler
+    SCHEDULER_ENABLED = not args.disable_scheduler and not UPDATE_PROBE
     if not (PROFILES / ACTIVE_PROFILE_ID / "profile.json").is_file():
         parser.error(f"未知发行版角色：{ACTIVE_PROFILE_ID}")
     try:
-        a4_store = create_a4_store(database_path=a4_store_path(ROOT))
-        A4_API_HANDLER = create_api_handler(store=a4_store)
+        if UPDATE_PROBE or WINDOWS_UPDATES.pending:
+            A4_API_HANDLER = None  # Probe/trial must not open/migrate live SQLite.
+        else:
+            initialize_a4_handler()
     except Exception as error:
         console_message(
             f"警告：A4 持久化初始化失败：{error}",

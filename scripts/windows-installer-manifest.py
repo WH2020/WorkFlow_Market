@@ -61,7 +61,11 @@ def main() -> None:
     paths = {row["path"] for row in rows}
     required = {"Agent4Market.exe", "runtime/private-runtime.marker", ".venv/Scripts/python311._pth",
                 "agent_platform/cli_process_host.py", "agent_platform/cli_provider.py", "pi/extensions/cli-model-provider.ts",
-                "agent_platform/app_updates.py", "agent_platform/cli_model_catalog.py"}
+                "agent_platform/app_updates.py", "agent_platform/cli_model_catalog.py",
+                "agent_platform/windows_updates.py", "agent_platform/windows_update_engine.py",
+                "agent_platform/windows_update_worker.py", "agent_platform/windows_update_protocol.json",
+                "agent_platform/windows_update_signatures.py", "agent_platform/windows_update_trust.json",
+                "agent_platform/local_http_security.py", "scripts/windows-installer-bootstrap.py"}
     if not required <= paths or (payload / ".venv/pyvenv.cfg").exists():
         raise ValueError("Missing CLI/runtime files or a non-portable Python environment")
     manifest = {"version": args.version, "files": rows, "total_bytes": sum(row["bytes"] for row in rows)}

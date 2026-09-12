@@ -16,6 +16,17 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
+#[cfg(windows)]
+mod updater;
+#[cfg(windows)]
+mod runtime_jobs;
+#[cfg(any(target_os = "macos", test))]
+mod macos_update_plan;
+#[cfg(target_os = "macos")]
+mod macos_updater;
+#[cfg(target_os = "macos")]
+mod posix_jobs;
+
 const PROFILE_ID: &str = "sales-director";
 const WORKBENCH_PORT: u16 = 8765;
 #[cfg(windows)]
@@ -40,19 +51,11 @@ fn is_project_root(path: &Path) -> bool {
 
 #[cfg(target_os = "macos")]
 fn configured_macos_project_root() -> Option<PathBuf> {
-    let home = env::var_os("HOME")?;
-    let marker = PathBuf::from(home).join("Library/Application Support/Agent4Market/install-root");
-    let metadata = std::fs::symlink_metadata(&marker).ok()?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
-        return None;
-    }
-    let configured = std::fs::read_to_string(marker).ok()?;
-    let path = PathBuf::from(configured.trim());
-    if !path.is_absolute() {
-        return None;
-    }
-    let resolved = path.canonicalize().ok()?;
-    is_project_root(&resolved).then_some(resolved)
+    // Library/Application Support/Agent4Market/install-root is the ONLY
+    // release authority. Ownership, private marker mode and ancestors are
+    // checked by the native updater; CWD and executable ancestors are ignored.
+    let path = macos_updater::probe_root().or_else(|| macos_updater::configured_root().ok())?;
+    is_project_root(&path).then_some(path)
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -68,7 +71,11 @@ fn project_root() -> Result<PathBuf, String> {
         let executable = env::current_exe().map_err(|error| error.to_string())?;
         return windows_project_root(&executable);
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        return configured_macos_project_root().ok_or_else(|| "Agent4Market.app 尚未关联受保护的运行目录；请先运行 scripts/setup-macos.sh。".into());
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let mut candidates = Vec::new();
         if let Ok(executable) = env::current_exe() {
@@ -110,7 +117,20 @@ fn windows_project_root(executable: &Path) -> Result<PathBuf, String> {
 }
 
 fn private_runtime(root: &Path) -> bool {
-    root.join("runtime/private-runtime.marker").exists()
+    cfg!(windows) && root.join("runtime/private-runtime.marker").exists()
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_runtime(command: &mut Command, root: &Path) {
+    command.env("PYTHONDONTWRITEBYTECODE", "1").env("PYTHONNOUSERSITE", "1")
+        .env_remove("PYTHONPATH").env_remove("PYTHONHOME").env_remove("NODE_PATH").env_remove("NODE_OPTIONS")
+        .env_remove("DYLD_INSERT_LIBRARIES").env_remove("DYLD_LIBRARY_PATH");
+    // Each installation has its own Pi configuration. A probe already has an
+    // isolated temporary HOME/PI directory established by native early_entry.
+    if env::var("AGENT4MARKET_UPDATE_PROBE").as_deref() != Ok("1") {
+        command.env("PI_CODING_AGENT_DIR", root.join(".pi/agent"));
+    }
+    command.env_remove("AGENT4MARKET_UPDATE_CONTROL");
 }
 
 fn configure_private_runtime(command: &mut Command, root: &Path) -> Result<(), String> {
@@ -152,11 +172,17 @@ fn configure_private_runtime(command: &mut Command, root: &Path) -> Result<(), S
         .env_remove("PYTHONPATH")
         .env_remove("PYTHONHOME")
         .env_remove("NODE_PATH")
-        .env_remove("NODE_OPTIONS");
+        .env_remove("NODE_OPTIONS")
+        .env_remove("AGENT4MARKET_UPDATE_CONTROL")
+        .env_remove("AGENT4MARKET_UPDATE_PENDING");
     Ok(())
 }
 
 fn launcher_log(root: &Path) -> Result<File, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(path) = macos_updater::probe_log() {
+        return OpenOptions::new().create(true).append(true).open(path).map_err(|error| error.to_string());
+    }
     let path = root.join(".pi/director-runtime/desktop-launcher.log");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -169,6 +195,10 @@ fn launcher_log(root: &Path) -> Result<File, String> {
 }
 
 fn ai_core_log(root: &Path) -> Result<File, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = macos_updater::trial_home() {
+        return OpenOptions::new().create(true).append(true).open(home.join("ai-core.log")).map_err(|error| error.to_string());
+    }
     let path = root.join(".pi/director-runtime/ai-core.log");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -317,6 +347,7 @@ fn start_workbench(
     root: &Path,
     scheduler_enabled: bool,
     startup_token: &str,
+    update_control: Option<&str>,
 ) -> Result<Child, String> {
     let address = SocketAddr::from(([127, 0, 0, 1], WORKBENCH_PORT));
     if TcpStream::connect_timeout(&address, Duration::from_millis(700)).is_ok() {
@@ -337,6 +368,8 @@ fn start_workbench(
     let error = output.try_clone().map_err(|value| value.to_string())?;
     let mut command = Command::new(program);
     configure_private_runtime(&mut command, root)?;
+    #[cfg(target_os = "macos")]
+    configure_macos_runtime(&mut command, root);
     command
         .args(arguments)
         .current_dir(root)
@@ -345,10 +378,20 @@ fn start_workbench(
         .env("PYTHONUNBUFFERED", "1")
         .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
         .env("AGENT4MARKET_DESKTOP_STARTUP_TOKEN", startup_token)
+        .env("AGENT4MARKET_DESKTOP_PID", std::process::id().to_string())
         .stdout(Stdio::from(output))
         .stderr(Stdio::from(error));
+    if let Some(control) = update_control {
+        command.env("AGENT4MARKET_UPDATE_CONTROL", control);
+        if let Some(pending) = env::var_os("AGENT4MARKET_UPDATE_PENDING") {
+            command.env("AGENT4MARKET_UPDATE_PENDING", pending);
+        }
+    }
     #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
+    return runtime_jobs::spawn(&mut command, CREATE_NO_WINDOW);
+    #[cfg(target_os = "macos")]
+    return posix_jobs::spawn(&mut command);
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     command
         .spawn()
         .map_err(|value| format!("工作台启动失败：{value}"))
@@ -359,6 +402,9 @@ fn wait_for_workbench(child: &mut Child, startup_token: &str) -> bool {
     // local package cache.  Treat that as startup latency, not a crash.
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
+        #[cfg(target_os = "macos")]
+        if posix_jobs::exited(child).unwrap_or(true) { return false; }
+        #[cfg(not(target_os = "macos"))]
         if child.try_wait().ok().flatten().is_some() {
             return false;
         }
@@ -388,6 +434,8 @@ fn pi_version_ok(root: &Path) -> bool {
     if configure_private_runtime(&mut command, root).is_err() {
         return false;
     }
+    #[cfg(target_os = "macos")]
+    configure_macos_runtime(&mut command, root);
     command
         .arg(pi_cli)
         .arg("--version")
@@ -428,9 +476,7 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(error))
             .creation_flags(CREATE_NO_WINDOW);
-        return command
-            .spawn()
-            .map_err(|value| format!("嵌入式 Pi 销售总监运行时启动失败：{value}"));
+        return runtime_jobs::spawn(&mut command, CREATE_NO_WINDOW);
     }
     // Optional diagnostics mode gets its own console.  Launch PowerShell
     // directly so cmd.exe cannot reinterpret a localized window title as a file.
@@ -450,13 +496,45 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
         ])
         .current_dir(root)
         .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID)
-        .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
-        .creation_flags(CREATE_NEW_CONSOLE)
-        .spawn()
-        .map_err(|value| format!("Pi 销售总监运行时启动失败：{value}"))
+        .env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID);
+    runtime_jobs::spawn(&mut command, CREATE_NEW_CONSOLE)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
+    if show_window {
+        // Older settings may request an unowned Terminal launch. Keep that
+        // setting/data intact, but use the controlled core so updates can
+        // safely stop every worker and an old preference cannot block boot.
+        log_launcher_event(root, "macOS diagnostics requested: using controlled embedded AI core; see ai-core.log");
+    }
+    let output = ai_core_log(root)?;
+    let error = output.try_clone().map_err(|value| value.to_string())?;
+    if let Some(home) = macos_updater::trial_home() {
+        let mut command = Command::new("node");
+        configure_macos_runtime(&mut command, root);
+        command.arg(root.join("node_modules/@earendil-works/pi-coding-agent/dist/cli.js"))
+            .args(["--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--extension"])
+            .arg(root.join("pi/extensions/vertical-workflow.ts"))
+            .current_dir(root).env("HOME", &home).env("TMPDIR", home.join("tmp"))
+            .env("PI_CODING_AGENT_DIR", home.join("pi")).env_remove("CODEX_HOME")
+            .env("CLAUDE_CONFIG_DIR", home.join("claude"))
+            .env("WORKFLOW_AGENT_PROFILE", PROFILE_ID).env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
+            .stdin(Stdio::piped()).stdout(Stdio::from(output)).stderr(Stdio::from(error));
+        return posix_jobs::spawn(&mut command);
+    }
+    let (python, prefix) = python_command(root)?;
+    let mut command = Command::new(python);
+    configure_macos_runtime(&mut command, root);
+    // Direct argv avoids Terminal/shell quoting and uses exactly the same
+    // interpreter as the workbench, including the enrolled .venv on macOS.
+    command.args(prefix).args(["-m", "agent_platform", "launch", "--", "--mode", "rpc", "--approve"])
+        .current_dir(root).env("WORKFLOW_AGENT_PROFILE", PROFILE_ID).env("WORKFLOW_AGENT_EDITION_PROFILE", PROFILE_ID)
+        .stdin(Stdio::piped()).stdout(Stdio::from(output)).stderr(Stdio::from(error));
+    posix_jobs::spawn(&mut command)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
     if !show_window {
         let output = ai_core_log(root)?;
@@ -488,6 +566,7 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
 
 #[cfg(windows)]
 fn stop_child(child: &mut Child) {
+    if runtime_jobs::stop(child.id()) { let _ = child.wait(); return; }
     let _ = Command::new("taskkill.exe")
         .args(["/PID", &child.id().to_string(), "/T", "/F"])
         .creation_flags(CREATE_NO_WINDOW)
@@ -496,7 +575,12 @@ fn stop_child(child: &mut Child) {
         .status();
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn stop_child(child: &mut Child) {
+    let _ = posix_jobs::stop(child);
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn stop_child(child: &mut Child) {
     let _ = child.kill();
 }
@@ -507,6 +591,12 @@ fn cleanup(children: &RuntimeChildren) {
             stop_child(child);
         }
         locked.clear();
+    }
+    #[cfg(target_os = "macos")]
+    if posix_jobs::trial_cohort() {
+        // A committed trial keeps its isolated native-led cohort. On final
+        // GUI exit, no WebView/Python/Node descendant may outlive that cohort.
+        unsafe { libc::kill(-libc::getpgrp(), libc::SIGKILL); }
     }
 }
 
@@ -522,7 +612,7 @@ fn self_test() -> i32 {
         Ok(token) => token,
         Err(_) => return 2,
     };
-    let mut server = match start_workbench(&root, false, &startup_token) {
+    let mut server = match start_workbench(&root, false, &startup_token, None) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("Agent4Market self-test could not start the workbench: {error}");
@@ -532,6 +622,9 @@ fn self_test() -> i32 {
     let healthy = wait_for_workbench(&mut server, &startup_token);
     let pi_ok = healthy && pi_version_ok(&root);
     if !healthy {
+        #[cfg(target_os = "macos")]
+        let child_state = if posix_jobs::exited(&server).unwrap_or(true) { "exited" } else { "still running" };
+        #[cfg(not(target_os = "macos"))]
         let child_state = server
             .try_wait()
             .ok()
@@ -539,6 +632,8 @@ fn self_test() -> i32 {
             .map_or_else(|| "still running".to_string(), |status| status.to_string());
         eprintln!("Agent4Market self-test health check failed; workbench child is {child_state}.");
         let log_path = root.join(".pi/director-runtime/desktop-launcher.log");
+        #[cfg(target_os = "macos")]
+        let log_path = macos_updater::probe_log().unwrap_or(log_path);
         if let Ok(log) = std::fs::read_to_string(&log_path) {
             let tail_start = log
                 .char_indices()
@@ -570,9 +665,34 @@ fn new_startup_token() -> Result<String, getrandom::Error> {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if let Some(code) = macos_updater::early_entry() { std::process::exit(code); }
+    #[cfg(not(target_os = "macos"))]
+    if env::args().any(|argument| argument == "--update-self-test") {
+        // The server's probe mode does not open databases, run schedules or
+        // expose business APIs. Program rollback therefore needs no data undo.
+        env::set_var("AGENT4MARKET_UPDATE_PROBE", "1");
+        std::process::exit(self_test());
+    }
+    #[cfg(not(target_os = "macos"))]
     if env::args().any(|argument| argument == "--self-test") {
         std::process::exit(self_test());
     }
+
+    #[cfg(windows)]
+    match updater::recover_on_start() {
+        Ok(true) => return,
+        Err(error) => { show_startup_error(&error); return; }
+        Ok(false) => {}
+    }
+    #[cfg(target_os = "macos")]
+    match macos_updater::recover_on_start() {
+        Ok(true) => return,
+        Err(error) => { show_startup_error(&error); return; }
+        Ok(false) => {}
+    }
+    #[cfg(target_os = "macos")]
+    if env::args().any(|argument| argument == "--self-test") { std::process::exit(self_test()); }
 
     let application = tauri::Builder::default()
         .manage(RuntimeChildren::default())
@@ -589,9 +709,12 @@ fn main() {
             log_launcher_event(&root, "setup started");
             env::set_current_dir(&root)?;
             let ui_self_test = env::args().any(|argument| argument == "--ui-self-test");
+            let update_control = new_startup_token().map_err(|error| std::io::Error::other(error.to_string()))?;
+            // Separate from the public health-instance token; never returned
+            // by bootstrap and never accepted from browser update requests.
             let startup_token =
                 new_startup_token().map_err(|error| std::io::Error::other(error.to_string()))?;
-            let mut server = start_workbench(&root, !ui_self_test, &startup_token)
+            let mut server = start_workbench(&root, !ui_self_test, &startup_token, Some(&update_control))
                 .map_err(std::io::Error::other)?;
             if !wait_for_workbench(&mut server, &startup_token) {
                 stop_child(&mut server);
@@ -613,6 +736,8 @@ fn main() {
                     && url.host_str() == Some("127.0.0.1")
                     && url.port() == Some(WORKBENCH_PORT)
             });
+            #[cfg(target_os = "macos")]
+            let window_builder = window_builder.visible(macos_updater::trial_home().is_none());
             #[cfg(windows)]
             let window_builder = if private_runtime(&root) {
                 window_builder.data_directory(root.join(".pi/webview2"))
@@ -670,6 +795,16 @@ fn main() {
                     stop_child(&mut server);
                     return Err(std::io::Error::other("运行时锁已损坏").into());
                 }
+            }
+            #[cfg(windows)]
+            if private_runtime(&root) {
+                updater::trial_ready(&root).map_err(std::io::Error::other)?;
+                updater::watch(app.handle().clone(), root.clone(), update_control);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                macos_updater::trial_ready(&root).map_err(std::io::Error::other)?;
+                macos_updater::watch(app.handle().clone(), root.clone(), update_control);
             }
             Ok(())
         })

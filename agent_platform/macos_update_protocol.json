@@ -1,0 +1,7 @@
+{
+  "application": "Agent4Market",
+  "platform": "macos-universal",
+  "update_protocol": 1,
+  "data_compatibility": 1,
+  "dependencies": "preserve-enrolled-runtime-v1"
+}

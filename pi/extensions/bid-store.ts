@@ -16,7 +16,7 @@ import { DatabaseSync } from "node:sqlite";
 import { LocalBusinessStoreError } from "./local-business-store.ts";
 
 export const BID_SCHEMA_VERSION = 1;
-export const BID_APPLICATION_VERSION = "0.20.4";
+export const BID_APPLICATION_VERSION = "0.20.5";
 export const BID_MAX_MUTATIONS = 100;
 
 type SqlValue = string | number | null;

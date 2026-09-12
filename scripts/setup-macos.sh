@@ -63,7 +63,14 @@ case "$PNPM_COMMAND" in
 esac
 if [ "$SKIP_DEPENDENCIES" -eq 0 ]; then
   "$PNPM_COMMAND" install --frozen-lockfile --ignore-scripts
+  [ ! -L "$PROJECT_ROOT/.venv" ] || { printf '%s\n' 'Refusing a symlinked Python environment.' >&2; exit 2; }
+  if [ ! -e "$PROJECT_ROOT/.venv" ]; then python3 -m venv "$PROJECT_ROOT/.venv"; fi
+  "$PROJECT_ROOT/.venv/bin/python" -m pip install --disable-pip-version-check -r "$PROJECT_ROOT/requirements.txt"
 fi
+PYTHON_COMMAND="$PROJECT_ROOT/.venv/bin/python"
+[ -x "$PYTHON_COMMAND" ] || { printf '%s\n' 'A project .venv is required. Run setup without --skip-dependencies first.' >&2; exit 2; }
+export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+unset PYTHONPATH PYTHONHOME NODE_PATH NODE_OPTIONS
 MISSING_CLI=()
 command -v rg >/dev/null 2>&1 || MISSING_CLI+=(ripgrep)
 command -v fd >/dev/null 2>&1 || MISSING_CLI+=(fd)
@@ -112,15 +119,15 @@ if [ -z "$PI_COMMAND" ]; then
   npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.2
   PI_COMMAND="$(command -v pi)"
 fi
-python3 plugin/market-director-copilot/scripts/init_local_data.py --project .
-python3 scripts/sync-coding-agent-skills.py --check
-python3 -m agent_platform configure-subagents
-python3 -m agent_platform validate
+"$PYTHON_COMMAND" plugin/market-director-copilot/scripts/init_local_data.py --project .
+"$PYTHON_COMMAND" scripts/sync-coding-agent-skills.py --check
+"$PYTHON_COMMAND" -m agent_platform configure-subagents
+"$PYTHON_COMMAND" -m agent_platform validate
 "$PI_COMMAND" install -l . --approve
-python3 -m agent_platform doctor --require-ppt
+"$PYTHON_COMMAND" -m agent_platform doctor --require-ppt
 printf '%s\n' 'Independent PPT runtime detected: PptxGenJS + LibreOffice + PDF.js.'
 
-EXPECTED_VERSION="$(python3 -c 'import json; print(json.load(open("package.json", encoding="utf-8"))["version"])')"
+EXPECTED_VERSION="$("$PYTHON_COMMAND" -c 'import json; print(json.load(open("package.json", encoding="utf-8"))["version"])')"
 BUNDLED_APP="$PROJECT_ROOT/Agent4Market.app"
 BUNDLED_VERSION=""
 if [ -d "$BUNDLED_APP" ] && [ -f "$BUNDLED_APP/Contents/Info.plist" ]; then
@@ -162,6 +169,7 @@ fi
 ditto "$APP_SOURCE" "$INSTALL_APP"
 codesign --verify --deep --strict "$INSTALL_APP"
 "$INSTALL_APP/Contents/MacOS/Agent4Market" --self-test
+"$PYTHON_COMMAND" scripts/enroll-macos-update.py --root "$PROJECT_ROOT" --app "$INSTALL_APP"
 
 printf '%s\n' "Setup complete. Open $INSTALL_APP or run: open '$INSTALL_APP'"
 printf '%s\n' 'The app uses this checked-out directory as its local runtime and data root.'

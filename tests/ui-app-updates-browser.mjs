@@ -64,6 +64,22 @@ try {
     await page.getByRole("alertdialog").getByRole("button", { name: "打开发布页", exact: true }).click();
     await page.locator("#app-update-action-status").filter({ hasText: "当前程序未被覆盖" }).waitFor();
     assert.deepEqual((await stats()).opened, ["https://github.com/WH2020/WorkFlow_Market/releases/tag/v0.20.3"]);
+    await page.locator("#app-update-install").click();
+    await page.getByRole("alertdialog").waitFor();
+    assert.match(await page.getByRole("alertdialog").innerText(), /配置、密钥和业务数据保留在原目录/u);
+    await page.getByRole("alertdialog").screenshot({ path: join(output, "update-install-confirm-synthetic.png") });
+    await page.getByRole("alertdialog").getByRole("button", { name: "取消", exact: true }).click();
+    assert.deepEqual((await stats()).installed, []);
+    await page.locator("#app-update-install").click();
+    await page.getByRole("alertdialog").getByRole("button", { name: "确认更新并重启", exact: true }).click();
+    await page.locator("#app-update-install-status").filter({ hasText: "正在下载" }).waitFor();
+    assert.deepEqual((await stats()).installed, ["v0.20.3"]);
+    assert.equal(await page.locator("#app-update-progress").getAttribute("value"), "50");
+    assert.equal(await page.locator("#app-update-install").isDisabled(), true);
+    await page.locator("#app-update-panel").screenshot({ path: join(output, "update-install-progress-synthetic.png") });
+    await page.locator("#app-update-cancel").click();
+    await page.locator("#app-update-install-status").filter({ hasText: "更新已取消" }).waitFor();
+    assert.equal((await stats()).cancelled, 1);
     await page.locator("#app-update-auto").uncheck();
     await page.reload();
     await page.locator("#app-update-current-version").filter({ hasText: "0.20.2" }).waitFor({ state: "attached" });
@@ -75,6 +91,8 @@ try {
     const panel = await page.locator("#app-update-panel").boundingBox();
     const button = await page.locator("#app-update-open-release").boundingBox();
     assert.ok(button.x >= panel.x && button.x + button.width <= panel.x + panel.width);
+    const installButton = await page.locator("#app-update-install").boundingBox();
+    assert.ok(installButton.x >= panel.x && installButton.x + installButton.width <= panel.x + panel.width);
     await page.locator("#app-update-panel").screenshot({ path: join(output, "update-narrow-synthetic.png") });
   });
   await scenario("current", async (page, stats) => {

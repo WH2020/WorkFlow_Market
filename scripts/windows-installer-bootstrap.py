@@ -171,7 +171,20 @@ def verify(target: Path, version: str, privacy, *, staging: bool = False) -> Non
 
 def uninstall(target: Path, version: str, privacy) -> None:
     privacy._windows_verify(target)
-    rows = entries(target, version)  # Validate the COMPLETE plan before deleting.
+    # The directory/registry key is still bound to the original installation
+    # version by target_path(). One-click program updates keep that path (and
+    # DPAPI/config/data bindings) stable, but install a newer file manifest.
+    package = target / "package.json"
+    if package.exists():
+        package = regular_file(target, "package.json")
+        if package.stat().st_size > 65536:
+            raise ValueError("Invalid current package metadata")
+        current = json.loads(package.read_bytes()).get("version")
+        if not isinstance(current, str) or not re.fullmatch(r"\d+\.\d+\.\d+", current):
+            raise ValueError("Invalid current package version")
+    else:
+        current = version  # Conservative removal of a partially missing package.
+    rows = entries(target, current)  # Validate the COMPLETE plan before deleting.
     removed = retained = 0
     directories = set()
     for row in sorted(rows, key=lambda item: item["path"] == "Agent4Market.exe"):

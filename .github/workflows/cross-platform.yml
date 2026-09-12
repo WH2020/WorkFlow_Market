@@ -51,6 +51,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  macos-update-native-gate:
+    name: macOS update native tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native program rollback and owned process-group tests
+        run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
+
   validate:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -142,6 +154,9 @@ jobs:
             dist/macos/universal-apple-darwin/Agent4Market-universal-apple-darwin.dmg
             dist/macos/universal-apple-darwin/Agent4Market-universal-apple-darwin-app.zip
             dist/macos/universal-apple-darwin/Agent4Market-universal-apple-darwin-runtime.zip
+            dist/macos/universal-apple-darwin/Agent4Market-*-macos-programs.zip
+            dist/macos/universal-apple-darwin/Agent4Market-*-macos-universal-app.zip
+            dist/macos/universal-apple-darwin/macOS-install-manifest.json
             dist/macos/universal-apple-darwin/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

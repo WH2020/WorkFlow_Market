@@ -96,7 +96,60 @@ def release_record(value: object) -> dict:
             "notes": _text(value.get("body"), MAX_NOTES),
             "notes_truncated": isinstance(value.get("body"), str) and len(value["body"]) > MAX_NOTES,
             # Never trust an upstream or client-supplied external URL.
-            "release_url": f"{RELEASES_URL}/tag/{quote(tag, safe='')}"}
+            "release_url": f"{RELEASES_URL}/tag/{quote(tag, safe='')}",
+            "windows_assets": windows_release_assets(value, tag),
+            "macos_assets": macos_release_assets(value, tag)}
+
+
+def macos_release_assets(release: dict, tag: str) -> dict | None:
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        return None
+    names = {"programs": (f"Agent4Market-{tag[1:]}-macos-programs.zip", 1024 ** 3),
+             "app": (f"Agent4Market-{tag[1:]}-macos-universal-app.zip", 1024 ** 3),
+             "manifest": ("macOS-install-manifest.json", 32 * 1024 ** 2),
+             "signature": ("macOS-update-signature.json", 4096)}
+    rows = release.get("assets")
+    if not isinstance(rows, list) or len(rows) > 32:
+        return None
+    result = {}
+    for key, (name, limit) in names.items():
+        matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        if (row.get("state") != "uploaded" or type(row.get("id")) is not int or row["id"] <= 0
+                or type(row.get("size")) is not int or not 0 < row["size"] <= limit
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(row.get("digest", "")))):
+            return None
+        result[key] = {"id": row["id"], "name": name, "bytes": row["size"], "sha256": row["digest"][7:]}
+    return result
+
+
+def windows_release_assets(release: dict, tag: str) -> dict | None:
+    """Only server-provided immutable asset IDs and digests, never URLs."""
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        return None
+    version = tag[1:]
+    names = {f"Agent4Market-{version}-Setup-x64.exe": 1024 ** 3,
+             "Windows-install-manifest.json": 32 * 1024 ** 2,
+             "Windows-update-signature.json": 4096}
+    rows = release.get("assets")
+    if not isinstance(rows, list) or len(rows) > 32:
+        return None
+    result = {}
+    for name, limit in names.items():
+        matches = [row for row in rows if isinstance(row, dict) and row.get("name") == name]
+        if len(matches) != 1:
+            return None
+        row = matches[0]
+        if (row.get("state") != "uploaded" or type(row.get("id")) is not int or row["id"] <= 0
+                or type(row.get("size")) is not int or not 0 < row["size"] <= limit
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", str(row.get("digest", "")))):
+            return None
+        key = "installer" if name.endswith(".exe") else "signature" if name == "Windows-update-signature.json" else "manifest"
+        result[key] = {
+            "id": row["id"], "name": name, "bytes": row["size"], "sha256": row["digest"][7:]}
+    return result
 
 
 class _NoRedirect(HTTPRedirectHandler):

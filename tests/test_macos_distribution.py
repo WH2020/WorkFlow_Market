@@ -33,7 +33,7 @@ class MacOSDistributionTests(unittest.TestCase):
             'case " $ARCHS " in *" arm64 "*',
             "runtime.zip",
             "SHA256SUMS.txt",
-            "--self-test",
+            "--macos-build-self-test",
         ):
             self.assertIn(required, script)
 
@@ -48,7 +48,9 @@ class MacOSDistributionTests(unittest.TestCase):
         runtime = (ROOT / "desktop/src-tauri/src/main.rs").read_text(encoding="utf-8")
         self.assertIn("configured_macos_project_root", runtime)
         self.assertIn("Library/Application Support/Agent4Market/install-root", runtime)
-        self.assertIn("metadata.file_type().is_symlink()", runtime)
+        updater = (ROOT / "desktop/src-tauri/src/macos_updater.rs").read_text(encoding="utf-8")
+        self.assertIn("macos_updater::configured_root()", runtime)
+        self.assertIn("plan::directory(&root, false)", updater)
 
     def test_setup_retries_transient_libreoffice_download_failures(self):
         setup = (ROOT / "scripts/setup-macos.sh").read_text(encoding="utf-8")

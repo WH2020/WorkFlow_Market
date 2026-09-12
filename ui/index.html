@@ -416,8 +416,11 @@
         <details><summary>更新说明</summary><pre id="app-update-release-notes"></pre></details>
       </div>
       <label class="runtime-toggle"><input id="app-update-auto" type="checkbox" checked><span><strong>自动检查更新</strong><small>启动时及应用打开期间每 5 分钟检查；不会自动下载、安装或重启。</small></span></label>
-      <div class="form-actions"><button id="app-update-check" class="secondary" type="button">立即检查</button><button id="app-update-open-release" class="primary" type="button" disabled>查看发布页</button><span id="app-update-action-status" class="hint" aria-live="polite"></span></div>
-      <p class="safety-note">发布源：WH2020/WorkFlow_Market。发布页会在系统浏览器中打开，请确认该版本已提供适合本机的安装包。不要直接覆盖正在运行的程序；当前程序和数据不会在后台被替换。</p>
+      <div class="form-actions"><button id="app-update-check" class="secondary" type="button">立即检查</button><button id="app-update-install" class="primary" type="button" disabled>一键更新并重启</button><button id="app-update-cancel" class="secondary" type="button" hidden>取消更新</button><button id="app-update-open-release" class="secondary" type="button" disabled>查看发布页</button></div>
+      <p id="app-update-install-status" class="hint" role="status" aria-live="polite">确认后下载并校验，退出更新，再重新启动；配置和业务数据保留在原目录。</p>
+      <progress id="app-update-progress" max="100" value="0" hidden aria-label="更新下载进度"></progress>
+      <span id="app-update-action-status" class="hint" aria-live="polite"></span>
+      <p class="safety-note">发布源：WH2020/WorkFlow_Market。自动检查不会自动安装；只有确认“一键更新并重启”后才下载并更新程序。配置与业务数据不迁移。其他平台或不兼容版本请按发布说明手动安装，不要直接覆盖正在运行的程序。</p>
     </section>
   </template>
   <script src="/free-chat.js"></script>

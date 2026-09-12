@@ -6,6 +6,7 @@ The release opener only records a URL; it cannot launch a browser/installer.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import sys
 import tempfile
@@ -28,7 +29,7 @@ def main() -> None:
         for name, value in list(vars(server).items()):
             if isinstance(value, Path) and value.is_relative_to(original) and name not in {"UI_ROOT", "PROFILES", "PLUGINS"}:
                 setattr(server, name, root / value.relative_to(original))
-        stats = {"fetches": 0, "opened": []}
+        stats = {"fetches": 0, "opened": [], "installed": [], "cancelled": 0}
 
         def fetch(_etag):
             stats["fetches"] += 1
@@ -49,6 +50,27 @@ def main() -> None:
         server.APP_UPDATES = UpdateChecker("0.20.2", fetcher=fetch)
         open_release = server.APP_UPDATES.open_release
         server.APP_UPDATES.open_release = lambda tag: open_release(tag, opener=stats["opened"].append)
+        class SyntheticInstallation:
+            phase, revision = "idle", 0
+
+            def operation(self):
+                return nullcontext()
+
+            def snapshot(self):
+                return {"phase": self.phase, "revision": self.revision, "supported": True,
+                        "can_start": server.APP_UPDATES.snapshot()["update_available"] and self.phase in {"idle", "cancelled"},
+                        "can_cancel": self.phase == "downloading", "received_bytes": 50, "total_bytes": 100}
+
+            def start(self, tag, confirmed):
+                assert confirmed is True and tag == "v0.20.3"
+                stats["installed"].append(tag)  # No downloader, installer or process can run.
+                self.phase, self.revision = "downloading", self.revision + 1
+
+            def cancel_update(self):
+                stats["cancelled"] += 1
+                self.phase, self.revision = "cancelled", self.revision + 1
+
+        server.WINDOWS_UPDATES = SyntheticInstallation()
         server.ACTIVE_PROFILE_ID = "sales-director"
         server.process_due_schedules = lambda: None
         server.model_settings_summary = lambda *_a, **_k: {"configured": False, "providers": [], "status": "unconfigured"}
@@ -72,7 +94,7 @@ def main() -> None:
                     super().do_GET()
 
             def do_POST(self):
-                if self.path.split("?", 1)[0] not in {"/api/app-updates/check", "/api/app-updates/open-release"}:
+                if self.path.split("?", 1)[0] not in {"/api/app-updates/check", "/api/app-updates/open-release", "/api/app-updates/install", "/api/app-updates/cancel"}:
                     self.send_json(403, {"error": "Only synthetic update actions are permitted"})
                     return
                 super().do_POST()

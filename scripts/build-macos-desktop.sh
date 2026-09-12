@@ -29,6 +29,14 @@ TAURI_CLI="$PROJECT_ROOT/node_modules/.bin/tauri"
 command -v rustup >/dev/null 2>&1 || { printf '%s\n' 'rustup is required to build the macOS desktop app.' >&2; exit 2; }
 command -v ditto >/dev/null 2>&1 || { printf '%s\n' 'macOS ditto is required to preserve application bundle metadata.' >&2; exit 2; }
 command -v codesign >/dev/null 2>&1 || { printf '%s\n' 'macOS codesign is required.' >&2; exit 2; }
+# The app and exported source must describe the same commit. Do not package a
+# dirty native build together with an unrelated git archive HEAD.
+git -C "$PROJECT_ROOT" diff --quiet || { printf '%s\n' 'Commit reviewed program changes before building a release.' >&2; exit 2; }
+git -C "$PROJECT_ROOT" diff --cached --quiet || { printf '%s\n' 'Commit staged program changes before building a release.' >&2; exit 2; }
+if [ -n "$(git -C "$PROJECT_ROOT" ls-files --others --exclude-standard -- agent_platform desktop/src-tauri/src ui scripts)" ]; then
+  printf '%s\n' 'Untracked program files must be reviewed and committed before building a release.' >&2
+  exit 2
+fi
 
 if [ "$TARGET" = "universal-apple-darwin" ]; then
   rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -68,7 +76,8 @@ cp "$DMG_SOURCE" "$OUTPUT_ROOT/Agent4Market-$TARGET.dmg"
 ditto -c -k --sequesterRsrc --keepParent "$APP_OUTPUT" "$OUTPUT_ROOT/Agent4Market-$TARGET-app.zip"
 
 if [ "$SKIP_SELF_TEST" -eq 0 ]; then
-  "$APP_OUTPUT/Contents/MacOS/Agent4Market" --self-test
+  # Explicit no-business build probe; never adopt a user's registered runtime.
+  "$APP_OUTPUT/Contents/MacOS/Agent4Market" --macos-build-self-test "$PROJECT_ROOT"
 fi
 
 STAGING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/agent4market-macos.XXXXXX")"
@@ -76,6 +85,10 @@ trap 'rm -rf "$STAGING_ROOT"' EXIT
 RUNTIME_ROOT="$STAGING_ROOT/Agent4Market"
 mkdir -p "$RUNTIME_ROOT"
 git -C "$PROJECT_ROOT" archive HEAD | tar -x -C "$RUNTIME_ROOT"
+if [ "$TARGET" = "universal-apple-darwin" ]; then
+  python3 "$PROJECT_ROOT/scripts/build-macos-update.py" --source-export "$RUNTIME_ROOT" --app "$APP_OUTPUT" \
+    --app-archive "$OUTPUT_ROOT/Agent4Market-$TARGET-app.zip" --output "$OUTPUT_ROOT"
+fi
 ditto "$APP_OUTPUT" "$RUNTIME_ROOT/Agent4Market.app"
 ditto -c -k --sequesterRsrc --keepParent "$RUNTIME_ROOT" "$OUTPUT_ROOT/Agent4Market-$TARGET-runtime.zip"
 
@@ -85,6 +98,9 @@ ditto -c -k --sequesterRsrc --keepParent "$RUNTIME_ROOT" "$OUTPUT_ROOT/Agent4Mar
     "Agent4Market-$TARGET.dmg" \
     "Agent4Market-$TARGET-app.zip" \
     "Agent4Market-$TARGET-runtime.zip" > SHA256SUMS.txt
+  if [ "$TARGET" = "universal-apple-darwin" ]; then
+    shasum -a 256 macOS-install-manifest.json Agent4Market-*-macos-programs.zip Agent4Market-*-macos-universal-app.zip >> SHA256SUMS.txt
+  fi
 )
 
 printf '{"status":"ok","target":"%s","architectures":"%s","output":"%s"}\n' \
