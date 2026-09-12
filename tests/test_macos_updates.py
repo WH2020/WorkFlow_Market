@@ -76,6 +76,10 @@ class MacOSUpdatesTests(unittest.TestCase):
             package['version'] = '1.1.0'
             (root / 'package.json').write_text(json.dumps(package))
             self.assertEqual(before, engine.dependency_contract(root))
+            package['devDependencies'] = {'runtime-cli': '1.0.0'}
+            (root / 'package.json').write_text(json.dumps(package))
+            self.assertNotEqual(before, engine.dependency_contract(root))
+            del package['devDependencies']
             package['dependencies']['example'] = '1.1.0'
             (root / 'package.json').write_text(json.dumps(package))
             self.assertNotEqual(before, engine.dependency_contract(root))

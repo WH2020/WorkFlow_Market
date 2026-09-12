@@ -77,6 +77,7 @@ ditto -c -k --sequesterRsrc --keepParent "$APP_OUTPUT" "$OUTPUT_ROOT/Agent4Marke
 
 if [ "$SKIP_SELF_TEST" -eq 0 ]; then
   # Explicit no-business build probe; never adopt a user's registered runtime.
+  python3 "$PROJECT_ROOT/scripts/enroll-macos-update.py" --root "$PROJECT_ROOT" --tools-only
   "$APP_OUTPUT/Contents/MacOS/Agent4Market" --macos-build-self-test "$PROJECT_ROOT"
 fi
 

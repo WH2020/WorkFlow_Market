@@ -32,6 +32,8 @@ SHA256 = common.SHA256
 PROTOCOL_FILE = 'agent_platform/macos_update_protocol.json'
 MANIFEST_FILE = 'runtime/macos-install-manifest.json'
 RUNTIME_FILE = '.pi/app-updates/macos-runtime.json'
+TOOLS_FILE = '.pi/app-updates/macos-tools.json'
+TOOL_NAMES = ('node', 'pnpm', 'rg', 'fd', 'git')
 LIMIT = 32 * 1024**2
 PROGRAM_DIRS = {'agent_platform', 'profiles', 'vertical_plugins', 'pi', 'plugin', 'ui', 'scripts', 'library'}
 PROGRAM_FILES = common.PROGRAM_FILES - {'Agent4Market.exe'}
@@ -243,7 +245,8 @@ def manifest(raw, version=None):
 
 def dependency_contract(root):
     package = read_json(Path(root) / 'package.json', 65536)
-    fields = ('dependencies', 'optionalDependencies', 'peerDependencies', 'engines', 'packageManager', 'pnpm')
+    fields = ('dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies',
+              'bundledDependencies', 'bundleDependencies', 'engines', 'packageManager', 'pnpm')
     value = {name: package.get(name) for name in fields}
     value['locks'] = {name: hashlib.sha256(safe_path(root, name).read_bytes().replace(b'\r\n', b'\n')).hexdigest()
                       for name in ('pnpm-lock.yaml', 'requirements.txt', 'requirements-wxdecipher.txt')}
@@ -411,6 +414,75 @@ def installation(root):
             'manifest': document, 'app': app, 'support': support, 'runtime': baseline}
 
 
+def external_tool(path, *, directory=False):
+    """External tools may be root-owned, but never writable by other users."""
+    path = Path(path)
+    require(path.is_absolute() and str(path) == os.path.abspath(path)
+            and not re.search(r'[:\x00-\x1f\x7f]', str(path)), 'INVALID_TOOL_PATH')
+    for index, current in enumerate((path, *path.parents)):
+        value = current.lstat()
+        require(not stat.S_ISLNK(value.st_mode), 'LINK_REFUSED')
+        require(stat.S_ISDIR(value.st_mode) if directory or index else
+                stat.S_ISREG(value.st_mode) and value.st_mode & 0o111, 'INVALID_TOOL_PATH')
+        if os.name == 'posix':
+            require(value.st_uid in {0, os.getuid()} and not value.st_mode & 0o022, 'UNSAFE_OWNER_OR_MODE')
+            macos_acl(current, value.st_mode)
+    return path
+
+
+def verified_tools(root, document=None):
+    root = trusted_directory(root)
+    if document is None:
+        document = read_json(safe_path(root, TOOLS_FILE), 65536)
+    require(isinstance(document, dict) and document.get('format') == 1
+            and document.get('root') == str(root) and isinstance(document.get('tools'), dict)
+            and set(document['tools']) == set(TOOL_NAMES), 'INVALID_TOOL_REGISTRATION')
+    for name, row in document['tools'].items():
+        require(isinstance(row, dict) and set(row) == {'command', 'target', 'sha256'}
+                and all(isinstance(value, str) for value in row.values())
+                and SHA256.fullmatch(row['sha256']), 'INVALID_TOOL_REGISTRATION')
+        command = Path(row['command'])
+        require(command.name == name and command.is_absolute()
+                and str(command) == os.path.abspath(command), 'INVALID_TOOL_PATH')
+        external_tool(command.parent, directory=True)
+        target = external_tool(row['target'])
+        require(command.resolve(strict=True) == target and digest(target) == row['sha256'], 'TOOL_CHANGED')
+    return document
+
+
+def runtime_path(root, document=None):
+    document = verified_tools(root, document)
+    local = safe_path(root, 'node_modules/.bin', directory=True)
+    paths = [str(local)] + [str(Path(document['tools'][name]['command']).parent) for name in TOOL_NAMES]
+    paths += ['/usr/bin', '/bin', '/usr/sbin', '/sbin']
+    result = ':'.join(dict.fromkeys(paths))
+    for name, row in document['tools'].items():
+        require(shutil.which(name, path=result) == row['command'], 'TOOL_PATH_COLLISION')
+    return result
+
+
+def enroll_tools(root):
+    """Called only by explicit setup/build, never silently during app startup."""
+    require(sys.platform == 'darwin', 'MACOS_ONLY')
+    root = trusted_directory(root)
+    rows = {}
+    for name in TOOL_NAMES:
+        found = shutil.which(name)
+        require(found, 'MISSING_RUNTIME_TOOL')
+        command = Path(found)
+        # Keep the command basename (pnpm may be a symlink to pnpm.cjs), but
+        # remove Homebrew opt/version symlinks from its parent directories.
+        command = command.parent.resolve(strict=True) / command.name
+        target = command.resolve(strict=True)
+        rows[name] = {'command': str(command), 'target': str(target), 'sha256': digest(target)}
+    document = {'format': 1, 'root': str(root), 'tools': rows}
+    runtime_path(root, document)
+    parent = mkdirs(root, '.pi/app-updates')
+    require(not (parent / 'active').exists(), 'UPDATING')
+    write_json(root / TOOLS_FILE, document)
+    return document
+
+
 def runtime_fingerprint(root):
     """Actual preserved dependencies, not just their requirements declarations."""
     import importlib.metadata
@@ -437,9 +509,8 @@ def runtime_fingerprint(root):
                     rows.append((relative, 'file', digest(path)))
                 else:
                     require(path.is_dir(), 'NON_REGULAR_FILE')
-    node = shutil.which('node')
-    require(node, 'DEPENDENCIES_CHANGED')
-    node = str(Path(node).resolve(strict=True))
+    tools = verified_tools(root)
+    node = tools['tools']['node']['target']
     completed = subprocess.run([node, '-p', 'JSON.stringify({version:process.versions.node,arch:process.arch})'],
         env={'PATH': '/usr/bin:/bin', 'HOME': str(root)}, stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
     require(completed.returncode == 0, 'DEPENDENCIES_CHANGED')
@@ -447,7 +518,7 @@ def runtime_fingerprint(root):
     value = {'python': str(Path(sys.executable).resolve()), 'python_sha256': digest(Path(sys.executable).resolve()),
              'python_version': platform.python_version(), 'python_arch': platform.machine(),
              'python_soabi': sysconfig.get_config_var('SOABI'), 'packages': packages,
-             'node': node, 'node_sha256': digest(node), 'node_runtime': json.loads(completed.stdout),
+             'node': node, 'node_sha256': digest(node), 'node_runtime': json.loads(completed.stdout), 'tools': tools,
              'dependency_tree_sha256': hashlib.sha256(json.dumps(rows, separators=(',', ':')).encode()).hexdigest()}
     value['runtime_id'] = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return value

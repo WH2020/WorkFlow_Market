@@ -35,7 +35,9 @@ def load_worker():
 
 class TransactionTests(unittest.TestCase):
     def setUp(self):
-        base = engine.load_policy("installer").profile_path() if os.name == "nt" else None
+        # macOS /var -> /private/var is intentionally rejected by the private
+        # directory policy; place synthetic fixtures under the real user home.
+        base = engine.load_policy("installer").profile_path() if os.name == "nt" else Path.home().resolve()
         self.temp = tempfile.TemporaryDirectory(prefix="a4m-update-synthetic-", dir=base)
         self.addCleanup(self.temp.cleanup)
         parent = Path(self.temp.name)

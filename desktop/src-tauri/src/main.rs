@@ -121,7 +121,25 @@ fn private_runtime(root: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn configure_macos_runtime(command: &mut Command, root: &Path) {
+fn configure_macos_runtime(command: &mut Command, root: &Path) -> Result<(), String> {
+    // Finder/LaunchServices does not load a shell profile. Use the tools
+    // explicitly registered by setup, with current ownership/hash checks.
+    // Native recovery runs before this point and never depends on Python.
+    let (python, prefix) = python_command(root)?;
+    let output = Command::new(python).args(prefix).args(["-I", "-B", "-c",
+        "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from agent_platform.macos_update_engine import runtime_path; print(runtime_path(Path(sys.argv[1])))"])
+        .arg(root).current_dir(root).env_remove("PYTHONPATH").env_remove("PYTHONHOME")
+        .env_remove("DYLD_INSERT_LIBRARIES").env_remove("DYLD_LIBRARY_PATH")
+        .stdin(Stdio::null()).output().map_err(|_| "无法验证 macOS 运行工具，请重新运行 setup-macos.sh。")?;
+    if !output.status.success() {
+        return Err("macOS 运行工具缺失、已变更或权限不安全，请重新运行 setup-macos.sh 登记依赖。".into());
+    }
+    let path = String::from_utf8(output.stdout).map_err(|_| "macOS 运行工具路径编码无效。")?;
+    let path = path.trim_end_matches('\n');
+    if path.is_empty() || path.chars().any(char::is_control) {
+        return Err("macOS 运行工具路径无效。".into());
+    }
+    command.env("PATH", path);
     command.env("PYTHONDONTWRITEBYTECODE", "1").env("PYTHONNOUSERSITE", "1")
         .env_remove("PYTHONPATH").env_remove("PYTHONHOME").env_remove("NODE_PATH").env_remove("NODE_OPTIONS")
         .env_remove("DYLD_INSERT_LIBRARIES").env_remove("DYLD_LIBRARY_PATH");
@@ -131,6 +149,7 @@ fn configure_macos_runtime(command: &mut Command, root: &Path) {
         command.env("PI_CODING_AGENT_DIR", root.join(".pi/agent"));
     }
     command.env_remove("AGENT4MARKET_UPDATE_CONTROL");
+    Ok(())
 }
 
 fn configure_private_runtime(command: &mut Command, root: &Path) -> Result<(), String> {
@@ -369,7 +388,7 @@ fn start_workbench(
     let mut command = Command::new(program);
     configure_private_runtime(&mut command, root)?;
     #[cfg(target_os = "macos")]
-    configure_macos_runtime(&mut command, root);
+    configure_macos_runtime(&mut command, root)?;
     command
         .args(arguments)
         .current_dir(root)
@@ -435,7 +454,7 @@ fn pi_version_ok(root: &Path) -> bool {
         return false;
     }
     #[cfg(target_os = "macos")]
-    configure_macos_runtime(&mut command, root);
+    if configure_macos_runtime(&mut command, root).is_err() { return false; }
     command
         .arg(pi_cli)
         .arg("--version")
@@ -512,7 +531,7 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
     let error = output.try_clone().map_err(|value| value.to_string())?;
     if let Some(home) = macos_updater::trial_home() {
         let mut command = Command::new("node");
-        configure_macos_runtime(&mut command, root);
+        configure_macos_runtime(&mut command, root)?;
         command.arg(root.join("node_modules/@earendil-works/pi-coding-agent/dist/cli.js"))
             .args(["--mode", "rpc", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--extension"])
             .arg(root.join("pi/extensions/vertical-workflow.ts"))
@@ -525,7 +544,7 @@ fn start_agent(root: &Path, show_window: bool) -> Result<Child, String> {
     }
     let (python, prefix) = python_command(root)?;
     let mut command = Command::new(python);
-    configure_macos_runtime(&mut command, root);
+    configure_macos_runtime(&mut command, root)?;
     // Direct argv avoids Terminal/shell quoting and uses exactly the same
     // interpreter as the workbench, including the enrolled .venv on macOS.
     command.args(prefix).args(["-m", "agent_platform", "launch", "--", "--mode", "rpc", "--approve"])

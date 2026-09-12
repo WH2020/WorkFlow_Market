@@ -102,13 +102,17 @@ class WindowsPublicPayloadTests(unittest.TestCase):
             output.mkdir()
             required = ("Agent4Market.exe", "runtime/private-runtime.marker", ".venv/Scripts/python311._pth",
                         "agent_platform/cli_process_host.py", "agent_platform/cli_provider.py",
-                        "pi/extensions/cli-model-provider.ts", "agent_platform/app_updates.py", "agent_platform/cli_model_catalog.py")
+                        "pi/extensions/cli-model-provider.ts", "agent_platform/app_updates.py", "agent_platform/cli_model_catalog.py",
+                        "agent_platform/windows_updates.py", "agent_platform/windows_update_engine.py",
+                        "agent_platform/windows_update_worker.py", "agent_platform/windows_update_protocol.json",
+                        "agent_platform/windows_update_signatures.py", "agent_platform/windows_update_trust.json",
+                        "agent_platform/local_http_security.py", "scripts/windows-installer-bootstrap.py")
             for relative in required:
                 path = payload / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"synthetic public source")
             arguments = ["inventory", "--payload", str(payload), "--output", str(output), "--version", "0.20.2"]
-            for relative in required[-2:]:
+            for relative in required[6:]:
                 path = payload / relative
                 path.unlink()
                 with patch("sys.argv", arguments), self.assertRaises(ValueError):

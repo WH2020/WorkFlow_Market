@@ -60,6 +60,11 @@ jobs:
         os: [macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Finder-style PATH, tool identity and permission regressions
+        run: python -m unittest tests.test_macos_runtime_tools -v
       - name: Native program rollback and owned process-group tests
         run: cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml
 
@@ -102,7 +107,18 @@ jobs:
       - name: Build universal macOS desktop
         if: runner.os == 'macOS'
         shell: bash
-        run: bash scripts/build-macos-desktop.sh
+        run: |
+          for tool in rg fd; do
+            if ! command -v "$tool" >/dev/null; then
+              case "$tool" in rg) brew install ripgrep ;; fd) brew install fd ;; esac
+            fi
+          done
+          python -m venv --system-site-packages .venv
+          bash scripts/build-macos-desktop.sh
+      - name: Real macOS signed update, native app swap and Pi restart
+        if: runner.os == 'macOS'
+        shell: bash
+        run: python tests/macos-native-update-acceptance.py --dist dist/macos/universal-apple-darwin
       - name: Configure governed runtime and validate project
         run: |
           python -m agent_platform configure-subagents

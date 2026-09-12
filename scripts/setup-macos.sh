@@ -62,7 +62,7 @@ case "$PNPM_COMMAND" in
   ""|*codex-runtimes*|*/.codex/*) printf 'A non-Codex pnpm command is required.\n' >&2; exit 2 ;;
 esac
 if [ "$SKIP_DEPENDENCIES" -eq 0 ]; then
-  "$PNPM_COMMAND" install --frozen-lockfile --ignore-scripts
+  "$PNPM_COMMAND" install --frozen-lockfile --ignore-scripts --prod=false
   [ ! -L "$PROJECT_ROOT/.venv" ] || { printf '%s\n' 'Refusing a symlinked Python environment.' >&2; exit 2; }
   if [ ! -e "$PROJECT_ROOT/.venv" ]; then python3 -m venv "$PROJECT_ROOT/.venv"; fi
   "$PROJECT_ROOT/.venv/bin/python" -m pip install --disable-pip-version-check -r "$PROJECT_ROOT/requirements.txt"
@@ -168,8 +168,8 @@ if [ -e "$INSTALL_APP" ]; then
 fi
 ditto "$APP_SOURCE" "$INSTALL_APP"
 codesign --verify --deep --strict "$INSTALL_APP"
-"$INSTALL_APP/Contents/MacOS/Agent4Market" --self-test
 "$PYTHON_COMMAND" scripts/enroll-macos-update.py --root "$PROJECT_ROOT" --app "$INSTALL_APP"
+PATH=/usr/bin:/bin:/usr/sbin:/sbin "$INSTALL_APP/Contents/MacOS/Agent4Market" --self-test
 
 printf '%s\n' "Setup complete. Open $INSTALL_APP or run: open '$INSTALL_APP'"
 printf '%s\n' 'The app uses this checked-out directory as its local runtime and data root.'
