@@ -268,7 +268,11 @@ class TransactionTests(unittest.TestCase):
             engine.verify_outcome(self.root, self.job, "new")
             if not succeed:
                 raise worker.engine.UpdateFailure("STARTUP_TRIAL_FAILED")
-        with patch.object(worker, "ProcessTree"), patch.object(worker, "port_free", return_value=True), \
+        # Exercise the Windows state machine on macOS too, without executing
+        # Windows processes or depending on host-specific environment constants.
+        with patch.dict(os.environ, {"SystemRoot": str(self.root)}), \
+             patch.object(worker.subprocess, "CREATE_NO_WINDOW", 0, create=True), \
+             patch.object(worker, "ProcessTree"), patch.object(worker, "port_free", return_value=True), \
              patch.object(worker.subprocess, "Popen", return_value=Mock(wait=lambda **_kwargs: 0)), \
              patch.object(worker, "start_application", return_value=trial) as start, \
              patch.object(worker, "wait_trial", side_effect=wait_trial), patch.object(worker, "stop_trial") as stop, \
