@@ -114,6 +114,9 @@ jobs:
             fi
           done
           python -m venv --system-site-packages .venv
+          CI_TOOLS_BIN="$(python tests/prepare-macos-ci-tools.py)"
+          export PATH="$CI_TOOLS_BIN:$PATH"
+          printf '%s\n' "$CI_TOOLS_BIN" >> "$GITHUB_PATH"
           bash scripts/build-macos-desktop.sh
       - name: Real macOS signed update, native app swap and Pi restart
         if: runner.os == 'macOS'

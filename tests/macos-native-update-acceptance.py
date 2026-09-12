@@ -7,11 +7,13 @@ The actual release app/programs are not changed. No model request is made.
 import argparse
 import base64
 import ctypes
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import secrets
 import shutil
 import signal
@@ -21,6 +23,7 @@ import sys
 import time
 import zipfile
 from unittest.mock import patch
+from urllib.request import ProxyHandler, build_opener
 
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
@@ -48,6 +51,48 @@ def port_free():
     with socket.socket() as stream:
         stream.settimeout(0.3)
         return stream.connect_ex(('127.0.0.1', 8765)) != 0
+
+
+def process_tree():
+    lines = subprocess.check_output(['/bin/ps', '-axo', 'pid=,ppid=,pgid='], text=True).splitlines()
+    return {int(pid): (int(parent), int(group)) for pid, parent, group in (line.split() for line in lines)}
+
+
+def normal_core_ready(root):
+    opener = build_opener(ProxyHandler({}))
+    try:
+        with opener.open('http://127.0.0.1:8765/api/health', timeout=2) as response:
+            health = json.loads(response.read(4096))
+        require(health['status'] == 'ok' and health['profile_id'] == 'sales-director'
+                and re.fullmatch('[a-f0-9]{64}', health['desktop_startup_token']), 'Unexpected health identity')
+        with opener.open('http://127.0.0.1:8765/api/desktop-settings', timeout=2) as response:
+            core = json.loads(response.read(128 * 1024))
+        if core.get('status') != 'idle':
+            return None
+        log = (root / '.pi/director-runtime/desktop-launcher.log').read_text()
+        native_pid = int(re.findall(r'\[desktop pid=(\d+)\] AI core launcher started', log)[-1])
+        tree = process_tree()
+        for path in (root / '.pi/director-runtime/agent-leases').glob('*.json'):
+            lease = engine.read_json(path, 65536)
+            pid = lease['pid']
+            if lease.get('profile_id') != 'sales-director' or lease.get('model_error') or lease.get('task_id'):
+                continue
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(lease['heartbeat_at'].replace('Z', '+00:00'))).total_seconds()
+            if not 0 <= age < 10 or pid not in tree:
+                continue
+            cursor = pid
+            for _ in range(8):
+                cursor = tree.get(cursor, (0, 0))[0]
+                if cursor == native_pid:
+                    # This fresh normal lease is absent during the paused trial;
+                    # it proves the Python launch/doctor/provider branch ran.
+                    return {'native_pid': native_pid, 'core_pid': pid, 'nonce': lease['nonce'],
+                            'heartbeat': lease['heartbeat_at'], 'startup_token': health['desktop_startup_token']}
+                if cursor <= 1:
+                    break
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+    return None
 
 
 def bundle_copy(source, target, version=None):
@@ -78,6 +123,23 @@ def stop_synthetic_apps(home, helper):
             continue
         try:
             require(os.getpgid(pid) == pid, 'Synthetic app lacks owned process group')
+            os.kill(pid, signal.SIGSTOP)
+            tree = process_tree()
+            descendants = {pid}
+            for _ in range(64):
+                extended = descendants | {child for child, (parent, _) in tree.items() if parent in descendants}
+                if extended == descendants:
+                    break
+                descendants = extended
+            # Normal runtime children have their own groups, unlike the trial.
+            # Stop only groups whose leader is in this exact stopped app tree.
+            for child in sorted(descendants - {pid}, reverse=True):
+                if child in tree and tree[child][1] == child:
+                    try:
+                        if os.getpgid(child) == child:
+                            os.killpg(child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
             os.killpg(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
@@ -210,12 +272,22 @@ def run_case(base, app_source):
         for name, value in canaries.items():
             require((root / name).read_bytes() == value, 'User canary changed')
         wait_for(lambda: not port_free(), 60, 'Fresh normal application did not restart')
+        first_core = wait_for(lambda: normal_core_ready(root), 90,
+                              'Fresh normal Python/doctor/Pi launch did not become ready')
+        wait_for(lambda: (value if (value := normal_core_ready(root))
+                    and value['native_pid'] == first_core['native_pid'] and value['core_pid'] == first_core['core_pid']
+                    and value['nonce'] == first_core['nonce'] and value['startup_token'] == first_core['startup_token']
+                    and value['heartbeat'] > first_core['heartbeat'] else None), 20,
+                 'Normal core did not maintain a fresh heartbeat')
+        for name, value in canaries.items():
+            require((root / name).read_bytes() == value, 'User canary changed after normal restart')
         require(engine.runtime_fingerprint(root) == baseline['fingerprint'], 'Preserved runtime dependencies changed')
         report = {'status': 'passed', 'version': version, 'real_native_app_swap': True,
                   'real_signed_prepare': True, 'real_workbench_and_pi_trial': True,
-                  'finder_minimal_path': True, 'fresh_normal_restart': True, 'data_canaries_unchanged': True,
+                  'finder_minimal_path': True, 'fresh_normal_restart': True, 'fresh_normal_core_heartbeat': True,
+                  'data_canaries_unchanged': True, 'previous_runtime': 'same-build synthetic 0.0.0 baseline',
                   'dependency_fingerprint_unchanged': True, 'transport': 'local signed fixture',
-                  'confirmation': 'explicit CI fixture', 'model_requests': 0}
+                  'confirmation': 'explicit CI fixture', 'model_prompt_sent': False}
         engine.write_json(base / 'acceptance.json', report)
         print(json.dumps(report), flush=True)
     finally:
