@@ -269,12 +269,24 @@
               <label class="wechat-consent"><input id="wechat-ownership" type="checkbox"><span>我确认这是本人账号，且有权处理所选聊天内容</span></label>
               <button id="choose-wechat-export" class="primary" type="button">选择导出文件</button>
             </div>
-            <p class="safety-note">默认不读取微信进程；自动取钥须另行明确授权并选择进程。不扫描微信目录、不修改原数据库、不保存密钥。数据库解密暂存用完即清理，异常中断的暂存 30 分钟后在下次访问时清理；结构化副本和索引原文固定保留 7 天后自动清理。</p>
+            <p class="safety-note">目录检索只列出文件信息；点击“复制数据库”才读取源文件，复制不取钥、不解析。点击“解析已复制数据库”只处理已复制批次；自动取钥仍须另行授权并选择进程。输入副本固定保留 30 分钟（到期后在下次访问时清理），可主动清除；解析失败可重试同一批副本。解密输出每次处理后立即清除，密钥不保存。结构化副本和索引原文固定保留 7 天。原库不修改。</p>
             <details id="wxdecipher-console" class="wxdecipher-console" open>
               <summary>从数据库副本导入 <span class="hint">手动／自动取钥 · WAL 离线重放</span></summary>
               <p class="hint">添加同一账号的 message_0.db 等消息库；可继续添加 contact.db、session.db、message_resource.db，补全会话名和发送者。可直接导入明文 SQLite；需要日志中的新消息时，一并选择同快照的 message_0.db-wal 等同名文件。最多 16 个主库及其 16 个 WAL，单个 256 兆字节、合计 1 吉字节。</p>
-              <div class="form-actions"><button id="wxdecipher-add-files" type="button" class="secondary">添加数据库副本</button><button id="wxdecipher-clear-files" type="button" class="secondary" disabled>清空选择</button><span id="wxdecipher-file-count" class="hint">尚未选择数据库</span></div>
+              <div class="form-actions wxdecipher-database-actions"><button id="wxdecipher-auto-discover" type="button" class="primary">自动检索</button><button id="wxdecipher-add-files" type="button" class="secondary">直接选择数据库文件</button><button id="wxdecipher-clear-files" type="button" class="secondary" disabled>清空选择</button><span id="wxdecipher-file-count" class="hint">尚未选择数据库</span></div>
+              <div class="wxdecipher-directory">
+                <label for="wxdecipher-directory-path">手动指定聊天记录位置</label>
+                <div class="form-actions"><input id="wxdecipher-directory-path" type="text" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="粘贴微信账号文件夹的完整路径" aria-describedby="wxdecipher-directory-hint"><button id="wxdecipher-directory-search" type="button" class="secondary">检索此目录</button></div>
+                <p id="wxdecipher-directory-hint" class="hint">填写微信账号文件夹即可，工作台会继续查找 db_storage 等子目录中的消息库、联系人库及配对 WAL。</p>
+              </div>
+              <div id="wxdecipher-discovery" class="wxdecipher-discovery" hidden>
+                <label>检索到的账号目录<select id="wxdecipher-discovery-group" aria-label="检索到的微信账号目录"></select></label>
+                <button id="wxdecipher-discovery-add" type="button" class="secondary">添加此账号数据库</button>
+                <button id="wxdecipher-discovery-dismiss" type="button" class="secondary">关闭结果</button>
+                <p id="wxdecipher-discovery-detail" class="hint"></p>
+              </div>
               <ul id="wxdecipher-files" class="wxdecipher-files" aria-label="已选择的数据库"></ul>
+              <div class="form-actions"><button id="wxdecipher-storage-setup" type="button" class="secondary">申请专用数据目录</button><span class="hint">支持自选目录：先复制数据库及配对 WAL，再单独解析；解析重试不重新复制。</span></div>
               <div class="wxdecipher-fields">
                 <label>通用密钥（可选）<input id="wxdecipher-key" type="password" maxlength="64" autocomplete="off" spellcheck="false" placeholder="64 位十六进制；明文数据库留空"></label>
                 <label>本人微信 ID（必填，不是昵称）<input id="wxdecipher-self-id" maxlength="128" autocomplete="off" required placeholder="wxid_…，作为稳定账号标识"></label>
@@ -285,8 +297,9 @@
               <label class="wechat-consent"><input id="wxdecipher-wal-confirm" type="checkbox"><span>允许在新副本中重放所选 WAL 的最后有效提交；损坏、旧世代或未提交尾部可能被忽略，并在结果中告知。</span></label>
               <label class="wechat-consent"><input id="wxdecipher-capture-confirm" type="checkbox"><span>允许本次自动取数据库密钥（实验性）：只读所选微信进程，不提权、不注入、不暂停；仅使用与所选副本匹配的密钥，不显示或保存。兼容性未在本机真实微信上验证。</span></label>
               <div class="form-actions wxdecipher-process-actions"><button id="wxdecipher-process-refresh" type="button" class="secondary" disabled>列出可选微信进程</button><select id="wxdecipher-process" aria-label="明确选择本次取钥的微信进程" disabled><option value="">请先授权并列出进程</option></select></div>
-              <div class="form-actions"><button id="wxdecipher-run" type="button" class="primary" disabled>校验、解密并导入</button><span id="wxdecipher-dependencies" class="hint"></span></div>
-              <div id="wxdecipher-status" class="wxdecipher-status" role="status" aria-live="polite">选择数据库后，勾选副本确认即可开始。不会自动读取本机微信。</div>
+              <div class="form-actions"><button id="wxdecipher-copy" type="button" class="primary" disabled>1. 复制数据库</button><button id="wxdecipher-run" type="button" class="primary" disabled>2. 解析已复制数据库</button><button id="wxdecipher-clear-copy" type="button" class="secondary" disabled>清除副本／重新选择</button><span id="wxdecipher-dependencies" class="hint"></span></div>
+              <p id="wxdecipher-copy-info" class="hint" role="status" aria-live="polite">尚未复制。复制阶段不需要密钥，完成后再单独解析。</p>
+              <div id="wxdecipher-status" class="wxdecipher-status" role="status" aria-live="polite">选择数据库并确认账号和静态副本后，先复制，再解析。不会自动读取本机微信。</div>
             </details>
             <details id="wxdecipher-media-console" class="wxdecipher-console">
               <summary>媒体副本恢复 <span class="hint">本地解码、预览和下载 · 不交给模型</span></summary>

@@ -140,7 +140,7 @@ class WxDecipherHttpTests(unittest.TestCase):
     def test_unsupported_user_isolation_rejects_sensitive_routes_before_body(self):
         with patch("ui.server.wechat_http_supported", return_value=False), \
                 patch.object(server.wxdecipher.wxdecipher_capture, "list_processes", side_effect=AssertionError("No enumeration")):
-            for route in ("processes", "sessions", "capture-consent", "media", "run"):
+            for route in ("processes", "sessions", "capture-consent", "discover", "import-discovered", "media", "run"):
                 status, result = self.request("/api/wechat/decipher/" + route, body=b"")
                 self.assertEqual(403, status, result)
                 self.assertEqual("LOCAL_ISOLATION_UNSUPPORTED", result["code"])
@@ -169,6 +169,50 @@ class WxDecipherHttpTests(unittest.TestCase):
             status, _ = self.request("/api/wechat/export", {"format": invalid, "conversation_ids": []})
             self.assertEqual(400, status)
 
+    def test_database_discovery_routes_require_token_and_forward_only_json_payloads(self):
+        response = {"platform": "windows", "platform_label": "Windows", "groups": [], "message": "synthetic"}
+        with patch.object(server.wxdecipher, "discover_databases", return_value=response) as discover:
+            status, result = self.request("/api/wechat/decipher/discover", {"ownership_confirmed": True})
+            self.assertEqual(200, status, result)
+            self.assertEqual("windows", result["platform"])
+            discover.assert_called_once_with({"ownership_confirmed": True})
+        with patch.object(server.wxdecipher, "discover_databases", side_effect=AssertionError("must not scan without token")):
+            status, _ = self.request("/api/wechat/decipher/discover", {"ownership_confirmed": True}, token=False)
+            self.assertEqual(403, status)
+
+        imported = {"file_count": 2, "bytes": 8192, "message": "synthetic"}
+        payload = {"session_id": "wxdecipher-" + "a" * 32, "candidate_ids": ["b" * 32],
+                   "ownership_confirmed": True, "snapshot_confirmed": True}
+        with patch.object(server.wxdecipher, "import_discovered_databases", return_value=imported) as import_selected:
+            status, result = self.request("/api/wechat/decipher/import-discovered", payload)
+            self.assertEqual(201, status, result)
+            import_selected.assert_called_once_with(self.root, payload)
+
+    def test_storage_permission_plan_and_grant_require_local_auth_and_confirmation(self):
+        from agent_platform import wechat_storage as storage
+        base = self.root / "private-user-store"
+        with patch.object(storage, "_private_base", return_value=base):
+            for route in ("plan", "grant"):
+                status, _ = self.request("/api/wechat/storage/" + route, token=False)
+                self.assertEqual(403, status)
+            selected = self.root / "custom-data"
+            status, result = self.request("/api/wechat/storage/plan", {"directory": str(selected)})
+            self.assertEqual(200, status, result)
+            self.assertEqual(str(selected), result["directory"])
+            self.assertFalse(base.exists())
+            self.assertFalse(selected.exists())
+            token = result["confirmation_token"]
+            status, _ = self.request("/api/wechat/storage/grant", {"confirmation_token": token})
+            self.assertEqual(400, status)
+            self.assertFalse(base.exists())
+            status, result = self.request("/api/wechat/storage/grant", {"confirmation_token": token, "confirmed": True})
+            self.assertEqual(200, status, result)
+            self.assertTrue(result["configured"])
+            self.assertEqual(str(selected), result["directory"])
+            session = self.create()
+            self.assertTrue((Path(result["directory"]) / "decipher" / session).is_dir())
+            self.request("/api/wechat/decipher/discard", {"session_id": session})
+
     def test_bad_key_returns_generic_error_and_removes_plaintext_staging(self):
         cipher = encrypt_fixture(self.source, self.root / "bad.db")
         session = self.create(); self.upload(session, cipher)
@@ -179,6 +223,26 @@ class WxDecipherHttpTests(unittest.TestCase):
         self.assertFalse((self.root / "data/wechat/decipher" / session).exists())
         status, _ = self.request("/api/wechat/decipher/discard", {"session_id": session})
         self.assertEqual(200, status)
+
+    def test_copy_and_parse_are_separate_authenticated_operations(self):
+        status, _ = self.request("/api/wechat/decipher/finish-copy", token=False)
+        self.assertEqual(403, status)
+        status, copied = self.request("/api/wechat/decipher/sessions", {"ownership_confirmed": True,
+            "snapshot_confirmed": True, "self_username": SELF, "retain_copies": True})
+        self.assertEqual(201, status)
+        session = copied["session_id"]
+        self.upload(session, self.source)
+        status, result = self.request("/api/wechat/decipher/run", {"session_id": session})
+        self.assertEqual("COPY_INCOMPLETE", result["code"])
+        status, _ = self.request("/api/wechat/decipher/finish-copy", {"session_id": session, "file_count": 1})
+        self.assertEqual(200, status)
+        for _ in range(2):
+            status, result = self.request("/api/wechat/decipher/run", {"session_id": session})
+            self.assertEqual(200, status, result)
+            self.assertEqual(3, result["decipher"]["messages"])
+            self.assertTrue(Path(copied["working_directory"]).is_dir())
+        self.request("/api/wechat/decipher/discard", {"session_id": session})
+        self.assertFalse(Path(copied["working_directory"]).exists())
 
     def test_discard_endpoint_cannot_escape_session_root(self):
         keep = self.root / "keep.db"; keep.write_bytes(b"keep")

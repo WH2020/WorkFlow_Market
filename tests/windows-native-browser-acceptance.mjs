@@ -81,6 +81,8 @@ try {
   await page.locator("#wxdecipher-self-id").fill(fixture.self_id);
   await page.locator("#wxdecipher-snapshot").check();
   await page.locator("#wxdecipher-file-input").setInputFiles(fixture.database);
+  await page.locator("#wxdecipher-copy").click();
+  await page.locator("#wxdecipher-status").filter({ hasText: "复制完成，尚未解析" }).waitFor();
   await page.locator("#wxdecipher-key").fill("ff".repeat(32));
   await page.locator("#wxdecipher-run").click();
   await page.locator("#wxdecipher-status.error").waitFor();
@@ -99,7 +101,12 @@ try {
   const exportPath = join(output, "synthetic-export.jsonl");
   await download.saveAs(exportPath);
   assert.equal((await readFile(exportPath, "utf8")).trim().split("\n").length, 3);
+  await page.locator("#wxdecipher-clear-copy").click();
+  await page.getByRole("button", { name: "清除副本", exact: true }).click();
+  await page.locator("#wxdecipher-status").filter({ hasText: "已清除本批副本" }).waitFor();
   await page.locator("#wxdecipher-file-input").setInputFiles([fixture.wal_database, fixture.wal]);
+  await page.locator("#wxdecipher-copy").click();
+  await page.locator("#wxdecipher-status").filter({ hasText: "复制完成，尚未解析" }).waitFor();
   await page.locator("#wxdecipher-wal-confirm").check();
   await page.locator("#wxdecipher-key").fill(fixture.key);
   await page.locator("#wxdecipher-run").click();
@@ -115,6 +122,9 @@ try {
   await mediaDownload.saveAs(mediaPath);
   assert.deepEqual(await readFile(mediaPath), await readFile(fixture.media_plain));
   assert.equal(await page.locator("#wechat-model-sharing").isChecked(), false);
+  await page.locator("#wxdecipher-clear-copy").click();
+  await page.getByRole("button", { name: "清除副本", exact: true }).click();
+  await page.locator("#wxdecipher-status").filter({ hasText: "已清除本批副本" }).waitFor();
   assert.equal((await readdir(join(root, "data/wechat/decipher"))).length, 0);
   assert.equal(requests.filter(({ method, path }) => method === "POST" && /task|scopes|model|sales/.test(path)).length, 0);
   assert.equal(requests.filter(({ path }) => path.endsWith("/processes")).length, 0);

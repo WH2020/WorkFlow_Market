@@ -59,7 +59,7 @@
     rows: [], selected: new Set(), selectedId: "", messages: [], revision: "", renderedKey: "",
     loading: false, loaded: false, error: "", previewLoading: false, previewGeneration: 0, creating: false,
   };
-  const wxdecipherState = { files: [], busy: false, exporting: false, captureLoading: false };
+  const wxdecipherState = { files: [], busy: false, exporting: false, captureLoading: false, discoveryLoading: false, storageLoading: false, discoveryGroups: [], discoveryPlatform: "" };
   const wxmediaState = { busy: false, urls: [] };
   const customerState = {
     filters: { query: "", owner: "", region: "", industry: "", stage: "", health: "", updated: "" },
@@ -3793,24 +3793,130 @@
   }
 
   function renderWxDecipherControls() {
-    const busy = wxdecipherState.busy || wxdecipherState.captureLoading;
+    const busy = wxdecipherState.busy || wxdecipherState.captureLoading || wxdecipherState.discoveryLoading || wxdecipherState.storageLoading;
     const unavailable = model?.wechat?.http_available === false;
     const blocked = busy || unavailable;
     $("choose-wechat-export").disabled = unavailable;
     $("wxdecipher-media-choose").disabled = unavailable || wxmediaState.busy;
-    $("wxdecipher-run").disabled = blocked || !wxdecipherState.files.length || !$("wechat-ownership").checked || !$("wxdecipher-snapshot").checked;
-    $("wxdecipher-run").textContent = busy ? "正在本机处理…" : "校验、解密并导入";
-    $("wxdecipher-add-files").disabled = blocked;
-    $("wxdecipher-clear-files").disabled = busy || !wxdecipherState.files.length;
+    const copied = wxdecipherState.copied;
+    const sourceBlocked = blocked || Boolean(copied);
+    $("wxdecipher-copy").disabled = sourceBlocked || !wxdecipherState.files.length || !$("wechat-ownership").checked || !$("wxdecipher-snapshot").checked;
+    $("wxdecipher-clear-copy").disabled = blocked || !copied;
+    $("wxdecipher-run").disabled = blocked || !copied || Date.now() >= copied.expiresAt || !$("wechat-ownership").checked || !$("wxdecipher-snapshot").checked;
+    $("wxdecipher-run").textContent = busy ? "正在本机处理…" : "2. 解析已复制数据库";
+    $("wxdecipher-copy-info").textContent = copied ? `已复制 ${copied.fileCount} 个文件：${copied.directory}\n到期时间：${new Date(copied.expiresAt).toLocaleTimeString()}。解析不会重新复制原库；更新文件前请先清除副本。` : "尚未复制。先复制数据库，再单独解析；复制阶段不需要密钥。";
+    $("wxdecipher-add-files").disabled = sourceBlocked;
+    $("wxdecipher-storage-setup").disabled = sourceBlocked;
+    $("wxdecipher-storage-setup").textContent = wxdecipherState.storageLoading ? "正在申请…" : "申请专用数据目录";
+    const discovery = model?.wechat?.decipher?.database_discovery;
+    $("wxdecipher-directory-path").disabled = sourceBlocked;
+    $("wxdecipher-directory-search").disabled = sourceBlocked || discovery?.available !== true;
+    $("wxdecipher-directory-path").placeholder = discovery?.platform === "macos"
+      ? "/Users/你的用户名/…/微信账号文件夹" : "例如 E:\\software\\wechat\\xwechat_files\\wxid_…";
+    $("wxdecipher-auto-discover").disabled = sourceBlocked || discovery?.available !== true;
+    $("wxdecipher-auto-discover").textContent = wxdecipherState.discoveryLoading
+      ? "正在检索…" : `${discovery?.platform_label || "当前平台"}自动检索`;
+    $("wxdecipher-auto-discover").title = discovery?.available === false ? "当前平台暂未支持自动检索，请使用手动检索" : "只检索常见微信目录中的兼容数据库文件元数据";
+    $("wxdecipher-discovery-group").disabled = blocked;
+    $("wxdecipher-discovery-add").disabled = sourceBlocked || !wxdecipherState.discoveryGroups.length;
+    $("wxdecipher-discovery-dismiss").disabled = busy;
+    $("wxdecipher-clear-files").disabled = sourceBlocked || !wxdecipherState.files.length;
     ["wxdecipher-key", "wxdecipher-self-id", "wxdecipher-cipher-mode", "wxdecipher-snapshot", "wxdecipher-wal-confirm", "wxdecipher-capture-confirm"].forEach((id) => { $(id).disabled = blocked; });
+    $("wxdecipher-self-id").disabled = sourceBlocked;
+    $("wechat-account").disabled = sourceBlocked;
+    $("wechat-ownership").disabled = busy;
     const captureAllowed = $("wxdecipher-capture-confirm").checked && $("wechat-ownership").checked && model?.wechat?.decipher?.key_capture !== false;
     $("wxdecipher-process-refresh").disabled = blocked || !captureAllowed;
     $("wxdecipher-process").disabled = blocked || !captureAllowed;
-    $("wxdecipher-files").querySelectorAll("input,button").forEach((item) => { item.disabled = blocked; });
+    $("wxdecipher-files").querySelectorAll("input,button").forEach((item) => { item.disabled = blocked || (Boolean(copied) && item.tagName === "BUTTON"); });
     $("wxdecipher-console")?.setAttribute("aria-busy", String(busy));
     const capability = model?.wechat?.decipher;
     $("wxdecipher-dependencies").textContent = unavailable ? "当前平台的本机用户隔离尚未就绪，微信工具暂不开放。" : capability?.decrypt_available === false
       ? "加密库需要安装 requirements-wxdecipher.txt；明文 SQLite 可直接导入。" : "逐页校验 · 任一失败即停止整批导入";
+  }
+
+  function renderWxDatabaseDiscovery() {
+    const panel = $("wxdecipher-discovery");
+    const groups = wxdecipherState.discoveryGroups;
+    panel.hidden = !groups.length;
+    $("wxdecipher-discovery-group").replaceChildren(...groups.map((group) => {
+      const option = document.createElement("option");
+      const total = group.files.reduce((sum, file) => sum + file.bytes, 0);
+      option.value = group.group_id;
+      option.textContent = `${group.label} · ${group.files.length} 个 · ${(total / 1024 / 1024).toFixed(1)} MB`;
+      return option;
+    }));
+    if (groups.length) {
+      const truncated = groups.some((group) => group.truncated);
+      $("wxdecipher-discovery-detail").textContent = `请选择一个账号目录再添加；不会混合不同账号。结果 10 分钟内有效。${truncated ? "部分目录文件超过单批上限，已优先列出联系人、会话和消息数据库。" : ""}`;
+    } else {
+      $("wxdecipher-discovery-detail").textContent = "";
+    }
+    renderWxDecipherControls();
+  }
+
+  function appendWxDecipherEntries(incoming, successMessage) {
+    if (wxdecipherState.copied || wxdecipherState.busy) { wxDecipherStatus("请先清除已复制批次，再修改数据库选择。", true); return false; }
+    const candidate = [...wxdecipherState.files];
+    for (const entry of incoming) {
+      const file = entry.file;
+      if (!/\.(db|sqlite|sqlite3)(?:-wal)?$/iu.test(file.name) || file.size < (/-wal$/iu.test(file.name) ? 0 : 512) || file.size > 256 * 1024 * 1024) {
+        wxDecipherStatus("只接受 .db / .sqlite / .sqlite3 主库及同名 -wal 副本；主库至少 512 字节，单个文件不超过 256 兆字节。", true); return false;
+      }
+      if (candidate.some((selected) => selected.file.name.toLowerCase() === file.name.toLowerCase())) {
+        wxDecipherStatus(`已选择同名文件 ${file.name}；本批次不能重复或混合多个账号。`, true); return false;
+      }
+      candidate.push({ ...entry, key: "" });
+    }
+    if (candidate.length > 32 || candidate.filter((entry) => !/-wal$/iu.test(entry.file.name)).length > 16 || candidate.reduce((sum, entry) => sum + entry.file.size, 0) > 1024 * 1024 * 1024) {
+      wxDecipherStatus("每次最多 16 个主库及其 16 个 WAL，合计不超过 1 吉字节。", true); return false;
+    }
+    wxdecipherState.files = candidate;
+    renderWxDecipherFiles();
+    wxDecipherStatus(successMessage);
+    return true;
+  }
+
+  async function discoverWxDatabases(directory) {
+    if (wxdecipherState.busy || wxdecipherState.discoveryLoading || wxdecipherState.copied) return;
+    if (!$("wechat-ownership").checked) {
+      wxDecipherStatus("请先确认这是本人账号且有权检索本机微信数据库。", true); return;
+    }
+    if (typeof directory === "string" && !directory.trim()) {
+      wxDecipherStatus("请先填写聊天记录所在文件夹的完整路径。", true); return;
+    }
+    const payload = { ownership_confirmed: true };
+    if (typeof directory === "string") payload.directory = directory.trim();
+    wxdecipherState.discoveryLoading = true;
+    renderWxDecipherControls();
+    wxDecipherStatus(typeof directory === "string" ? "正在检索指定文件夹及其子目录中的数据库…" : "正在按当前系统检索常见微信目录；只读取文件名、大小和修改时间…");
+    try {
+      const result = await api("/api/wechat/decipher/discover", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload) });
+      wxdecipherState.discoveryGroups = Array.isArray(result.groups) ? result.groups : [];
+      wxdecipherState.discoveryPlatform = result.platform_label || "当前平台";
+      renderWxDatabaseDiscovery();
+      wxDecipherStatus(`${result.message}${result.scan_truncated ? " 检索已达到安全范围上限，可改用手动检索。" : ""}`, !wxdecipherState.discoveryGroups.length);
+    } catch (error) {
+      wxdecipherState.discoveryGroups = [];
+      renderWxDatabaseDiscovery();
+      wxDecipherStatus(error.message || "自动检索失败，请使用手动检索。", true);
+    } finally {
+      wxdecipherState.discoveryLoading = false;
+      renderWxDecipherControls();
+    }
+  }
+
+  function addDiscoveredWxDatabases() {
+    const group = wxdecipherState.discoveryGroups.find((item) => item.group_id === $("wxdecipher-discovery-group").value);
+    if (!group) { wxDecipherStatus("请选择一个自动检索到的账号目录。", true); return; }
+    const incoming = group.files.map((file) => ({
+      file: { name: file.name, size: file.bytes }, candidateId: file.candidate_id, origin: group.label,
+    }));
+    if (appendWxDecipherEntries(incoming, `已添加 ${group.files.length} 个自动检索结果，尚未读取数据库内容。请退出微信或确认文件保持静止后再导入。`)) {
+      wxdecipherState.discoveryGroups = [];
+      renderWxDatabaseDiscovery();
+    }
   }
 
   function renderWxDecipherFiles() {
@@ -3819,7 +3925,7 @@
       ? `已选 ${wxdecipherState.files.length} 个 · ${(total / 1024 / 1024).toFixed(1)} 兆字节` : "尚未选择数据库";
     $("wxdecipher-files").replaceChildren(...wxdecipherState.files.map((entry) => {
       const row = document.createElement("li");
-      const name = document.createElement("span"); name.textContent = `${entry.file.name} · ${(entry.file.size / 1024 / 1024).toFixed(1)} MB`;
+      const name = document.createElement("span"); name.textContent = `${entry.file.name} · ${(entry.file.size / 1024 / 1024).toFixed(1)} MB${entry.origin ? ` · ${entry.origin}` : " · 手动"}`;
       const isWal = /-wal$/iu.test(entry.file.name);
       const key = document.createElement(isWal ? "span" : "input"); key.type = "password"; key.maxLength = 64; key.autocomplete = "off";
       if (isWal) key.textContent = "WAL · 使用配对主库的密钥";
@@ -3828,10 +3934,103 @@
       key.oninput = () => { entry.key = key.value; };
       const remove = document.createElement("button"); remove.type = "button"; remove.className = "secondary";
       remove.textContent = "移除"; remove.setAttribute("aria-label", `移除 ${entry.file.name}`);
-      remove.onclick = () => { entry.key = ""; wxdecipherState.files = wxdecipherState.files.filter((item) => item !== entry); renderWxDecipherFiles(); };
+      remove.onclick = () => { if (wxdecipherState.busy || wxdecipherState.copied) return; entry.key = ""; wxdecipherState.files = wxdecipherState.files.filter((item) => item !== entry); renderWxDecipherFiles(); };
       row.append(name, key, remove); return row;
     }));
     renderWxDecipherControls();
+  }
+
+  async function requestWxStorageAccess() {
+    if (wxdecipherState.busy || wxdecipherState.storageLoading || wxdecipherState.copied) return;
+    wxdecipherState.storageLoading = true;
+    renderWxDecipherControls();
+    try {
+      let plan = await api("/api/wechat/storage/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const selected = await confirmAction({ title: "自选专用数据目录", message: `当前建议位置：${plan.directory}\n\n可保留此位置，或粘贴其他专用目录的完整路径。上级文件夹须已存在，目标须为空或尚未创建，并通过私有权限检查。导入时先复制数据库，再解析副本，不修改微信原库。`, inputLabel: "专用数据目录（可修改）", inputValue: plan.directory, inputMaxLength: 4096, confirmText: "检查并继续" });
+      if (selected === false || selected === null) { wxDecipherStatus("已取消目录设置，未更改当前数据位置。"); return; }
+      const directory = String(selected).trim();
+      if (!directory) { wxDecipherStatus("请填写专用数据目录的完整路径。", true); return; }
+      if (directory !== plan.directory) plan = await api("/api/wechat/storage/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ directory }) });
+      if (plan.configured) { wxDecipherStatus(`${plan.message}：${plan.directory}`); return; }
+      const confirmed = await confirmAction({ title: "确认专用数据目录", message: `${plan.message}\n\n创建位置：${plan.directory}\n\n输入数据库副本保留 30 分钟供单独解析及重试，可主动清除；派生的解密输出每次处理后清除。结构化副本和索引原文保留 7 天。确认后创建并检查权限，设置重启后仍然有效。`, confirmText: "允许创建" });
+      if (!confirmed) { wxDecipherStatus("已取消目录授权，未更改当前数据位置。"); return; }
+      const result = await api("/api/wechat/storage/grant", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed: true, confirmation_token: plan.confirmation_token }) });
+      wxDecipherStatus(`${result.message} 当前目录：${result.directory}`);
+      await load();
+    } catch (error) {
+      wxDecipherStatus(error.message || "专用目录创建失败，请检查当前用户目录的访问权限。", true);
+    } finally {
+      wxdecipherState.storageLoading = false;
+      renderWxDecipherControls();
+    }
+  }
+
+  async function copyWxDatabases() {
+    if (wxdecipherState.busy || wxdecipherState.copied || wxdecipherState.storageLoading) return;
+    if (!$("wechat-ownership").checked || !$("wxdecipher-snapshot").checked || !wxdecipherState.files.length) {
+      wxDecipherStatus("请先选择数据库，并确认账号权限和静态副本。", true); return;
+    }
+    const selfUsername = $("wxdecipher-self-id").value.trim();
+    if (!/^[\w.@-]{1,128}$/u.test(selfUsername)) { wxDecipherStatus("请先填写本人微信 ID，再复制数据库。", true); return; }
+    const files = wxdecipherState.files.map((entry) => entry.file);
+    const names = new Set(files.filter((file) => !/-wal$/iu.test(file.name)).map((file) => file.name.toLowerCase()));
+    if (!names.size || files.some((file) => /-wal$/iu.test(file.name) && !names.has(file.name.slice(0, -4).toLowerCase()))) {
+      wxDecipherStatus("每个 WAL 必须有同批次同名主库。", true); return;
+    }
+    wxdecipherState.busy = true; renderWxDecipherControls();
+    let sessionId = ""; let needsStoragePermission = false;
+    try {
+      const session = await api("/api/wechat/decipher/sessions", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ownership_confirmed: true, snapshot_confirmed: true, retain_copies: true,
+          account_label: $("wechat-account").value.trim() || "本机微信", self_username: selfUsername }) });
+      sessionId = session.session_id;
+      const directory = session.working_directory || "本次专用暂存目录";
+      const candidateIds = wxdecipherState.files.filter((entry) => entry.candidateId).map((entry) => entry.candidateId);
+      if (candidateIds.length) {
+        wxDecipherStatus(`正在自动复制 ${candidateIds.length} 个数据库文件。\n目标位置：${directory}\n此步骤不解析、不取钥。`);
+        await api("/api/wechat/decipher/import-discovered", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, candidate_ids: candidateIds, ownership_confirmed: true, snapshot_confirmed: true }) });
+      }
+      const manual = wxdecipherState.files.filter((entry) => !entry.candidateId);
+      for (let index = 0; index < manual.length; index++) {
+        wxDecipherStatus(`正在复制 ${index + 1}/${manual.length}：${manual[index].file.name}\n目标位置：${directory}\n此步骤不解析、不取钥。`);
+        await api("/api/wechat/decipher/upload", { method: "POST", headers: {
+          "Content-Type": "application/octet-stream", "X-WXDecipher-Session": sessionId,
+          "X-File-Name": encodeURIComponent(manual[index].file.name) }, body: manual[index].file });
+      }
+      const ready = await api("/api/wechat/decipher/finish-copy", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, file_count: files.length }) });
+      wxdecipherState.copied = { sessionId, directory: ready.working_directory || directory,
+        fileCount: files.length, expiresAt: Date.now() + ready.expires_in_seconds * 1000 };
+      sessionId = "";
+      wxDecipherStatus("复制完成，尚未解析。现在可填写密钥，或单独授权取钥，然后点击“解析已复制数据库”。解析失败可直接重试副本，不再读取原库。副本 30 分钟到期；刷新或关闭页面后无法在本页继续操作该批次。");
+    } catch (error) {
+      wxDecipherStatus(error.message || "复制失败，尚未开始解析。", true);
+      needsStoragePermission = error.code === "UNSAFE_PATH";
+    } finally {
+      if (sessionId) {
+        try { await api("/api/wechat/decipher/discard", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId }) }); }
+        catch { wxDecipherStatus($("wxdecipher-status").textContent + "\n未确认部分副本清理；到期后会重试清理。", true); }
+      }
+      wxdecipherState.busy = false; renderWxDecipherControls();
+    }
+    if (needsStoragePermission) await requestWxStorageAccess();
+  }
+
+  async function clearWxCopiedDatabases() {
+    if (wxdecipherState.busy || !wxdecipherState.copied) return;
+    const copied = wxdecipherState.copied;
+    const confirmed = await confirmAction({ title: "清除本批数据库副本", message: "仅清除专用目录中的本批数据库副本，不删除微信原库或已导入的聊天索引。更新数据库前需要重新检索并复制。", confirmText: "清除副本" });
+    if (!confirmed || wxdecipherState.busy || wxdecipherState.copied !== copied) return;
+    wxdecipherState.busy = true; renderWxDecipherControls();
+    try {
+      await api("/api/wechat/decipher/discard", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: wxdecipherState.copied.sessionId }) });
+      wxdecipherState.copied = null; wxdecipherState.files = []; wxdecipherState.discoveryGroups = [];
+      $("wxdecipher-key").value = ""; $("wxdecipher-capture-confirm").checked = false; $("wxdecipher-process").value = "";
+      renderWxDatabaseDiscovery(); wxDecipherStatus("已清除本批副本。请重新检索或选择文件，再复制最新数据库。");
+    } catch (error) { wxDecipherStatus(error.message || "副本清理失败，请重试。", true); }
+    finally { wxdecipherState.busy = false; renderWxDecipherFiles(); }
   }
 
   async function runWxDecipher() {
@@ -3839,6 +4038,9 @@
     if (!$("wechat-ownership").checked || !$("wxdecipher-snapshot").checked || !wxdecipherState.files.length) {
       wxDecipherStatus("请先选择数据库，并确认账号权限和静态副本。", true); return;
     }
+    const copied = wxdecipherState.copied;
+    if (!copied) { wxDecipherStatus("请先点击“复制数据库”，复制完成后才能解析。", true); return; }
+    if (Date.now() >= copied.expiresAt) { wxDecipherStatus("本批副本已到期，请清除后重新复制。", true); return; }
     const key = $("wxdecipher-key").value.trim();
     const fileKeys = Object.fromEntries(wxdecipherState.files.filter((entry) => entry.key?.trim()).map((entry) => [entry.file.name, entry.key.trim()]));
     if ([key, ...Object.values(fileKeys)].some((value) => value && !/^[0-9a-f]{64}$/iu.test(value))) {
@@ -3868,28 +4070,16 @@
     $("wxdecipher-key").value = "";
     wxdecipherState.files.forEach((entry) => { entry.key = ""; });
     wxdecipherState.busy = true; renderWxDecipherFiles();
-    let sessionId = "";
+    const sessionId = copied.sessionId;
     try {
-      wxDecipherStatus("正在创建本机数据库导入会话…");
-      const session = await api("/api/wechat/decipher/sessions", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ownership_confirmed: true, snapshot_confirmed: true, account_label: accountLabel, self_username: selfUsername }) });
-      sessionId = session.session_id;
-      for (let index = 0; index < files.length; index++) {
-        wxDecipherStatus(`正在上传本机副本 ${index + 1}/${files.length}：${files[index].name}。暂未导入消息。`);
-        await api("/api/wechat/decipher/upload", { method: "POST", headers: {
-          "Content-Type": "application/octet-stream", "X-WXDecipher-Session": sessionId,
-          "X-File-Name": encodeURIComponent(files[index].name),
-        }, body: files[index] });
-      }
       if (autoCapture) {
         const consent = await api("/api/wechat/decipher/capture-consent", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: sessionId, ...autoCapture }) });
         autoCapture.consent_token = consent.consent_token;
       }
-      wxDecipherStatus("正在校验密钥、逐页解密和检查数据库，再转换为会话。大数据库需要一些时间，请勿重复提交。");
+      wxDecipherStatus(`正在解析已复制数据库。\n副本位置：${copied.directory}\n只读取副本，不重新复制或解析原库。`);
       const result = await api("/api/wechat/decipher/run", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sessionId, key, file_keys: fileKeys, cipher_mode: cipherMode, wal_replay_confirmed: walConfirmed, auto_capture: autoCapture }) });
-      sessionId = "";
       $("wxdecipher-capture-confirm").checked = false;
       $("wxdecipher-process").value = "";
       const report = result.decipher || {};
@@ -3897,18 +4087,15 @@
         ...(report.key_capture ? [`本次自动匹配 ${report.key_capture.verified_databases} 个数据库密钥（实验性兼容扫描；不代表其他版本已验证）。`] : []),
         ...(report.databases || []).filter((item) => item.wal).map((item) => `${item.source_name}：WAL 恢复 ${item.wal.applied_pages} 个页，取至第 ${item.wal.committed_frames} 个已提交帧。`),
         ...(report.warnings || [])].join("\n"));
-      wxdecipherState.files = [];
       wechatState.loaded = false; wechatState.revision = ""; wechatState.selected.clear(); wechatState.selectedId = ""; wechatState.messages = [];
       $("wechat-date-from").value = ""; $("wechat-date-to").value = ""; $("wechat-query").value = ""; $("wechat-chat-type").value = "";
       $("wechat-model-sharing").checked = false;
       await load();
     } catch (error) {
       wxDecipherStatus(error.message || "数据库处理失败；未自动调用模型。", true);
+      if (["NOT_FOUND", "INVALID_ID"].includes(error.code)) copied.expiresAt = 0;
+      wxDecipherStatus($("wxdecipher-status").textContent + "\n未重新复制原库。副本未到期时可填写密钥或重新授权取钥后重试；更新文件请先清除副本。", true);
     } finally {
-      if (sessionId) {
-        try { await api("/api/wechat/decipher/discard", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionId }) }); }
-        catch { wxDecipherStatus($("wxdecipher-status").textContent + "\n暂存清理未确认，工作台将在会话到期后重试清理。", true); }
-      }
       $("wxdecipher-capture-confirm").checked = false;
       $("wxdecipher-process").value = "";
       wxdecipherState.busy = false; renderWxDecipherFiles();
@@ -3960,7 +4147,7 @@
         option.textContent = `${item.name} · PID ${item.process_id}${details ? ` · ${details}` : ""}`; select.append(option);
       }
       select.value = "";
-      wxDecipherStatus(`${result.message}\n${result.processes?.length ? "请选择一个进程；点击导入后才会读取内存。" : "没有可选进程；请保持本人微信登录并使用普通用户工作台，或手动提供密钥。"}`);
+      wxDecipherStatus(`${result.message}\n${result.processes?.length ? "请选择一个进程；点击解析后才会读取内存，复制阶段不会取钥。" : "没有可选进程；请保持本人微信登录并使用普通用户工作台，或手动提供密钥。"}`);
     } catch (error) { wxDecipherStatus(error.message, true); }
     finally { wxdecipherState.captureLoading = false; renderWxDecipherControls(); }
   }
@@ -5387,34 +5574,31 @@
     if (!$("wechat-ownership").checked) { note("请先确认这是本人账号且有权处理的聊天内容。", true); return; }
     $("wechat-file-input").click();
   };
+  $("wxdecipher-auto-discover").onclick = () => discoverWxDatabases();
+  $("wxdecipher-directory-search").onclick = () => discoverWxDatabases($("wxdecipher-directory-path").value);
+  $("wxdecipher-directory-path").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); $("wxdecipher-directory-search").click(); }
+  });
   $("wxdecipher-add-files").onclick = () => $("wxdecipher-file-input").click();
+  $("wxdecipher-discovery-add").onclick = addDiscoveredWxDatabases;
+  $("wxdecipher-discovery-dismiss").onclick = () => { wxdecipherState.discoveryGroups = []; renderWxDatabaseDiscovery(); wxDecipherStatus("已关闭自动检索结果；未读取或复制数据库内容。"); };
   $("wxdecipher-file-input").onchange = () => {
     if (wxdecipherState.busy) return;
     const incoming = [...($("wxdecipher-file-input").files || [])];
     $("wxdecipher-file-input").value = "";
     if (!incoming.length) return;
-    const candidate = [...wxdecipherState.files];
-    for (const file of incoming) {
-      if (!/\.(db|sqlite|sqlite3)(?:-wal)?$/iu.test(file.name) || file.size < (/-wal$/iu.test(file.name) ? 0 : 512) || file.size > 256 * 1024 * 1024) {
-        wxDecipherStatus("只接受 .db / .sqlite / .sqlite3 主库及同名 -wal 副本；主库至少 512 字节，单个文件不超过 256 兆字节。", true); return;
-      }
-      if (candidate.some((entry) => entry.file.name.toLowerCase() === file.name.toLowerCase())) {
-        wxDecipherStatus(`已选择同名文件 ${file.name}；本批次不能重复或混合多个账号。`, true); return;
-      }
-      candidate.push({ file, key: "" });
-    }
-    if (candidate.length > 32 || candidate.filter((entry) => !/-wal$/iu.test(entry.file.name)).length > 16 || candidate.reduce((sum, entry) => sum + entry.file.size, 0) > 1024 * 1024 * 1024) {
-      wxDecipherStatus("每次最多 16 个主库及其 16 个 WAL，合计不超过 1 吉字节。", true); return;
-    }
-    wxdecipherState.files = candidate; renderWxDecipherFiles();
-    wxDecipherStatus("文件已选择，尚未上传或解密。可继续添加联系人/会话库，再提供密钥并确认副本。");
+    appendWxDecipherEntries(incoming.map((file) => ({ file })), "文件已手动选择，尚未上传或解密。可继续添加联系人/会话库，再提供密钥并确认副本。");
   };
   $("wxdecipher-clear-files").onclick = () => {
+    if (wxdecipherState.busy || wxdecipherState.copied) return;
     wxdecipherState.files.forEach((entry) => { entry.key = ""; });
     wxdecipherState.files = []; $("wxdecipher-key").value = "";
     renderWxDecipherFiles(); wxDecipherStatus("已清空选择，未改动原始文件。");
   };
   $("wxdecipher-run").onclick = runWxDecipher;
+  $("wxdecipher-storage-setup").onclick = requestWxStorageAccess;
+  $("wxdecipher-copy").onclick = copyWxDatabases;
+  $("wxdecipher-clear-copy").onclick = clearWxCopiedDatabases;
   $("wxdecipher-process-refresh").onclick = refreshWxProcesses;
   $("wxdecipher-capture-confirm").addEventListener("change", () => { if (!$("wxdecipher-capture-confirm").checked) $("wxdecipher-process").value = ""; renderWxDecipherControls(); });
   $("wxdecipher-media-choose").onclick = () => {

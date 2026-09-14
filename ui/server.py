@@ -3551,19 +3551,34 @@ class ControlHandler(SimpleHTTPRequestHandler):
             payload = self.body(limit=65_536) if route == "/api/chat/messages" else self.body()
             if route in {"/api/chat/messages", "/api/chat/cancel", "/api/chat/close"}:
                 self.handle_free_chat(route, payload)
-            elif route in {"/api/wechat/decipher/sessions", "/api/wechat/decipher/run", "/api/wechat/decipher/discard", "/api/wechat/decipher/processes", "/api/wechat/decipher/capture-consent", "/api/wechat/export"}:
+            elif route in {"/api/wechat/decipher/sessions", "/api/wechat/decipher/run", "/api/wechat/decipher/discard", "/api/wechat/decipher/finish-copy", "/api/wechat/decipher/processes", "/api/wechat/decipher/capture-consent", "/api/wechat/decipher/discover", "/api/wechat/decipher/import-discovered", "/api/wechat/storage/plan", "/api/wechat/storage/grant", "/api/wechat/export"}:
                 if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
                     raise WechatStoreError("PROFILE_FORBIDDEN", "微信会话功能只在销售总监版本中提供")
                 if route == "/api/wechat/decipher/sessions":
                     self.send_json(HTTPStatus.CREATED, wxdecipher.create_session(ROOT, payload))
                 elif route == "/api/wechat/decipher/run":
                     self.send_json(HTTPStatus.OK, wxdecipher.run_session(ROOT, payload))
+                elif route == "/api/wechat/decipher/finish-copy":
+                    self.send_json(HTTPStatus.OK, wxdecipher.finish_copy(ROOT, payload))
                 elif route == "/api/wechat/decipher/discard":
                     self.send_json(HTTPStatus.OK, wxdecipher.discard_session(ROOT, payload.get("session_id", "")))
                 elif route == "/api/wechat/decipher/processes":
                     self.send_json(HTTPStatus.OK, wxdecipher.wxdecipher_capture.list_processes(payload))
                 elif route == "/api/wechat/decipher/capture-consent":
                     self.send_json(HTTPStatus.CREATED, wxdecipher.issue_capture_consent(ROOT, payload))
+                elif route == "/api/wechat/decipher/discover":
+                    self.send_json(HTTPStatus.OK, wxdecipher.discover_databases(payload))
+                elif route == "/api/wechat/decipher/import-discovered":
+                    self.send_json(HTTPStatus.CREATED, wxdecipher.import_discovered_databases(ROOT, payload))
+                elif route == "/api/wechat/storage/plan":
+                    from agent_platform.wechat_storage import permission_plan
+                    self.send_json(HTTPStatus.OK, permission_plan(ROOT, payload))
+                elif route == "/api/wechat/storage/grant":
+                    from agent_platform.wechat_storage import grant_permission
+                    from agent_platform.wechat_store import _DATABASE_OPEN_LOCK
+                    with wxdecipher._locked(), _DATABASE_OPEN_LOCK:
+                        result = grant_permission(ROOT, payload)
+                    self.send_json(HTTPStatus.OK, result)
                 else:
                     self.send_json(HTTPStatus.OK, export_wechat_selection(ROOT, payload))
             elif route == "/api/task-requests":

@@ -10,6 +10,17 @@
 .wxdecipher-console > summary { cursor: pointer; color: #263d57; font-size: 14px; font-weight: 750; }
 .wxdecipher-console > summary .hint { margin-left: 10px; font-weight: 400; }
 .wxdecipher-console > p { margin-top: 12px; line-height: 1.65; }
+.wxdecipher-database-actions { align-items: center; }
+.wxdecipher-directory { margin-top: 14px; }
+.wxdecipher-directory > label { color: #4f5d70; font-size: 12px; font-weight: 700; }
+.wxdecipher-directory input { flex: 1 1 260px; min-width: 0; padding: 9px 10px; border: 1px solid #c5cfdd; border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.wxdecipher-directory input:focus-visible { outline: 3px solid #5b87bb55; outline-offset: 2px; }
+.wxdecipher-directory p { margin: 6px 0; line-height: 1.6; }
+.wxdecipher-discovery { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; align-items: end; gap: 10px; margin-top: 12px; padding: 12px; border: 1px solid #d7e2ec; border-radius: 9px; background: #fff; }
+.wxdecipher-discovery[hidden] { display: none; }
+.wxdecipher-discovery label { display: grid; gap: 6px; color: #4f5d70; font-size: 12px; font-weight: 700; }
+.wxdecipher-discovery select { min-width: 0; width: 100%; padding: 9px 10px; border: 1px solid #c5cfdd; border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.wxdecipher-discovery p { grid-column: 1 / -1; margin: 0; line-height: 1.6; }
 .wxdecipher-files { display: grid; gap: 8px; margin: 12px 0; padding: 0; list-style: none; }
 .wxdecipher-files li { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid #e0e7ee; border-radius: 8px; background: #fff; }
 .wxdecipher-files li > span { color: #41546a; font-size: 12px; overflow-wrap: anywhere; }
@@ -25,6 +36,7 @@
 .wxdecipher-snapshot { margin-top: 14px; max-width: 920px; }
 .wxdecipher-status { margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: #edf4f8; color: #39576c; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.7; }
 .wxdecipher-status.error { background: #fff1f0; color: #9b343d; border: 1px solid #edc4c4; }
+#wxdecipher-copy-info { white-space: pre-wrap; overflow-wrap: anywhere; }
 .wxdecipher-export { padding-top: 16px; border-top: 1px solid #e5ebf2; }
 .wxdecipher-export label { font-size: 12px; font-weight: 700; color: #4f5d70; }
 .wxdecipher-export select { width: auto; max-width: 100%; font-size: 12px; }
@@ -40,4 +52,6 @@
   .wxdecipher-files li > span { grid-column: 1 / -1; }
   .wxdecipher-fields { grid-template-columns: 1fr; }
   .wxdecipher-media-results { grid-template-columns: 1fr; }
+  .wxdecipher-discovery { grid-template-columns: 1fr; align-items: stretch; }
+  .wxdecipher-discovery p { grid-column: auto; }
 }

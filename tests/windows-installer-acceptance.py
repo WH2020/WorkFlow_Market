@@ -87,7 +87,7 @@ def main() -> None:
     parser.add_argument("--uninstall", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Resume only this explicitly named verification directory after a harness failure")
     args = parser.parse_args()
-    version = "0.20.2"
+    version = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
     identifier = args.verification_id
     target = POLICY.profile_path() / f"Agent4Market-{version}-test-{identifier}"
     assert target == POLICY.target_path(str(target), version, identifier)

@@ -28,8 +28,12 @@ class WxDecipherTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="wxdecipher-test-", dir=Path.home())
         self.root = Path(self.temporary.name)
         self.source = make_database(self.root / "source.db")
+        with wxdecipher._DISCOVERY_LOCK:
+            wxdecipher._DISCOVERY_TOKENS.clear()
 
     def tearDown(self):
+        with wxdecipher._DISCOVERY_LOCK:
+            wxdecipher._DISCOVERY_TOKENS.clear()
         self.temporary.cleanup()
 
     def create_session(self, account="合成测试", self_username=SELF):
@@ -59,6 +63,128 @@ class WxDecipherTests(unittest.TestCase):
                 with open_readonly(destination) as connection:
                     self.assertEqual(3, connection.execute(f'SELECT count(*) FROM "{table_for(CLIENT)}"').fetchone()[0])
         self.assertEqual(before, (self.source.read_bytes(), self.source.stat().st_mtime_ns))
+
+    def copied_session(self, source=None):
+        session = wxdecipher.create_session(self.root, {"ownership_confirmed": True, "snapshot_confirmed": True,
+            "self_username": SELF, "retain_copies": True})["session_id"]
+        self.upload(session, source)
+        wxdecipher.finish_copy(self.root, {"session_id": session, "file_count": 1})
+        return session, wxdecipher._session_path(self.root, session)
+
+    def test_split_copy_seals_complete_batch_without_parsing_or_keys(self):
+        with patch.object(wxdecipher, "decrypt_database", side_effect=AssertionError("must not decrypt")), patch.object(
+                wxdecipher.wxdecipher_capture, "capture_keys", side_effect=AssertionError("must not capture")):
+            session, path = self.copied_session()
+        self.assertTrue(wxdecipher._read_session(path)["copy_ready"])
+        with self.assertRaises(WechatStoreError) as raised:
+            self.upload(session, name="contact.db")
+        self.assertEqual("COPY_SEALED", raised.exception.code)
+        self.assertEqual(1, len(wxdecipher._read_session(path)["files"]))
+
+    def test_split_parse_failure_retries_same_copies_without_source_and_cleans_plaintext(self):
+        cipher = encrypt_fixture(self.source, self.root / "encrypted.db")
+        session, path = self.copied_session(cipher)
+        data = wxdecipher._read_session(path)
+        original = (path / data["files"][0]["stored_name"]).read_bytes()
+        cipher.unlink()
+        with self.assertRaises(WechatStoreError):
+            wxdecipher.run_session(self.root, {"session_id": session, "key": "ff" * 32})
+        self.assertTrue(path.is_dir())
+        self.assertEqual({"session.json", data["files"][0]["stored_name"]}, {entry.name for entry in path.iterdir()})
+        for _ in range(2):
+            result = wxdecipher.run_session(self.root, {"session_id": session, "key": KEY_HEX})
+            self.assertEqual(3, result["decipher"]["messages"])
+            self.assertEqual(original, (path / data["files"][0]["stored_name"]).read_bytes())
+            self.assertEqual(data["created_at"], wxdecipher._read_session(path)["created_at"])
+            self.assertEqual({"session.json", data["files"][0]["stored_name"]}, {entry.name for entry in path.iterdir()})
+        self.assertEqual(3, wechat_store.dashboard(self.root)["message_count"])
+        wxdecipher.discard_session(self.root, session)
+        self.assertFalse(path.exists())
+        self.assertEqual(3, wechat_store.dashboard(self.root)["message_count"])
+
+    def test_split_conversion_failure_removes_outputs_and_capture_consent(self):
+        session, path = self.copied_session()
+        data = wxdecipher._read_session(path)
+        data["capture_consent"] = {"synthetic": True}
+        wxdecipher._save_session(path, data)
+        with patch.object(wxdecipher, "convert_databases", side_effect=WechatStoreError("SYNTHETIC", "conversion failed")):
+            with self.assertRaises(WechatStoreError):
+                wxdecipher.run_session(self.root, {"session_id": session})
+        self.assertNotIn("capture_consent", wxdecipher._read_session(path))
+        self.assertFalse((path / "plain-0.db").exists())
+        self.assertEqual(3, wxdecipher.run_session(self.root, {"session_id": session})["decipher"]["messages"])
+
+    def test_split_incomplete_copy_and_expiry_never_parse(self):
+        session = wxdecipher.create_session(self.root, {"ownership_confirmed": True, "snapshot_confirmed": True,
+            "self_username": SELF, "retain_copies": True})["session_id"]
+        self.upload(session)
+        with self.assertRaises(WechatStoreError) as raised:
+            wxdecipher.finish_copy(self.root, {"session_id": session, "file_count": 2})
+        self.assertEqual("COPY_INCOMPLETE", raised.exception.code)
+        with self.assertRaises(WechatStoreError) as raised:
+            wxdecipher.run_session(self.root, {"session_id": session})
+        self.assertEqual("COPY_INCOMPLETE", raised.exception.code)
+        wxdecipher.finish_copy(self.root, {"session_id": session, "file_count": 1})
+        path = wxdecipher._session_path(self.root, session)
+        created = wxdecipher._read_session(path)["created_at"]
+        with patch.object(wxdecipher.time, "time", return_value=created + wxdecipher.SESSION_TTL + 1):
+            with self.assertRaises(WechatStoreError):
+                wxdecipher.run_session(self.root, {"session_id": session})
+        self.assertFalse(path.exists())
+
+    def test_split_capture_consent_is_not_reusable_after_failed_parse(self):
+        cipher = encrypt_fixture(self.source, self.root / "capture-encrypted.db")
+        session, path = self.copied_session(cipher)
+        capture = {"session_id": session, "confirmed": True, "process_id": 123, "created_at": "456"}
+        ticket = wxdecipher.issue_capture_consent(self.root, capture)
+        request = {"session_id": session, "auto_capture": {**capture, "consent_token": ticket["consent_token"]}}
+        with patch.object(wxdecipher.wxdecipher_capture, "capture_keys", side_effect=WechatStoreError("SYNTHETIC", "capture denied")) as mocked:
+            with self.assertRaises(WechatStoreError):
+                wxdecipher.run_session(self.root, request)
+            self.assertNotIn("capture_consent", wxdecipher._read_session(path))
+            with self.assertRaises(WechatStoreError) as raised:
+                wxdecipher.run_session(self.root, request)
+            self.assertEqual("CAPTURE_CONSENT_REQUIRED", raised.exception.code)
+            self.assertEqual(1, mocked.call_count)
+        self.assertEqual(3, wxdecipher.run_session(self.root, {"session_id": session, "key": KEY_HEX})["decipher"]["messages"])
+
+    def test_split_sealed_batch_survives_discovery_copy_replay(self):
+        source_dir = self.root / "wxid_test"
+        source_dir.mkdir()
+        make_database(source_dir / "message_0.db")
+        discovered = wxdecipher.discover_databases({"ownership_confirmed": True, "directory": str(source_dir)}, platform_name="win32")
+        session = wxdecipher.create_session(self.root, {"ownership_confirmed": True, "snapshot_confirmed": True,
+            "self_username": SELF, "retain_copies": True})["session_id"]
+        payload = {"session_id": session, "ownership_confirmed": True, "snapshot_confirmed": True,
+                   "candidate_ids": [entry["candidate_id"] for group in discovered["groups"] for entry in group["files"]]}
+        wxdecipher.import_discovered_databases(self.root, payload)
+        wxdecipher.finish_copy(self.root, {"session_id": session, "file_count": 1})
+        with self.assertRaises(WechatStoreError) as raised:
+            wxdecipher.import_discovered_databases(self.root, payload)
+        self.assertEqual("COPY_SEALED", raised.exception.code)
+        self.assertTrue(wxdecipher._session_path(self.root, session).exists())
+        self.assertEqual(3, wxdecipher.run_session(self.root, {"session_id": session})["decipher"]["messages"])
+
+    def test_split_cleanup_failure_does_not_hide_success_and_is_retried(self):
+        session, path = self.copied_session()
+        unlink = Path.unlink
+        def fail_plain(selected, *args, **kwargs):
+            if selected.name == "plain-0.db":
+                raise PermissionError("synthetic lock")
+            return unlink(selected, *args, **kwargs)
+        with patch.object(Path, "unlink", fail_plain):
+            result = wxdecipher.run_session(self.root, {"session_id": session})
+            self.assertTrue(result["cleanup_pending"])
+            self.assertEqual(3, result["decipher"]["messages"])
+            self.assertFalse((path / "messages.jsonl").exists())
+            self.assertTrue(wxdecipher._read_session(path)["cleanup_pending"])
+            with self.assertRaises(WechatStoreError) as raised:
+                wxdecipher.run_session(self.root, {"session_id": session})
+            self.assertEqual("CLEANUP_PENDING", raised.exception.code)
+        wxdecipher.cleanup_sessions(self.root)
+        self.assertFalse((path / "plain-0.db").exists())
+        self.assertFalse(wxdecipher._read_session(path)["cleanup_pending"])
+        self.assertEqual(3, wechat_store.dashboard(self.root)["message_count"])
 
     def test_key_validation_and_modes_do_not_echo_keys(self):
         self.assertEqual(KEY, parse_key("  " + KEY_HEX.upper() + "  "))
@@ -347,6 +473,102 @@ w.import_export(sys.argv[1],sys.argv[2],source_name='crash.jsonl',ownership_conf
                 self.create_session()
             self.assertEqual("DECIPHER_BUSY", raised.exception.code)
             self.assertEqual(0, wxdecipher.cleanup_sessions(self.root))
+
+    def test_windows_database_discovery_returns_opaque_group_and_imports_selected_files(self):
+        home = self.root / "user"
+        database_root = home / "Documents" / "xwechat_files" / "wxid_synthetic_account" / "db_storage"
+        (database_root / "message").mkdir(parents=True)
+        (database_root / "contact").mkdir()
+        message = database_root / "message" / "message_0.db"
+        contact = database_root / "contact" / "contact.db"
+        message.write_bytes(self.source.read_bytes())
+        contact.write_bytes(self.source.read_bytes())
+        (database_root / "message" / "ignored.db-shm").write_bytes(b"ignored")
+
+        result = wxdecipher.discover_databases(
+            {"ownership_confirmed": True}, platform_name="win32", home=home,
+            environ={"USERPROFILE": str(home)},
+        )
+        self.assertEqual("windows", result["platform"])
+        self.assertEqual(1, len(result["groups"]))
+        group = result["groups"][0]
+        self.assertEqual({"contact.db", "message_0.db"}, {item["name"] for item in group["files"]})
+        self.assertNotIn(str(home), json.dumps(result, ensure_ascii=False))
+        self.assertTrue(all(len(item["candidate_id"]) == 32 for item in group["files"]))
+
+        session = self.create_session()
+        imported = wxdecipher.import_discovered_databases(self.root, {
+            "session_id": session,
+            "candidate_ids": [item["candidate_id"] for item in group["files"]],
+            "ownership_confirmed": True,
+            "snapshot_confirmed": True,
+        })
+        self.assertEqual(2, imported["file_count"])
+        manifest = wxdecipher._read_session(wxdecipher._session_path(self.root, session))
+        self.assertEqual({"contact.db", "message_0.db"}, {item["source_name"] for item in manifest["files"]})
+        self.assertEqual(self.source.read_bytes(), message.read_bytes(), "Automatic import must not modify the source")
+        wxdecipher.discard_session(self.root, session)
+
+    def test_macos_database_discovery_uses_container_roots_and_rejects_changed_source(self):
+        home = self.root / "mac-user"
+        database_root = home / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data" / "Documents" / "xwechat_files" / "wxid_mac" / "db_storage" / "message"
+        database_root.mkdir(parents=True)
+        source = database_root / "message_0.db"
+        source.write_bytes(self.source.read_bytes())
+        result = wxdecipher.discover_databases(
+            {"ownership_confirmed": True}, platform_name="darwin", home=home, environ={},
+        )
+        self.assertEqual("macos", result["platform"])
+        candidate = result["groups"][0]["files"][0]["candidate_id"]
+        source.write_bytes(source.read_bytes() + b"changed")
+        session = self.create_session()
+        with self.assertRaises(WechatStoreError) as raised:
+            wxdecipher.import_discovered_databases(self.root, {
+                "session_id": session, "candidate_ids": [candidate],
+                "ownership_confirmed": True, "snapshot_confirmed": True,
+            })
+        self.assertEqual("SOURCE_CHANGED", raised.exception.code)
+        self.assertFalse((self.root / "data" / "wechat" / "decipher" / session).exists())
+
+    def test_database_discovery_requires_consent_and_supported_host(self):
+        with patch.object(wxdecipher, "_scan_discovery_roots", side_effect=AssertionError("must not scan")):
+            with self.assertRaises(WechatStoreError) as raised:
+                wxdecipher.discover_databases({}, platform_name="win32", home=self.root, environ={})
+        self.assertEqual("AUTHORIZATION_REQUIRED", raised.exception.code)
+        with self.assertRaises(WechatStoreError) as raised:
+            wxdecipher.discover_databases({"ownership_confirmed": True}, platform_name="linux", home=self.root, environ={})
+        self.assertEqual("DISCOVERY_UNSUPPORTED", raised.exception.code)
+
+    def test_manual_account_directory_discovers_nested_databases_as_one_group(self):
+        account = self.root / "custom location" / "wxid_synthetic_100a"
+        for folder, filename in (("message", "message_0.db"), ("contact", "contact.db")):
+            target = account / "db_storage" / folder / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self.source.read_bytes())
+        wal = account / "db_storage" / "message" / "message_0.db-wal"
+        wal.write_bytes(b"")
+        with patch.object(wxdecipher, "_discovery_roots", side_effect=AssertionError("manual search must only use the selected root")):
+            result = wxdecipher.discover_databases({"ownership_confirmed": True, "directory": '"' + str(account) + '"'}, platform_name="win32")
+        self.assertEqual(1, len(result["groups"]))
+        self.assertEqual({"message_0.db", "message_0.db-wal", "contact.db"}, {file["name"] for file in result["groups"][0]["files"]})
+        self.assertIn("指定目录", result["message"])
+        session = self.create_session()
+        response = wxdecipher.import_discovered_databases(self.root, {
+            "ownership_confirmed": True, "snapshot_confirmed": True, "session_id": session,
+            "candidate_ids": [file["candidate_id"] for file in result["groups"][0]["files"]],
+        })
+        self.assertEqual(3, response["file_count"])
+        wxdecipher.discard_session(self.root, session)
+
+    def test_manual_directory_errors_and_empty_results(self):
+        for value in ("", "relative/folder", str(self.root / "missing"), str(self.source), str(Path(self.root.anchor)), [], "//server/share"):
+            with self.subTest(value=value), self.assertRaises(WechatStoreError) as raised:
+                wxdecipher.discover_databases({"ownership_confirmed": True, "directory": value}, platform_name="win32")
+            self.assertEqual("INVALID_DIRECTORY", raised.exception.code)
+        empty = self.root / "empty-account"
+        empty.mkdir()
+        result = wxdecipher.discover_databases({"ownership_confirmed": True, "directory": str(empty)}, platform_name="darwin")
+        self.assertEqual([], result["groups"])
 
     def test_exports_are_selected_lossless_and_roundtrip_without_duplicates(self):
         self.run_import()

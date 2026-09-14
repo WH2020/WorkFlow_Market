@@ -55,7 +55,11 @@ def _root(project_root: Path | str) -> Path:
 
 def _wechat_root(project_root: Path | str) -> Path:
     from .wechat_privacy import verify_private_directory
+    from .wechat_storage import enrolled_root
     root = _root(project_root)
+    enrolled = enrolled_root(root)
+    if enrolled is not None:
+        return enrolled
     data = root / "data"
     if data.is_symlink() or (data.exists() and (not data.is_dir() or data.resolve() != data.absolute())):
         raise WechatStoreError("UNSAFE_PATH", "应用数据目录必须是普通目录")
@@ -566,7 +570,7 @@ def _copy_raw(project_root: Path, source: Path, batch_id: str, filename: str) ->
                 "CLEANUP_FAILED", "导入失败且本批应用副本未能清除；请检查私有数据目录后重试",
             ) from error
         raise
-    return target.relative_to(project_root).as_posix()
+    return "data/wechat/" + target.relative_to(_wechat_root(project_root)).as_posix()
 
 
 def import_export(
@@ -629,7 +633,7 @@ def import_export(
             }
         batch_id = f"wechat-batch-{uuid.uuid4().hex[:20]}"
         raw_relative = _copy_raw(root, source, batch_id, filename)
-        imported_copy = (root / raw_relative).resolve()
+        imported_copy = (_wechat_root(root) / "imports" / batch_id / filename).resolve()
         copied_digest = hashlib.sha256(imported_copy.read_bytes()).hexdigest()
         if copied_digest != file_sha256:
             raise WechatStoreError("FILE_CHANGED", "微信导出文件在导入期间发生变化，请重新选择")
@@ -749,7 +753,7 @@ def import_export(
     except Exception:
         connection.rollback()
         if raw_relative:
-            raw = root / raw_relative
+            raw = _wechat_root(root) / "imports" / batch_id / filename
             raw.unlink(missing_ok=True)
             try:
                 raw.parent.rmdir()

@@ -51,6 +51,7 @@ try {
         'agent_platform/cli_provider.py',
         'agent_platform/local_http_security.py',
         'agent_platform/wechat_privacy.py',
+        'agent_platform/wechat_storage.py',
         'agent_platform/wxdecipher.py',
         'agent_platform/wxdecipher_capture.py',
         'agent_platform/wxdecipher_crypto.py',
@@ -154,7 +155,7 @@ print('Embedded Python isolation verified')
         $PreviousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
         $env:PYTHONDONTWRITEBYTECODE = '1'
         try {
-            & $PackagePython -B -c $SmokeTest $PackageRoot
+            & $PackagePython -I -B -c $SmokeTest $PackageRoot
         } finally {
             if ($null -eq $PreviousDontWriteBytecode) {
                 Remove-Item Env:PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue

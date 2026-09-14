@@ -20,6 +20,7 @@ class WindowsPackageScriptTests(unittest.TestCase):
             "agent_platform/cli_provider.py",
             "agent_platform/local_http_security.py",
             "agent_platform/wechat_privacy.py",
+            "agent_platform/wechat_storage.py",
             "agent_platform/wxdecipher.py",
             "agent_platform/wxdecipher_capture.py",
             "agent_platform/wxdecipher_crypto.py",
@@ -52,6 +53,7 @@ class WindowsPackageScriptTests(unittest.TestCase):
             "--target $SitePackages",
             "desktop\\python311._pth",
             "Embedded Python isolation verified",
+            "$PackagePython -I -B -c $SmokeTest $PackageRoot",
             "3.11.9:64",
         ):
             self.assertIn(value, SCRIPT)

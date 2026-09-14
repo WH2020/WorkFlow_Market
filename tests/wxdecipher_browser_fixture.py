@@ -61,6 +61,14 @@ def main():
 
         source = make_database(root / "synthetic-plain.db")
         encrypted = encrypt_fixture(source, root / "message_0.db")
+        discovery_home = root / "synthetic-user"
+        discovery_database = discovery_home / "Documents" / "xwechat_files" / "wxid_browser_fixture" / "db_storage" / "message" / "message_0.db"
+        discovery_database.parent.mkdir(parents=True)
+        discovery_database.write_bytes(encrypted.read_bytes())
+        production_discovery = server.wxdecipher.discover_databases
+        server.wxdecipher.discover_databases = lambda payload: production_discovery(
+            payload, platform_name="win32", home=discovery_home, environ={"USERPROFILE": str(discovery_home)},
+        )
         wal_root = root / "wal-fixture"; wal_root.mkdir()
         wal_source, wal_file = sqlite_wal_fixture(wal_root, reserve=True, count=2, conversation="wxid_wal_synthetic_client")
         wal_plain = wal_source.read_bytes()
