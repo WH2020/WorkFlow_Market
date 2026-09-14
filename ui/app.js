@@ -3956,7 +3956,8 @@
       const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "请选择本次取钥的微信进程"; select.append(placeholder);
       for (const item of result.processes || []) {
         const option = document.createElement("option"); option.value = JSON.stringify({ process_id: item.process_id, created_at: item.created_at });
-        option.textContent = `${item.name} · PID ${item.process_id}`; select.append(option);
+        const details = [item.version && `v${item.version}`, item.architecture, item.profile_id].filter(Boolean).join(" · ");
+        option.textContent = `${item.name} · PID ${item.process_id}${details ? ` · ${details}` : ""}`; select.append(option);
       }
       select.value = "";
       wxDecipherStatus(`${result.message}\n${result.processes?.length ? "请选择一个进程；点击导入后才会读取内存。" : "没有可选进程；请保持本人微信登录并使用普通用户工作台，或手动提供密钥。"}`);

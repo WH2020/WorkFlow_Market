@@ -1,11 +1,11 @@
-"""Authenticate Windows loopback HTTP peers before issuing UI capabilities.
+"""Authenticate local loopback HTTP peers before issuing UI capabilities.
 
 Loopback/Host checks and a public bootstrap token do not distinguish local OS
-users. Windows IP Helper supplies the TCP context owner's PID AND creation
-time; the opened process must predate that context and match our token user
-and logon session. No process memory, directories, names or command lines are
-read. This protects against other unprivileged Windows users, not malware
-already running as this OS user, administrators, or trusted-user proxies.
+users. Windows uses IP Helper and process tokens; macOS uses the system
+lsof/libproc view and process identity. Both bind the exact TCP client to the
+same OS user and protect against PID reuse. No process memory, directories,
+names or command lines are read. This does not protect against malware already
+running as this OS user, administrators, or trusted-user proxies.
 
 https://learn.microsoft.com/en-us/windows/win32/api/tcpmib/ns-tcpmib-mib_tcprow_owner_module
 """
@@ -16,6 +16,9 @@ from ctypes import wintypes as wt
 import os
 import socket
 import struct
+import subprocess
+import sys
+from datetime import datetime
 
 
 class LocalAccessError(PermissionError):
@@ -152,13 +155,133 @@ def require_windows_peer(connection, *, api=None) -> None:
 
 
 def require_local_user(connection) -> None:
-    # This native gate is Windows-specific. It does not claim to authenticate
-    # TCP peers on POSIX; the existing non-Windows workbench is unchanged.
+    # Windows uses the native TCP table and process token. macOS uses the
+    # system lsof/libproc view of this one established loopback connection to
+    # prove that the caller belongs to the same local user. Other POSIX
+    # platforms remain closed until an equivalent check is implemented.
     if os.name == "nt":
         require_windows_peer(connection)
+    elif sys.platform == "darwin":
+        require_macos_peer(connection)
+
+
+class _MacPeerAPI:
+    """Read-only mapping from one loopback TCP tuple to its owning process.
+
+    macOS does not expose Windows' TCP-owner table to Python, but its native
+    ``lsof`` build is backed by libproc and reports the PID/UID for an
+    established socket. We query only the exact client port and repeat the
+    lookup around identity checks so a reused PID or changed connection fails
+    closed. No process command line, files or memory are read.
+    """
+
+    LSOF = "/usr/sbin/lsof"
+
+    @staticmethod
+    def _records(output: str) -> list[tuple[int, int]]:
+        records: list[tuple[int, int]] = []
+        current: dict[str, str] = {}
+        for line in output.splitlines():
+            if line.startswith("p") and current:
+                try:
+                    records.append((int(current["p"]), int(current["u"])))
+                except (KeyError, ValueError):
+                    pass
+                current = {}
+            if not line:
+                continue
+            marker, value = line[0], line[1:]
+            if marker in {"p", "u"}:
+                current[marker] = value
+        if current:
+            try:
+                records.append((int(current["p"]), int(current["u"])))
+            except (KeyError, ValueError):
+                pass
+        return records
+
+    def connection_owner(self, client: tuple, server: tuple) -> tuple[int, int, int]:
+        if (len(client) != 2 or len(server) != 2 or client[0] != "127.0.0.1"
+                or server[0] != "127.0.0.1" or not 1 <= client[1] <= 65535
+                or not 1 <= server[1] <= 65535):
+            raise LocalAccessError("工作台仅接受同用户的本机连接")
+        try:
+            result = subprocess.run(
+                [self.LSOF, "-nP", "-a", f"-iTCP@{client[0]}:{client[1]}",
+                 "-sTCP:ESTABLISHED", "-FpcuT"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=2, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise LocalAccessError("无法验证本机连接所属用户") from error
+        if result.returncode != 0:
+            raise LocalAccessError("无法验证本机连接所属用户")
+        records = set(self._records(result.stdout))
+        external = {(pid, uid) for pid, uid in records if pid != os.getpid()}
+        # Unit/in-process clients legitimately share the server PID. A real
+        # WebView has its own process and therefore must be the sole external
+        # owner of the exact client port.
+        selected = external or ({(os.getpid(), os.geteuid())} if (os.getpid(), os.geteuid()) in records else set())
+        if len(selected) != 1:
+            raise LocalAccessError("本机连接身份不唯一，已拒绝访问")
+        pid, uid = selected.pop()
+        return pid, uid, self.process_start(pid)
+
+    @staticmethod
+    def process_start(pid: int) -> int:
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "lstart="],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=1, check=False,
+            )
+            value = result.stdout.strip()
+            if result.returncode != 0 or not value:
+                raise ValueError("missing process start")
+            return int(datetime.strptime(value, "%a %b %d %H:%M:%S %Y").timestamp())
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise LocalAccessError("无法确认本机客户端进程") from error
+
+    @staticmethod
+    def identity(pid: int) -> tuple[int, int]:
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "uid=,lstart="],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=1, check=False,
+            )
+            fields = result.stdout.strip().split(None, 1)
+            if result.returncode != 0 or len(fields) != 2:
+                raise ValueError("missing process identity")
+            return int(fields[0]), int(datetime.strptime(fields[1], "%a %b %d %H:%M:%S %Y").timestamp())
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise LocalAccessError("无法确认本机客户端身份") from error
+
+
+def require_macos_peer(connection, *, api=None) -> None:
+    """Allow only a same-UID macOS process owning this exact loopback socket."""
+    try:
+        client, server = connection.getpeername(), connection.getsockname()
+        if (len(client) != 2 or len(server) != 2 or client[0] != "127.0.0.1"
+                or server[0] != "127.0.0.1" or not 1 <= client[1] <= 65535
+                or not 1 <= server[1] <= 65535):
+            raise LocalAccessError("工作台仅接受同用户的本机连接")
+        api = api or _MacPeerAPI()
+        owner = api.connection_owner(client, server)
+        current_uid, _ = api.identity(os.getpid())
+        selected_uid, selected_start = api.identity(owner[0])
+        if selected_uid != current_uid or selected_uid != owner[1] or selected_start != owner[2]:
+            raise LocalAccessError("请从运行工作台的同一 macOS 用户访问")
+        if api.connection_owner(client, server) != owner:
+            raise LocalAccessError("本机连接身份变化，已拒绝访问")
+    except LocalAccessError:
+        raise
+    except (OSError, ValueError, TypeError, AttributeError, struct.error) as error:
+        raise LocalAccessError("无法验证本机客户端身份，已拒绝访问") from error
 
 
 def wechat_http_supported() -> bool:
-    # Until another platform has an authenticated local transport, do not
-    # expose its chat store/capture/media through a shared TCP listener.
-    return os.name == "nt" and ctypes.sizeof(ctypes.c_void_p) == 8
+    # macOS has the same-UID loopback check above. Automatic key capture still
+    # remains Windows-only; Mac users provide a key for a selected database.
+    return ((os.name == "nt" or sys.platform == "darwin")
+            and ctypes.sizeof(ctypes.c_void_p) == 8)

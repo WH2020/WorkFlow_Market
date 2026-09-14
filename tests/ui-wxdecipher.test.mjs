@@ -179,7 +179,7 @@ test("process listing is not automatic and capture selection is one-use without 
   const captured = [];
   context.api = async (url, options) => {
     captured.push([url, options]);
-    if (url.endsWith("/processes")) return { processes: [{ name: "Weixin.exe", process_id: 123, created_at: "456" }], message: "synthetic" };
+    if (url.endsWith("/processes")) return { processes: [{ name: "微信", process_id: 123, created_at: "456", version: "4.1.13.34", architecture: "arm64", profile_id: "wechat-macos-4.1" }], message: "synthetic" };
     if (url.endsWith("/sessions")) return { session_id: "synthetic" };
     if (url.endsWith("/capture-consent")) return { consent_token: "synthetic-one-use-consent" };
     if (url.endsWith("/run")) return { decipher: { key_capture: { verified_databases: 1 } }, message: "done" };
@@ -187,6 +187,7 @@ test("process listing is not automatic and capture selection is one-use without 
   };
   await context.refreshWxProcesses(); assert.equal(captured.length, 1);
   assert.equal($("wxdecipher-process").value, "", "Process must never be auto-selected");
+  assert.match($("wxdecipher-process").children[1].textContent, /v4\.1\.13\.34 · arm64 · wechat-macos-4\.1/);
   $("wxdecipher-snapshot").checked = true; $("wxdecipher-self-id").value = "wxid_self";
   state.files = [{ file: { name: "message.db", size: 4096 }, key: "" }];
   await context.runWxDecipher(); assert.equal(captured.length, 1);

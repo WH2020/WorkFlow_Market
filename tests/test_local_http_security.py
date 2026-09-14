@@ -8,7 +8,7 @@ import struct
 import subprocess
 import sys
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from agent_platform import local_http_security as security
 
@@ -109,6 +109,38 @@ class LocalHTTPPeerTests(unittest.TestCase):
                 api.connection_owner(("127.0.0.1", 54321), ("127.0.0.1", 8765))
             self.assertLessEqual(api.ip.GetExtendedTcpTable.call_count, 3)
 
+    def test_macos_exact_tuple_and_same_uid_are_required(self):
+        api = Mock()
+        api.connection_owner.side_effect = [(456, 501, 200), (456, 501, 200)]
+        api.identity.side_effect = lambda pid: (501, 100) if pid == 999 else (501, 200)
+        with patch.object(security.os, "getpid", return_value=999):
+            security.require_macos_peer(self.connection(), api=api)
+        self.assertEqual(2, api.connection_owner.call_count)
+
+        for identity in ((500, 200), (501, 201)):
+            api = Mock()
+            api.connection_owner.return_value = (456, 501, 200)
+            api.identity.side_effect = lambda pid, value=identity: (501, 100) if pid == 999 else value
+            with patch.object(security.os, "getpid", return_value=999), self.assertRaises(security.LocalAccessError):
+                security.require_macos_peer(self.connection(), api=api)
+
+    def test_macos_replaced_connection_and_non_loopback_fail_closed(self):
+        api = Mock()
+        api.connection_owner.side_effect = [(456, 501, 200), (457, 501, 200)]
+        api.identity.side_effect = lambda pid: (501, 100) if pid == 999 else (501, 200)
+        with patch.object(security.os, "getpid", return_value=999), self.assertRaises(security.LocalAccessError):
+            security.require_macos_peer(self.connection(), api=api)
+        for peer in (("::1", 54321), ("192.0.2.1", 54321), ("127.0.0.1", 0)):
+            connection = self.connection(); connection.getpeername.return_value = peer
+            with self.assertRaises(security.LocalAccessError):
+                security.require_macos_peer(connection, api=Mock())
+
+    def test_macos_capability_is_enabled_only_for_64_bit_darwin(self):
+        with patch.object(security.sys, "platform", "darwin"), patch.object(security.os, "name", "posix"), patch.object(security.ctypes, "sizeof", return_value=8):
+            self.assertTrue(security.wechat_http_supported())
+        with patch.object(security.sys, "platform", "linux"), patch.object(security.os, "name", "posix"), patch.object(security.ctypes, "sizeof", return_value=8):
+            self.assertFalse(security.wechat_http_supported())
+
     @unittest.skipUnless(os.name == "nt", "native Windows TCP/token API")
     def test_native_windows_api_only_on_test_owned_tcp_child(self):
         self.assertEqual(160, ctypes.sizeof(security._TcpRow))
@@ -128,6 +160,31 @@ class LocalHTTPPeerTests(unittest.TestCase):
             owner = api.connection_owner(accepted.getpeername(), accepted.getsockname())
             self.assertEqual(child.pid, owner[0])
             security.require_windows_peer(accepted, api=api)
+        finally:
+            if accepted is not None: accepted.close()
+            listener.close()
+            if child is not None:
+                try:
+                    child.communicate("quit\n", timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill(); child.communicate(timeout=5)
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS lsof/libproc API")
+    def test_native_macos_api_only_on_test_owned_tcp_child(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        child = accepted = None
+        try:
+            listener.bind(("127.0.0.1", 0)); listener.listen(1); listener.settimeout(10)
+            code = ("import socket,sys; s=socket.create_connection(('127.0.0.1',int(sys.argv[1]))); "
+                    "print('connected',flush=True); sys.stdin.readline(); s.close()")
+            child = subprocess.Popen([sys.executable, "-u", "-c", code, str(listener.getsockname()[1])],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+            accepted, _ = listener.accept()
+            self.assertEqual("connected", child.stdout.readline().strip())
+            owner = security._MacPeerAPI().connection_owner(accepted.getpeername(), accepted.getsockname())
+            self.assertEqual((child.pid, os.geteuid()), owner[:2])
+            security.require_macos_peer(accepted)
         finally:
             if accepted is not None: accepted.close()
             listener.close()

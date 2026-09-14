@@ -361,6 +361,28 @@ class CaptureTests(unittest.TestCase):
             broken = bytearray(data); struct.pack_into("<Q", broken, offset, value)
             with self.assertRaises(WechatStoreError): capture.scan_keys(FakeProcess(broken), {"db": self.page})
 
+    def test_macos_41_wcdb_data_layout_uses_hmac_as_acceptance_oracle(self):
+        data = bytearray(65536); base = 0x10000
+        marker, node, config, blob = base + 64, base + 4096, base + 12288, base + 32768
+        data[64:64 + len(capture.MARKER)] = capture.MARKER
+        struct.pack_into("<QQQ", data, node - base + 0x10, marker, len(capture.MARKER), 0x8000000000000020)
+        struct.pack_into("<Q", data, node - base + 0x28, config)
+        data_offset = 0x98
+        struct.pack_into("<QQQ", data, config - base + data_offset, 0xDEADBEEF, blob, len(KEY))
+        data[blob - base:blob - base + len(KEY)] = KEY
+        process = FakeProcess(data)
+        process.supports_wcdb_x64_layout = True
+        process.capture_layout = "darwin-wcdb-4.1"
+        process.capture_metadata = {"profile_id": "wechat-macos-4.1", "version": "4.1.13.34"}
+        keys, report = capture.scan_keys(process, {"db": self.page})
+        self.assertEqual(KEY_HEX, keys["db"])
+        self.assertEqual(["experimental-wcdb-darwin-4.1"], report["methods"])
+        self.assertEqual("wechat-macos-4.1", report["profile_id"])
+        wrong = bytearray(data); wrong[blob - base] ^= 0xFF
+        broken = FakeProcess(wrong); broken.supports_wcdb_x64_layout = True; broken.capture_layout = "darwin-wcdb-4.1"
+        with self.assertRaises(WechatStoreError):
+            capture.scan_keys(broken, {"db": self.page})
+
     def test_short_reads_timeout_budget_and_header_mismatch_fail_without_keys(self):
         data = ("before x'" + KEY_HEX + "' after").encode()
         with self.assertRaises(WechatStoreError): capture.scan_keys(FakeProcess(data, changing=True), {"db": self.page})
@@ -485,7 +507,7 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(attributes & {"WriteProcessMemory", "VirtualProtectEx", "CreateRemoteThread", "OpenThread",
                                        "AdjustTokenPrivileges", "NtSuspendProcess", "SuspendThread", "MiniDumpWriteDump"})
 
-    @unittest.skipUnless(capture.available(), "requires Windows x64, only reads a test-created helper")
+    @unittest.skipUnless(os.name == "nt" and capture.available(), "requires Windows x64, only reads a test-created helper")
     def test_native_windows_read_of_our_own_helper_only(self):
         helper_path = Path(__file__).with_name("wxdecipher_capture_helper.py")
         child = subprocess.Popen([sys.executable, str(helper_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -513,6 +535,57 @@ class CaptureTests(unittest.TestCase):
                     with capture._WindowsProcess(child.pid, str(int(description["created_at"]) + 1)): pass
                 self.assertEqual("CAPTURE_PROCESS_CHANGED", raised.exception.code)
             self.assertIsNone(selected.handle)
+        finally:
+            if child.poll() is None:
+                child.communicate("done\n", timeout=5)
+
+    @unittest.skipUnless(sys.platform == "darwin" and capture.available(), "requires macOS 64-bit")
+    def test_native_macos_mach_reader_on_test_process(self):
+        payload = ctypes.create_string_buffer(("synthetic-only x'" + KEY_HEX + "' end").encode())
+        api = capture._DarwinAPI()
+        info = api.process_info(os.getpid())
+        with patch.object(capture, "ALLOWED_IMAGES", {Path(info["path"]).name.casefold()}):
+            selected = capture._DarwinProcess(os.getpid(), info["created_at"])
+            with selected as process:
+                raw = process.read(ctypes.addressof(payload), ctypes.sizeof(payload))
+                self.assertIn(KEY_HEX.encode(), raw)
+                process.regions = lambda: [(ctypes.addressof(payload), ctypes.sizeof(payload), 0x20000)]
+                keys, report = capture.scan_keys(process, {"db": self.page})
+                self.assertEqual(KEY_HEX, keys["db"])
+                self.assertEqual("wechat-macos-unknown", report["profile_id"])
+            self.assertEqual(0, selected.task)
+
+    @unittest.skipUnless(sys.platform == "darwin" and capture.available(), "requires macOS 64-bit")
+    def test_native_macos_read_of_our_own_helper_only(self):
+        helper_path = Path(__file__).with_name("wxdecipher_capture_helper.py")
+        child = subprocess.Popen(
+            [sys.executable, str(helper_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            line = child.stdout.readline()
+            self.assertTrue(line, child.stderr.read() if child.poll() is not None else "helper did not start")
+            description = json.loads(line)
+            self.assertEqual(child.pid, description["pid"])
+            with patch.object(capture, "ALLOWED_IMAGES", {description["image_name"].casefold()}):
+                selected = capture._DarwinProcess(child.pid, description["created_at"])
+                try:
+                    with selected as process:
+                        raw = process.read(description["address"], description["length"])
+                        self.assertIn(KEY_HEX.encode(), raw)
+                        process.regions = lambda: [(description["address"], description["length"], 0x20000)]
+                        keys, report = capture.scan_keys(process, {"db": self.page})
+                        self.assertEqual(KEY_HEX, keys["db"])
+                        self.assertEqual(1, report["verified_databases"])
+                except WechatStoreError as error:
+                    if error.code == "CAPTURE_DENIED":
+                        self.skipTest("macOS task policy denied the test-created helper")
+                    raise
+                with self.assertRaises(WechatStoreError) as raised:
+                    with capture._DarwinProcess(child.pid, str(int(description["created_at"]) + 1)):
+                        pass
+                self.assertEqual("CAPTURE_PROCESS_CHANGED", raised.exception.code)
+            self.assertEqual(0, selected.task)
         finally:
             if child.poll() is None:
                 child.communicate("done\n", timeout=5)
