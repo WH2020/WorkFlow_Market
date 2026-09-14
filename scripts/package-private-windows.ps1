@@ -76,7 +76,7 @@ try {
     )
     foreach ($Relative in $Files) {
         $Included = $Relative -match '^(agent_platform|profiles|vertical_plugins|pi|plugin/market-director-copilot)/' -or
-            $Relative -match '^ui/(server.py|app.js|index.html|styles.css|wxdecipher.css)$' -or
+            $Relative -match '^ui/(server.py|app.js|index.html|styles.css|wxdecipher.css|free-chat.js|free-chat.css)$' -or
             $Relative -match '^scripts/(start-windows.ps1|coding-agent.ps1)$' -or
             $Relative -match '^library/templates/' -or
             $Relative -match '^data/.+\.example\.(csv|json)$' -or

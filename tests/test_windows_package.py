@@ -41,6 +41,7 @@ class WindowsPackageScriptTests(unittest.TestCase):
         self.assertIn("\\.(db|sqlite|sqlite3)(-wal|-shm)?$", SCRIPT)
         self.assertIn("'^data/.+\\.example\\.(csv|json)$'", SCRIPT)
         self.assertIn("'LICENSE'", SCRIPT)
+        self.assertIn("wxdecipher.css|free-chat.js|free-chat.css", SCRIPT)
 
     def test_embedded_python_is_hash_pinned_and_installed_without_a_venv(self) -> None:
         for value in (
