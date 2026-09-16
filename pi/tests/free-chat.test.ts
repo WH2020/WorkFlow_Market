@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { CHAT_SYSTEM, endpointFetch, runChatTurn, type ChatInput, type ChatEvent } from "../extensions/free-chat.ts";
 import type { CliBackend } from "../extensions/cli-model-provider.ts";
+
+test("free-chat transport loads with the real Pi extension loader aliases", async () => {
+  const require = createRequire(import.meta.resolve("@earendil-works/pi-coding-agent"));
+  const manifestPath = require.resolve("jiti/package.json");
+  const staticEntry = JSON.parse(readFileSync(manifestPath, "utf8")).exports["./static"].import;
+  const { createJiti } = await import(new URL(staticEntry, pathToFileURL(manifestPath)).href);
+  const compat = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/compat"));
+  const loader = createJiti(import.meta.url, { moduleCache: false, alias: {
+    "@earendil-works/pi-ai/compat": compat, "@earendil-works/pi-ai": compat,
+  } });
+  const module = await loader.import(fileURLToPath(new URL("../extensions/free-chat.ts", import.meta.url)));
+  assert.equal(typeof module.runChatTurn, "function");
+  assert.equal(typeof module.endpointFetch, "function");
+});
 
 function input(): ChatInput {
   return { model: { id: "synthetic-model", name: "Fixture", provider: "fixture", api: "openai-completions", baseUrl: "https://fixture.invalid/v1",

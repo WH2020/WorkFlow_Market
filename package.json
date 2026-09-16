@@ -20,8 +20,11 @@
   ],
   "scripts": {
     "check:types": "tsc --noEmit",
+    "test:business-library": "python -m unittest tests.test_business_library tests.test_business_library_api && node --test tests/library-context.test.ts",
+    "test:business-library-browser": "node tests/ui-business-library-browser.mjs",
     "test:ui-models": "node --test tests/ui-model-settings.test.mjs",
     "test:ui-wxdecipher": "node --test tests/ui-wxdecipher.test.mjs",
+    "test:wechat-batching": "node --test pi/tests/wechat-batching.test.ts pi/tests/wechat-review-model.test.ts pi/tests/data-adapters.test.ts tests/ui-wechat-review.test.mjs",
     "test:ui-wxdecipher-browser": "node tests/ui-wxdecipher-browser.mjs",
     "test:provider-e2e": "node --test pi/tests/provider-transport-e2e.test.mjs",
     "test:cli-providers": "node --test pi/tests/cli-model-provider.test.ts pi/tests/cli-provider-e2e.test.mjs",

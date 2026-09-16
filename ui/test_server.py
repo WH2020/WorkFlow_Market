@@ -12,6 +12,23 @@ from ui import server
 
 
 class ControlCentreTests(unittest.TestCase):
+    def test_wechat_storage_snapshot_is_gated_by_platform_and_profile(self):
+        for supported, profile in ((False, "sales-director"), (True, "market-director")):
+            with self.subTest(supported=supported, profile=profile), \
+                 patch.object(server, "wechat_http_supported", return_value=supported), \
+                 patch.object(server, "ACTIVE_PROFILE_ID", profile), \
+                 patch("agent_platform.wechat_storage.storage_status") as status:
+                self.assertEqual(server.wechat_storage_snapshot()["status"], "unavailable")
+                status.assert_not_called()
+
+    def test_wechat_storage_snapshot_passes_only_the_current_project_to_read_only_status(self):
+        expected = {"status": "configured", "configured": True, "directory": "synthetic-store"}
+        with patch.object(server, "wechat_http_supported", return_value=True), \
+             patch.object(server, "ACTIVE_PROFILE_ID", "sales-director"), \
+             patch("agent_platform.wechat_storage.storage_status", return_value=expected) as status:
+            self.assertEqual(server.wechat_storage_snapshot(), expected)
+            status.assert_called_once_with(server.ROOT)
+
     def test_a4_json_media_type_is_checked_before_business_dispatch(self):
         routes = {
             "/api/a4/match-play": "handle_match_play",
@@ -482,7 +499,7 @@ class ControlCentreTests(unittest.TestCase):
         self.assertIn("生成个人简报＋总监汇报", html)
         self.assertIn('id="wechat-tool-panel"', html)
         self.assertIn('id="wechat-file-input"', html)
-        self.assertIn('id="wechat-model-sharing"', html)
+        self.assertNotIn('id="wechat-model-sharing"', html)
         self.assertIn("结构化副本和索引原文固定保留 7 天", html)
         self.assertIn("输入副本固定保留 30 分钟", html)
         self.assertIn("高级设置（页数、风格和文件名）", html)
@@ -905,9 +922,10 @@ class ControlCentreTests(unittest.TestCase):
                                 server.task_runtime_selection({"requested_model": model_key})
                 provider["status"] = "configured"
 
-    def test_wechat_task_request_rejects_each_cli_recipient_before_queueing(self):
+    def test_wechat_task_request_accepts_bound_cli_and_rejects_changed_recipient(self):
         handler = server.ControlHandler.__new__(server.ControlHandler)
-        handler.send_json = lambda *_args: self.fail("a rejected WeChat request must not be queued")
+        replies = []
+        handler.send_json = lambda *args: replies.append(args)
         scope_id = "wechat-scope-0123456789abcdefabcd"
         for provider_type in ("claude-code", "codex-cli"):
             with self.subTest(provider_type=provider_type):
@@ -944,15 +962,20 @@ class ControlCentreTests(unittest.TestCase):
                     }),
                     patch("agent_platform.model_registry.available_models", return_value={model_key: recipient}),
                 ):
-                    with self.assertRaisesRegex(ValueError, "不支持 CLI 后端"):
-                        handler.create_request({
-                            "profile_id": "sales-director",
-                            "service_id": "wechat-review",
-                            "project_id": server.DEFAULT_PROJECT_ID,
-                            "request": f"整理微信会话\n授权范围编号：{scope_id}",
-                            "requested_model": model_key,
-                        })
-                self.assertFalse(list(server.REQUESTS.glob("*.json")))
+                    payload = {
+                        "profile_id": "sales-director",
+                        "service_id": "wechat-review",
+                        "project_id": server.DEFAULT_PROJECT_ID,
+                        "request": f"整理微信会话\n授权范围编号：{scope_id}",
+                        "requested_model": model_key,
+                    }
+                    handler.create_request(payload)
+                    self.assertEqual(HTTPStatus.CREATED, replies[-1][0])
+                    self.assertEqual(model_key, replies[-1][1]["requested_model"])
+                    with patch("agent_platform.model_registry.available_models", return_value={model_key: {**recipient, "base_url": "https://changed.invalid"}}), patch("ui.server.atomic_json") as write:
+                        with self.assertRaisesRegex(ValueError, "接收方不一致"):
+                            handler.create_request(payload)
+                        write.assert_not_called()
 
     def test_model_boundary_error_leaves_task_restart_controls_available(self):
         task = {"task_id": "blocked", "status": "running", "profile_id": "sales-director", "session_key": "session-a"}

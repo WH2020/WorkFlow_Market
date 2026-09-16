@@ -3,10 +3,15 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import type { Api, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { streamSimple as completions } from "@earendil-works/pi-ai/api/openai-completions";
-import { streamSimple as responses } from "@earendil-works/pi-ai/api/openai-responses";
-import { streamSimple as anthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { openAICompletionsApi, openAIResponsesApi, anthropicMessagesApi } from "@earendil-works/pi-ai/compat";
 import { cliLaunchSha256Async, cliModelThinking, createCliStream, executeCli, type CliBackend, type CliExecutor } from "./cli-model-provider.ts";
+
+// Pi's extension loader aliases pi-ai to compat; direct /api/* imports are
+// incorrectly appended to compat.js. These factories retain the same isolated
+// transports (not the mutable global provider registry) in both Node and Pi.
+const completions = openAICompletionsApi().streamSimple;
+const responses = openAIResponsesApi().streamSimple;
+const anthropic = anthropicMessagesApi().streamSimple;
 
 export const CHAT_SYSTEM = "你是工作台的自由聊天助手，默认用中文进行自然、清楚的多轮对话。只根据本次对话中用户主动输入的文字回答。你没有文件、业务资料、微信记录、网页、终端或其他工具的访问能力，不能创建任务、执行操作或代替用户审批。不要声称已经查询本地资料、联网核验或完成操作。需要这些能力时，说明应转到工作台相应功能。区分已知信息与推测，无法确定时直说。";
 export type ChatMessage = { role: "user" | "assistant"; content: string };

@@ -11,10 +11,12 @@ import { createAgentSession, DefaultResourceLoader, ModelRegistry, ModelRuntime,
 import { createGovernedSubagentContract } from "../extensions/subagent-contracts.ts";
 import { runtimeModelRecipient } from "../extensions/model-selection.ts";
 import registerModelGuard from "../extensions/subagent-model-guard.ts";
+import { createWechatReviewModel } from "../extensions/wechat-review-model.ts";
 
 // Real Python configuration -> Pi SDK -> HTTP/SSE -> tool execution -> follow-up.
 // Only this owned loopback server receives requests; all credentials/data are fake.
 const protocols = ["openai-completions", "openai-responses", "anthropic-messages"];
+let redirectLocation = "", redirectCode = 307;
 const paths = { "openai-completions": "/v1/chat/completions", "openai-responses": "/v1/responses", "anthropic-messages": "/v1/messages" };
 const requests = [];
 const received = new EventEmitter();
@@ -87,14 +89,15 @@ before(async () => {
       }
       const api = protocols.find((candidate) => request.url === paths[candidate]);
       const body = JSON.parse(raw);
-      const mode = raw.includes("fixture:cancel") ? "cancel" : raw.includes("fixture:reject") ? "reject" : raw.includes("fixture:guard-ok") ? "guard-ok" : "roundtrip";
+      const mode = raw.includes("fixture:redirect") ? "redirect" : raw.includes("fixture:cancel") ? "cancel" : raw.includes("fixture:reject") ? "reject" : raw.includes("fixture:guard-ok") ? "guard-ok" : "roundtrip";
       const record = { api, url: request.url, method: request.method, headers: request.headers, body, mode };
       requests.push(record);
       if (!api || request.method !== "POST") {
         response.writeHead(404).end("unexpected fixture endpoint");
         return;
       }
-      if (mode === "reject") response.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "fixture rejected credential" } }));
+      if (mode === "redirect") response.writeHead(redirectCode, { location: redirectLocation }).end();
+      else if (mode === "reject") response.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "fixture rejected credential" } }));
       else respond(response, api, mode === "roundtrip" && !raw.includes("FIXTURE_TOOL_RESULT"), mode === "cancel");
       received.emit(`${api}:${mode}`, record);
     } catch (error) {
@@ -167,6 +170,33 @@ function guardedPrompt(session, text, recipient = runtimeModelRecipient(session.
 }
 
 for (const api of protocols) {
+  test(`${api}: isolated WeChat batch uses exact HTTP endpoint with no tools`, { timeout: 15000 }, async () => {
+    const model = registry.getAll().find((item) => item.provider.startsWith("agent4market-") && item.api === api);
+    const start = requests.length;
+    const review = createWechatReviewModel({ model, registry, recipient: runtimeModelRecipient(model), thinking: "off",
+      guard() {}, markSensitive() {}, recordUsage() {} });
+    assert.equal(await review.complete("Synthetic batch only.", "FIXTURE_TOOL_RESULT", 2048), "隔离联调完成");
+    const sent = requests.slice(start); assert.equal(sent.length, 1); assertRequest(sent[0], api);
+    assert.equal(sent[0].body.tools?.length ?? 0, 0);
+  });
+
+  test(`${api}: 307/308 cannot forward WeChat content to a second local service`, { timeout: 15000 }, async () => {
+    let leaked = 0;
+    const other = createServer((request, response) => { leaked++; request.resume(); response.writeHead(200).end("{}"); });
+    other.listen(0, "127.0.0.1"); await once(other, "listening");
+    redirectLocation = `http://127.0.0.1:${other.address().port}/unapproved`;
+    try {
+      const model = registry.getAll().find((item) => item.provider.startsWith("agent4market-") && item.api === api);
+      const review = createWechatReviewModel({ model, registry, recipient: runtimeModelRecipient(model), thinking: "off",
+        guard() {}, markSensitive() {}, recordUsage() {} });
+      for (const status of [307, 308]) {
+        redirectCode = status; const start = requests.length;
+        await assert.rejects(review.complete("Synthetic batch only.", "fixture:redirect SYNTHETIC_WECHAT", 2048), /未生成完整报告/);
+        assert.equal(requests.length - start, 1); assert.equal(leaked, 0);
+      }
+    } finally { other.closeAllConnections(); await new Promise((resolve) => other.close(resolve)); redirectLocation = ""; }
+  });
+
   test(`${api}: real Pi SDK streams a tool call, executes it once, and sends the result back`, { timeout: 15000 }, async () => {
     const calls = [];
     const session = await createSession(api, (args) => calls.push(args));

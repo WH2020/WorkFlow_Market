@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -407,33 +408,122 @@ class WechatStoreTests(unittest.TestCase):
         self.assertEqual(recipient, summary["model_recipient"])
         self.assertNotIn("conversation_ids_json", summary)
 
-    def test_review_scope_rejects_cli_recipients_before_model_lookup_or_database_open(self) -> None:
+    def test_review_scope_accepts_over_600_messages_and_previous_text_limit(self) -> None:
+        self.source.write_text(json.dumps({"conversations": [{"username": "large-fixture", "display_name": "合成大范围",
+            "messages": [{"local_id": str(index), "sender_name": "客户", "time": "2026-08-24T01:00:00Z",
+                          "content": "合成资料" * 150} for index in range(601)]}]}), encoding="utf-8")
+        self.import_sample()
+        conversation = list_conversations(self.root)["rows"][0]
+        recipient = {"provider_id": "fixture", "base_url": "https://example.invalid", "api": "openai-responses", "model_id": "fixture"}
+        with patch("agent_platform.model_registry.available_models", return_value={"fixture/fixture": recipient}):
+            scope = create_review_scope(self.root, {"project_id": "project-default", "conversation_ids": [conversation["conversation_id"]],
+                "date_from": "2026-08-24", "date_to": "2026-08-24", "model_sharing_confirmed": True, "model_recipient": recipient})
+        self.assertEqual(scope["message_count"], 601)
+        self.assertGreater(scope["text_bytes"], 750_000)
+        self.assertEqual(review_scope_summary(self.root, scope["scope_id"])["message_count"], 601)
+        connection = wechat_store._connect(self.root, writable=False)
+        try:
+            members = [dict(row) for row in connection.execute(
+                "SELECT content_sha256,conversation_id,epoch,is_self,kind,message_id,sent_at,sender_name,source_locator FROM messages ORDER BY epoch,message_id")]
+            conversations = [dict(row) for row in connection.execute(
+                "SELECT chat_type,conversation_id,display_name FROM conversations ORDER BY conversation_id")]
+            legacy_canonical = json.dumps({"conversation_ids": [conversation["conversation_id"]], "conversations": conversations,
+                "date_from": "2026-08-24", "date_to": "2026-08-24", "messages": members, "query": ""},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            self.assertEqual(scope["selection_sha256"], hashlib.sha256(legacy_canonical.encode("utf-8")).hexdigest())
+            self.assertEqual(scope["expires_at"], connection.execute("SELECT min(purge_at) FROM messages").fetchone()[0])
+        finally:
+            connection.close()
+
+    def test_review_scope_supports_cli_with_consent_and_frozen_registered_recipient(self) -> None:
+        self.import_sample()
+        conversation_id = next(row["conversation_id"] for row in list_conversations(self.root)["rows"] if row["display_name"] == "客户甲")
         for provider_type in ("claude-code", "codex-cli"):
             with self.subTest(provider_type=provider_type):
                 recipient = {
                     "provider_id": f"agent4market-{provider_type}",
-                    "base_url": "https://example.invalid",
+                    "base_url": "https://api.anthropic.com" if provider_type == "claude-code" else "https://chatgpt.com/backend-api/codex",
                     "api": provider_type,
                     "model_id": f"{provider_type}-account-model",
                 }
                 payload = {
                     "project_id": "project-default",
-                    "conversation_ids": ["synthetic-conversation"],
+                    "conversation_ids": [conversation_id],
                     "date_from": "2026-08-24",
                     "date_to": "2026-08-24",
                     "query": "",
                     "model_sharing_confirmed": True,
                     "model_recipient": recipient,
                 }
-                with (
-                    patch("agent_platform.model_registry.available_models") as available_models,
-                    patch.object(wechat_store, "_connect") as connect,
-                ):
+                key = f"{recipient['provider_id']}/{recipient['model_id']}"
+                with patch("agent_platform.model_registry.available_models", return_value={key: recipient}):
+                    with self.assertRaisesRegex(WechatStoreError, "当前模型"):
+                        create_review_scope(self.root, {**payload, "model_sharing_confirmed": False})
+                    scope = create_review_scope(self.root, payload)
+                    self.assertEqual(recipient, review_scope_summary(self.root, scope["scope_id"])["model_recipient"])
+                with patch("agent_platform.model_registry.available_models", return_value={}), patch.object(wechat_store, "_connect") as connect:
                     with self.assertRaises(WechatStoreError) as raised:
                         create_review_scope(self.root, payload)
-                self.assertEqual("CLI_WECHAT_UNSUPPORTED", raised.exception.code)
-                available_models.assert_not_called()
+                self.assertEqual("MODEL_RECIPIENT_CHANGED", raised.exception.code)
                 connect.assert_not_called()
+
+    def test_noop_cleanup_preserves_revision_and_skips_all_conversation_summaries(self) -> None:
+        self.import_sample()
+        before = dashboard(self.root)
+        future = wechat_store._now() + timedelta(seconds=10)
+        with patch.object(wechat_store, "_now", return_value=future), \
+             patch.object(wechat_store, "_refresh_conversation", wraps=wechat_store._refresh_conversation) as refresh:
+            result = cleanup_expired(self.root, reference=future)
+            refresh.assert_not_called()
+        self.assertEqual(result["purged_messages"], 0)
+        self.assertEqual(dashboard(self.root), before)
+
+    def test_cleanup_refreshes_only_conversations_with_expired_messages(self) -> None:
+        self.import_sample()
+        now = wechat_store._now()
+        connection = wechat_store._connect(self.root, writable=True)
+        try:
+            affected = connection.execute("SELECT conversation_id FROM messages ORDER BY message_id LIMIT 1").fetchone()[0]
+            untouched = {row["conversation_id"]: dict(row) for row in connection.execute(
+                "SELECT * FROM conversations WHERE conversation_id<>?", (affected,))}
+            connection.execute("UPDATE messages SET purge_at=? WHERE conversation_id=?",
+                               (wechat_store._iso(now - timedelta(seconds=1)), affected))
+            expected_count = connection.execute("SELECT count(*) FROM messages WHERE conversation_id=?", (affected,)).fetchone()[0]
+            connection.commit()
+        finally:
+            connection.close()
+        with patch.object(wechat_store, "_refresh_conversation", wraps=wechat_store._refresh_conversation) as refresh:
+            result = cleanup_expired(self.root, reference=now)
+            self.assertEqual(refresh.call_count, 1)
+            self.assertEqual(refresh.call_args.args[1], affected)
+        self.assertEqual(result["purged_messages"], expected_count)
+        connection = wechat_store._connect(self.root, writable=False)
+        try:
+            self.assertEqual(untouched, {row["conversation_id"]: dict(row) for row in connection.execute(
+                "SELECT * FROM conversations WHERE conversation_id<>?", (affected,))})
+            self.assertEqual(connection.execute("SELECT retained_messages FROM conversations WHERE conversation_id=?", (affected,)).fetchone()[0], 0)
+        finally:
+            connection.close()
+
+    def test_message_import_lookup_index_is_added_to_legacy_schema_without_changing_rows(self) -> None:
+        self.import_sample()
+        before = dashboard(self.root)
+        connection = wechat_store._connect(self.root, writable=True)
+        try:
+            connection.execute("DROP INDEX message_imports_message_idx")
+            connection.commit()
+        finally:
+            connection.close()
+        connection = wechat_store._connect(self.root, writable=True)
+        try:
+            columns = connection.execute("PRAGMA index_info(message_imports_message_idx)").fetchall()
+            self.assertEqual([row["name"] for row in columns], ["message_id"])
+            plan = connection.execute("EXPLAIN QUERY PLAN SELECT count(*) FROM message_imports WHERE message_id=?", ("synthetic-id",)).fetchall()
+            self.assertTrue(any("message_imports_message_idx" in row["detail"] for row in plan))
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+        finally:
+            connection.close()
+        self.assertEqual(dashboard(self.root), before)
 
     def test_cleanup_removes_only_app_copy_and_indexed_plaintext(self) -> None:
         self.import_sample()

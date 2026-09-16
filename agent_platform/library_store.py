@@ -537,6 +537,9 @@ def _overlay(base: Mapping[str, Any], record: Mapping[str, Any] | None) -> dict[
         result["is_cataloged"] = False
     result["tags"] = list(result.get("tags") or [])
     result["versions"] = list(result.get("versions") or [])
+    if base.get("kind") in {"project_file", "artifact"}:
+        # Business labels remain editable; physical ownership is not a label.
+        result["origin_project_id"] = str(base.get("project_id") or "")
     return result
 
 

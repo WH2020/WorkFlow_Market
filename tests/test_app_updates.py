@@ -169,11 +169,14 @@ class AppUpdateTests(unittest.TestCase):
             finish.set()
             complete(checker)
 
-    def test_manual_cooldown_auto_interval_and_conditional_cache(self):
+    def test_startup_once_manual_cooldown_and_conditional_cache(self):
         clock = Clock()
         fetch = Mock(side_effect=[(updates.release_record(release()), '"etag"'), (None, '"etag"')])
         checker = updates.UpdateChecker("0.20.2", fetcher=fetch, monotonic=clock.mono, now=clock.now)
         checker.check(); first = complete(checker)
+        self.assertEqual(first["check_policy"], "startup_once")
+        self.assertTrue(first["startup_check_attempted"])
+        self.assertEqual(first["check_interval_seconds"], 0)
         clock.value += 59
         checker.check(manual=True)
         clock.value += 2
@@ -184,6 +187,30 @@ class AppUpdateTests(unittest.TestCase):
         self.assertEqual(second["latest"], first["latest"])
         self.assertEqual(second["status"], "available")
         self.assertNotEqual(second["last_success_at"], first["last_success_at"])
+        clock.value += 86400
+        checker.check()
+        self.assertEqual(fetch.call_count, 2, "No periodic check even after a full day")
+
+    def test_startup_is_shared_across_clients_and_resets_with_backend_restart(self):
+        fetch = Mock(return_value=(updates.release_record(release()), None))
+        checker = updates.UpdateChecker("0.20.2", fetcher=fetch)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: checker.check(), range(20)))
+        complete(checker)
+        fetch.assert_called_once()
+        restarted = updates.UpdateChecker("0.20.2", fetcher=fetch)
+        self.assertFalse(restarted.snapshot()["startup_check_attempted"])
+        restarted.check(); complete(restarted)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_manual_check_before_startup_prevents_an_extra_automatic_request(self):
+        clock = Clock()
+        fetch = Mock(return_value=(updates.release_record(release()), None))
+        checker = updates.UpdateChecker("0.20.2", fetcher=fetch, monotonic=clock.mono)
+        checker.check(manual=True); complete(checker)
+        clock.value += 86400
+        checker.check()
+        fetch.assert_called_once()
 
     def test_failure_retains_last_good_metadata_without_claiming_freshness(self):
         clock = Clock()
@@ -191,31 +218,33 @@ class AppUpdateTests(unittest.TestCase):
         checker = updates.UpdateChecker("0.20.2", fetcher=fetch, monotonic=clock.mono, now=clock.now)
         checker.check(); first = complete(checker)
         clock.value += 301
-        checker.check(); second = complete(checker)
+        checker.check(manual=True); second = complete(checker)
         self.assertEqual(second["status"], "error")
         self.assertTrue(second["stale"])
         self.assertFalse(second["update_available"])
         self.assertEqual(first["latest"], second["latest"])
-        self.assertGreaterEqual(second["auto_retry_after_seconds"], 600)
+        self.assertEqual(second["auto_retry_after_seconds"], 0)
         self.assertEqual(second["retry_after_seconds"], 60)
 
-    def test_error_backoff_grows_but_manual_retry_and_rate_limits_are_distinct(self):
+    def test_failed_startup_never_auto_retries_but_manual_retry_respects_rate_limits(self):
         clock = Clock()
         fetch = Mock(side_effect=updates.UpdateError("SOURCE_UNAVAILABLE", "Synthetic 404"))
         checker = updates.UpdateChecker("0.20.2", fetcher=fetch, monotonic=clock.mono, now=clock.now)
-        with patch.object(updates.random, "uniform", return_value=0):
-            checker.check(); complete(checker)
-            clock.value += 301
-            checker.check(); self.assertEqual(fetch.call_count, 1)
-            checker.check(manual=True); state = complete(checker)
-            self.assertEqual(fetch.call_count, 2)
-            self.assertEqual(state["auto_retry_after_seconds"], 1200)
+        checker.check(); complete(checker)
+        clock.value += 86400
+        checker.check(); self.assertEqual(fetch.call_count, 1)
+        checker.check(manual=True); state = complete(checker)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(state["auto_retry_after_seconds"], 0)
         rate_fetch = Mock(side_effect=updates.UpdateError("RATE_LIMITED", "Synthetic rate limit", 3600))
         limited = updates.UpdateChecker("0.20.2", fetcher=rate_fetch, monotonic=clock.mono, now=clock.now)
         limited.check(); complete(limited)
         clock.value += 1000
         self.assertGreater(limited.check(manual=True)["retry_after_seconds"], 0)
         rate_fetch.assert_called_once()
+        clock.value += 2600
+        limited.check(manual=True); complete(limited)
+        self.assertEqual(rate_fetch.call_count, 2)
 
     def test_invalid_cache_and_internal_errors_do_not_escape(self):
         for fetch, code in ((Mock(return_value=(None, None)), "INVALID_CACHE"), (Mock(side_effect=RuntimeError("SYNTHETIC_SECRET")), "CHECK_FAILED")):
@@ -230,6 +259,8 @@ class AppUpdateTests(unittest.TestCase):
             state = checker.check()
         self.assertFalse(state["checking"])
         self.assertEqual(state["error"]["code"], "CHECK_FAILED")
+        checker.check()
+        checker._fetch.assert_not_called()
 
     def test_open_release_requires_current_selection_and_never_downloads_or_installs(self):
         fetch = Mock(return_value=(updates.release_record(release(html_url="file:///private")), None))

@@ -1,11 +1,12 @@
-/* Dialogue UI has no access to task/customer state and never stores message text. */
+/* Plain dialogue stays tool-free; an optional local intent router opens governed forms. */
 (() => {
   const $ = (id) => document.getElementById(id);
   const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
   const labels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
   class FreeChat {
-    constructor({ api, getToken }) {
+    constructor({ api, getToken, routeWork, onNewChat }) {
       this.api = api; this.getToken = getToken;
+      this.routeWork = routeWork; this.onNewChat = onNewChat;
       this.session = null; this.version = 0; this.running = null; this.blocked = false; this.catalog = [];
       $("chat-form").addEventListener("submit", (event) => { event.preventDefault(); void this.send(); });
       $("chat-input").addEventListener("input", () => this.controls());
@@ -60,7 +61,7 @@
       const busy = Boolean(this.running), hasModel = this.catalog.some((item) => item.key === $("chat-model").value);
       $("chat-model").disabled = busy || Boolean(this.session) || !this.catalog.length;
       $("chat-thinking").disabled = busy || Boolean(this.session) || !hasModel;
-      $("chat-send").disabled = busy || this.blocked || !hasModel || !$("chat-input").value.trim() || !this.getToken();
+      $("chat-send").disabled = busy || this.blocked || (!hasModel && !this.routeWork) || !$("chat-input").value.trim() || !this.getToken();
       $("chat-input").disabled = busy;
       $("chat-stop").hidden = !busy;
       $("chat-stop").disabled = Boolean(this.running?.stopping);
@@ -83,6 +84,7 @@
         catch (error) { this.status(`暂时无法关闭对话：${error.message}`, true); return; }
       }
       this.session = null; this.version = 0; this.blocked = false;
+      this.onNewChat?.();
       $("chat-conversation").replaceChildren(); $("chat-input").value = "";
       this.renderThinking(); this.controls(); this.status("新对话已准备好。可以选择模型后发送消息。"); $("chat-input").focus();
     }
@@ -97,8 +99,13 @@
     }
     async send() {
       const text = $("chat-input").value.trim();
-      if (this.running || this.blocked || !text || !this.getToken() || !$("chat-model").value) return;
+      if (this.running || this.blocked || !text || !this.getToken()) return;
       if (text.length > 8000) { this.status("每条消息最多 8000 字。", true); return; }
+      if (this.routeWork?.(text)) {
+        this.message("user", text); this.message("assistant", "已展开相应工作流。请核对背景、资料和模型，确认开始后运行。");
+        $("chat-input").value = ""; this.controls(); return;
+      }
+      if (!$("chat-model").value) { this.status("普通问答需要先配置可用模型。", true); return; }
       const run = { id: crypto.randomUUID().replaceAll("-", ""), controller: new AbortController(), stopping: false, meta: false, done: false, knownError: false };
       this.running = run;
       const user = this.message("user", text), reply = this.message("assistant", "正在思考…");

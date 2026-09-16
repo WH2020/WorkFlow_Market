@@ -262,6 +262,38 @@ test("update trial loads the core but pauses session writes and requests until c
   }
 });
 
+for (const api of ["claude-code", "codex-cli"]) test(`${api}: bound WeChat history passes both send guards but model drift redacts and aborts`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "director-wechat-cli-"));
+  const names = ["WORKFLOW_AGENT_PROFILE", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE", "AGENT4MARKET_MANAGED_MODELS_SHA256"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const runtime = harness(root);
+  try {
+    process.env.WORKFLOW_AGENT_PROFILE = "sales-director";
+    delete process.env.AGENT4MARKET_MANAGED_MODELS_FILE;
+    delete process.env.AGENT4MARKET_MANAGED_MODELS_SHA256;
+    const recipient = { provider_id: `agent4market-${api}-fixture`, api,
+      base_url: api === "claude-code" ? "https://api.anthropic.com" : "https://chatgpt.com/backend-api/codex", model_id: "synthetic-model" };
+    process.env.AGENT4MARKET_MANAGED_MODELS = JSON.stringify({ [`${recipient.provider_id}/${recipient.model_id}`]: recipient });
+    runtime.context.model = { ...runtime.context.model, provider: recipient.provider_id, id: recipient.model_id, api, baseUrl: recipient.base_url };
+    runtime.entries.push({ type: "custom", customType: "director-sensitive-recipient", data: recipient });
+    let aborts = 0;
+    runtime.context.abort = () => { aborts++; };
+    await runtime.handlers.get("session_start")?.({}, runtime.context);
+    const messages = [{ role: "toolResult", toolName: "director_wechat_read", content: [{ type: "text", text: "SYNTHETIC_WECHAT_ONLY" }] }];
+    assert.deepEqual(await runtime.handlers.get("context")?.({ messages }, runtime.context), { messages });
+    assert.equal(await runtime.handlers.get("before_provider_request")?.({}, runtime.context), undefined);
+    assert.equal(aborts, 0);
+    await runtime.handlers.get("model_select")?.({ model: { ...runtime.context.model, id: "changed-model" } });
+    assert.deepEqual(await runtime.handlers.get("before_provider_request")?.({}, runtime.context), {});
+    assert.deepEqual(await runtime.handlers.get("context")?.({ messages }, runtime.context), { messages: [] });
+    assert.ok(aborts >= 2);
+  } finally {
+    await runtime.handlers.get("session_shutdown")?.({}, runtime.context);
+    for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("managed recovery freezes recipients, compacts locally, and keeps legacy cancellation available", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-managed-recovery-"));
   const names = ["WORKFLOW_AGENT_PROFILE", "AGENT4MARKET_MANAGED_MODELS", "AGENT4MARKET_MANAGED_MODELS_FILE", "AGENT4MARKET_MANAGED_MODELS_SHA256", "AGENT4MARKET_ROLE_MODELS"];

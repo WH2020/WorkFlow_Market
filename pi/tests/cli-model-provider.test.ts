@@ -81,6 +81,7 @@ for (const api of ["claude-code", "codex-cli"] as const) {
       for (const flag of ["--strict-config", "--ignore-rules", "--ignore-user-config", "--ephemeral", "--sandbox", "--output-schema", "tools.update_plan.enabled=false", "tools.experimental_request_user_input.enabled=false"]) assert.ok(args.includes(flag));
       for (const feature of ["shell_tool", "code_mode", "browser_use", "plugins", "multi_agent", "view_image", "skill_search"]) assert.equal(args[args.indexOf(feature) - 1], "--disable");
       assert.ok(args.includes('forced_login_method="chatgpt"'));
+      assert.ok(args.includes('chatgpt_base_url="https://chatgpt.com/backend-api/"'));
       assert.ok(args.includes('model_catalog_json="__A4M_CLI_MODEL_CATALOG__"'));
     }
     assert.ok(!args.join(" ").includes("合成请求"));

@@ -1,5 +1,6 @@
 (() => {
   let model = null;
+  let workbench = null;
   let requestToken = null;
   let selectedProfile = null;
   let selectedService = null;
@@ -23,10 +24,10 @@
   let appUpdatePolling = false;
   let appUpdateLocalError = "";
   let appUpdateAutoEnabled = true;
-  let appUpdateLastAutoAttempt = null;
+  let appUpdateStartupAttempted = false;
   let mailSettingsInitialized = false;
   let taskRuntimeCatalogKey = "";
-  let currentView = "home";
+  let currentView = "chat";
   const viewHistory = [];
   const viewScrollPositions = {};
   let selectedProject = "project-default";
@@ -225,7 +226,7 @@
   }
 
   const viewTitles = {
-    home: "工作台", chat: "自由聊天", work: "发起工作", tasks: "任务中心", sales: "客户与销售",
+    home: "工作台", chat: "对话", work: "对话 · 工作流", tasks: "工作进展", sales: "历史客户经营",
     bids: "智能招投标", knowledge: "资料库", weekly: "销售行动简报", outputs: "输出中心", projects: "项目空间",
     schedules: "每日定时任务", search: "自定义操作", tools: "工具栏", settings: "设置",
   };
@@ -446,6 +447,7 @@
       }
     }
     currentView = view;
+    document.body.dataset.primaryView = view;
     if (window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
     document.querySelectorAll("[data-page]").forEach((page) => page.classList.toggle("active", page.dataset.page === view));
     document.querySelectorAll(".nav-item[data-view]").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
@@ -466,6 +468,7 @@
       }
     }
     updateBackButton();
+    void workbench?.onView(view, previousView);
     if (view !== previousView) requestAnimationFrame(() => window.scrollTo({ top: restoreScroll ? (viewScrollPositions[view] || 0) : 0, behavior: "auto" }));
   }
 
@@ -478,6 +481,7 @@
   function openService(serviceId) {
     if (!serviceById(serviceId)) { note("当前销售总监版本未启用该服务。", true); return; }
     selectedService = serviceId;
+    if (serviceId === "wechat-review" && workbench) { void workbench.openWechat(); return; }
     guidedRenderedService = null;
     if (serviceId === "wechat-review") { activeTool = "wechat"; switchView("tools"); }
     else if (serviceId === "weekly-deck") switchView("weekly");
@@ -1126,7 +1130,7 @@
     $("app-update-status").classList.toggle("error", Boolean(appUpdateLocalError) || state.status === "error");
     $("app-update-status").classList.toggle("available", state.update_available === true);
     $("app-update-checked-at").textContent = state.checked_at
-      ? `最近检查：${appUpdateTime(state.checked_at)}${state.stale ? ` · 以下为上次成功检查的信息（${appUpdateTime(state.last_success_at)}）` : ""}${state.status === "error" && appUpdateAutoEnabled ? " · 自动重试已延后，避免频繁请求" : ""}`
+      ? `最近检查：${appUpdateTime(state.checked_at)}${state.stale ? ` · 以下为上次成功检查的信息（${appUpdateTime(state.last_success_at)}）` : ""}${state.status === "error" ? " · 不会自动重试，请手动检查更新" : ""}`
       : "仅检查公共发布信息，不上传用户配置或业务数据。";
     $("app-updates-badge").hidden = !state.update_available;
     $("app-updates-button-label").textContent = state.update_available ? "发现新版本" : busy ? "正在检查更新" : "检查更新";
@@ -1136,7 +1140,7 @@
     $("app-update-release-date").textContent = state.latest ? `发布时间：${appUpdateTime(state.latest.published_at)}${state.stale ? " · 缓存信息" : ""}` : "";
     $("app-update-release-notes").textContent = state.latest ? `${state.latest.notes || "发布者未填写更新说明。"}${state.latest.notes_truncated ? "\n\n更新说明较长，完整内容请查看发布页。" : ""}` : "";
     $("app-update-check").disabled = Boolean(busy) || state.retry_after_seconds > 0;
-    $("app-update-check").textContent = busy ? "正在检查…" : state.retry_after_seconds > 0 ? `${state.retry_after_seconds} 秒后可重试` : "立即检查";
+    $("app-update-check").textContent = busy ? "正在检查…" : state.retry_after_seconds > 0 ? `${state.retry_after_seconds} 秒后可重试` : "手动检查更新";
     $("app-update-open-release").disabled = !state.can_open_release || appUpdateOpening;
     $("app-update-open-release").textContent = appUpdateOpening ? "正在打开…" : "查看发布页";
     $("app-update-auto").checked = appUpdateAutoEnabled;
@@ -1198,9 +1202,14 @@
   }
 
   async function checkAppUpdates(manual = false) {
-    if (!requestToken || appUpdateRequestBusy || appUpdateState?.checking || appUpdateState?.retry_after_seconds > 0) return;
-    if (!manual && (!appUpdateAutoEnabled || appUpdateState?.auto_retry_after_seconds > 0 || (appUpdateLastAutoAttempt !== null && Date.now() - appUpdateLastAutoAttempt < 300000))) return;
-    appUpdateLastAutoAttempt = Date.now();
+    if (!requestToken) return;
+    if (!manual) {
+      if (appUpdateStartupAttempted) return;
+      appUpdateStartupAttempted = true;
+      if (!appUpdateAutoEnabled || appUpdateState?.startup_check_attempted) return;
+    }
+    if (appUpdateRequestBusy || appUpdateState?.checking || appUpdateState?.retry_after_seconds > 0) return;
+    appUpdateStartupAttempted = true;
     appUpdateRequestBusy = true; appUpdateLocalError = "";
     renderAppUpdates();
     try {
@@ -1241,11 +1250,8 @@
     $("app-update-auto").onchange = () => {
       appUpdateAutoEnabled = $("app-update-auto").checked;
       try { localStorage.setItem("agent4market-auto-updates", String(appUpdateAutoEnabled)); } catch { /* Session preference still applies. */ }
-      if (appUpdateAutoEnabled) checkAppUpdates(false);
     };
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) checkAppUpdates(false); });
-    window.addEventListener("online", () => checkAppUpdates(false));
-    setInterval(() => checkAppUpdates(false), 60000);
+    // Poll only local installation progress, never the public release source.
     setInterval(pollAppInstallation, 2000);
   }
 
@@ -2632,7 +2638,8 @@
   async function startLibraryTask(entry, serviceId, purpose) {
     const service = serviceById(serviceId);
     if (!service) { note("当前版本没有启用该业务服务。", true); return; }
-    const linkedProject = entry.project_id && projectById(entry.project_id);
+    const projectId = entry.origin_project_id || entry.project_id;
+    const linkedProject = projectId && projectById(projectId);
     if (linkedProject?.status === "active") selectedProject = linkedProject.project_id;
     selectedService = serviceId;
     const reference = entry.path || entry.url || entry.source_id || entry.library_id;
@@ -2643,7 +2650,7 @@
       "请优先使用这份资料及其已登记业务关系；引用重要结论时回到原件或来源。资料不足时明确说明，不得把未核验内容写成事实。涉及台账写入或正式文件时继续等待人工确认。",
     ].filter(Boolean).join("\n");
     try {
-      const response = await createTask(request); note(`任务已登记（${response.request_id}）。`); await load(); switchView("tasks");
+      const response = await createTask(request, { library_selection: { entity_id: "", file_ids: [entry.library_id] } }); note(`任务已登记（${response.request_id}）。`); await load(); switchView("tasks");
     } catch (error) { note(error.message, true); }
   }
 
@@ -3787,12 +3794,85 @@
     renderWxDecipherControls();
   }
 
+  function validWxSourcePreferences(value) {
+    return value?.version === 1 && typeof value.directory === "string" && value.directory.length <= 4096
+      && typeof value.selfId === "string" && value.selfId.length <= 128
+      && !/[\x00-\x1f\x7f]/u.test(value.directory + value.selfId);
+  }
+
+  function saveWxSourcePreferences() {
+    // Whitelist only source hints, never keys, consents, files or batch handles.
+    const value = { version: 1, directory: $("wxdecipher-directory-path").value.trim(), selfId: $("wxdecipher-self-id").value.trim() };
+    if (!validWxSourcePreferences(value)) {
+      $("wxdecipher-source-memory-status").textContent = "位置或账号格式无效，未保存；请检查长度及换行等特殊字符。";
+      return;
+    }
+    try {
+      if (value.directory || value.selfId) localStorage.setItem("agent4market.wechat-source.v1", JSON.stringify(value));
+      else localStorage.removeItem("agent4market.wechat-source.v1");
+      $("wxdecipher-source-memory-status").textContent = value.directory || value.selfId
+        ? "已在本机记住位置和账号，下次打开会自动填入；不会自动检索、复制或解析。"
+        : "未保存位置和账号。填写后会在本机自动记住，不保存密钥或授权。";
+    } catch {
+      $("wxdecipher-source-memory-status").textContent = "本机偏好存储不可用，无法记住本次修改；当前仍可手动检索。";
+    }
+  }
+
+  function forgetWxSourcePreferences() {
+    if (wxdecipherState.busy || wxdecipherState.copied || wxdecipherState.discoveryLoading || wxdecipherState.storageLoading || wxdecipherState.captureLoading) return;
+    try {
+      localStorage.removeItem("agent4market.wechat-source.v1");
+      $("wxdecipher-directory-path").value = "";
+      $("wxdecipher-self-id").value = "";
+      $("wxdecipher-source-memory-status").textContent = "已忘记位置和账号；未删除数据库、聊天记录或专用数据目录。";
+    } catch {
+      $("wxdecipher-source-memory-status").textContent = "本机偏好存储不可用，未能清除已记住的位置和账号，请稍后重试。";
+    }
+  }
+
+  function initializeWxSourcePreferences() {
+    try {
+      const saved = localStorage.getItem("agent4market.wechat-source.v1");
+      if (saved !== null) {
+        if (saved.length > 32768) throw new Error("Invalid source preferences");
+        const value = JSON.parse(saved);
+        if (!validWxSourcePreferences(value)) throw new Error("Invalid source preferences");
+        $("wxdecipher-directory-path").value = value.directory;
+        $("wxdecipher-self-id").value = value.selfId;
+        $("wxdecipher-source-memory-status").textContent = "已恢复上次填写的位置和账号；尚未检索或读取数据库，请确认账号后手动检索。";
+      }
+    } catch {
+      $("wxdecipher-source-memory-status").textContent = "无法恢复本机保存的位置和账号，请重新填写；不会自动读取数据库。";
+    }
+    for (const id of ["wxdecipher-directory-path", "wxdecipher-self-id"]) {
+      $(id).addEventListener("input", saveWxSourcePreferences);
+      $(id).addEventListener("change", saveWxSourcePreferences);
+    }
+    $("wxdecipher-source-forget").onclick = forgetWxSourcePreferences;
+  }
+
   function wxDecipherStatus(message, error = false) {
     $("wxdecipher-status").textContent = message;
     $("wxdecipher-status").classList.toggle("error", error);
   }
 
+  function renderWxStorageDirectory() {
+    const storage = model?.wechat?.storage;
+    const output = $("wxdecipher-storage-directory");
+    output.classList.toggle("error", storage?.status === "error");
+    if (storage?.status === "configured" && storage.directory) {
+      output.textContent = `当前专用数据目录：\n${storage.directory}\n数据库副本和聊天索引保存在此目录下；解析使用副本，不读取微信原库。`;
+    } else if (storage?.status === "default" && storage.directory) {
+      output.textContent = `尚未设置专用数据目录。当前默认数据位置：\n${storage.directory}\n可点击“申请专用数据目录”选择其他位置；显示路径不代表目录已创建。`;
+    } else if (storage?.status === "error" || storage?.status === "unavailable") {
+      output.textContent = storage.message || "无法确认当前数据目录，请检查配置和权限。";
+    } else {
+      output.textContent = "正在读取当前数据目录…若持续未显示，请重新打开工作台以加载最新后端。";
+    }
+  }
+
   function renderWxDecipherControls() {
+    renderWxStorageDirectory();
     const busy = wxdecipherState.busy || wxdecipherState.captureLoading || wxdecipherState.discoveryLoading || wxdecipherState.storageLoading;
     const unavailable = model?.wechat?.http_available === false;
     const blocked = busy || unavailable;
@@ -3807,9 +3887,11 @@
     $("wxdecipher-copy-info").textContent = copied ? `已复制 ${copied.fileCount} 个文件：${copied.directory}\n到期时间：${new Date(copied.expiresAt).toLocaleTimeString()}。解析不会重新复制原库；更新文件前请先清除副本。` : "尚未复制。先复制数据库，再单独解析；复制阶段不需要密钥。";
     $("wxdecipher-add-files").disabled = sourceBlocked;
     $("wxdecipher-storage-setup").disabled = sourceBlocked;
-    $("wxdecipher-storage-setup").textContent = wxdecipherState.storageLoading ? "正在申请…" : "申请专用数据目录";
+    $("wxdecipher-storage-setup").textContent = wxdecipherState.storageLoading ? "正在申请…"
+      : model?.wechat?.storage?.status === "configured" ? "更改专用数据目录" : "申请专用数据目录";
     const discovery = model?.wechat?.decipher?.database_discovery;
     $("wxdecipher-directory-path").disabled = sourceBlocked;
+    $("wxdecipher-source-forget").disabled = sourceBlocked;
     $("wxdecipher-directory-search").disabled = sourceBlocked || discovery?.available !== true;
     $("wxdecipher-directory-path").placeholder = discovery?.platform === "macos"
       ? "/Users/你的用户名/…/微信账号文件夹" : "例如 E:\\software\\wechat\\xwechat_files\\wxid_…";
@@ -3951,7 +4033,7 @@
       const directory = String(selected).trim();
       if (!directory) { wxDecipherStatus("请填写专用数据目录的完整路径。", true); return; }
       if (directory !== plan.directory) plan = await api("/api/wechat/storage/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ directory }) });
-      if (plan.configured) { wxDecipherStatus(`${plan.message}：${plan.directory}`); return; }
+      if (plan.configured) { wxDecipherStatus(`${plan.message}：${plan.directory}`); await load(); return; }
       const confirmed = await confirmAction({ title: "确认专用数据目录", message: `${plan.message}\n\n创建位置：${plan.directory}\n\n输入数据库副本保留 30 分钟供单独解析及重试，可主动清除；派生的解密输出每次处理后清除。结构化副本和索引原文保留 7 天。确认后创建并检查权限，设置重启后仍然有效。`, confirmText: "允许创建" });
       if (!confirmed) { wxDecipherStatus("已取消目录授权，未更改当前数据位置。"); return; }
       const result = await api("/api/wechat/storage/grant", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -4066,7 +4148,7 @@
       catch { wxDecipherStatus("请先列出并明确选择本次取钥的微信进程。", true); return; }
       if (!autoCapture.process_id || !autoCapture.created_at) { wxDecipherStatus("微信进程选择无效，请重新选择。", true); return; }
     }
-    // No localStorage/sessionStorage, URL parameters or persisted job metadata.
+    // Keys never enter localStorage/sessionStorage, URLs or persisted job metadata.
     $("wxdecipher-key").value = "";
     wxdecipherState.files.forEach((entry) => { entry.key = ""; });
     wxdecipherState.busy = true; renderWxDecipherFiles();
@@ -4089,7 +4171,6 @@
         ...(report.warnings || [])].join("\n"));
       wechatState.loaded = false; wechatState.revision = ""; wechatState.selected.clear(); wechatState.selectedId = ""; wechatState.messages = [];
       $("wechat-date-from").value = ""; $("wechat-date-to").value = ""; $("wechat-query").value = ""; $("wechat-chat-type").value = "";
-      $("wechat-model-sharing").checked = false;
       await load();
     } catch (error) {
       wxDecipherStatus(error.message || "数据库处理失败；未自动调用模型。", true);
@@ -4211,7 +4292,7 @@
 
   function updateWechatSelection() {
     $("wechat-selection-status").textContent = `已选 ${wechatState.selected.size} 个`;
-    const visibleIds = wechatState.rows.map((row) => row.conversation_id);
+    const visibleIds = (workbench?.filterGroups(wechatState.rows) || wechatState.rows).map((row) => row.conversation_id);
     $("wechat-select-all").checked = visibleIds.length > 0 && visibleIds.every((id) => wechatState.selected.has(id));
     $("wechat-select-all").indeterminate = visibleIds.some((id) => wechatState.selected.has(id)) && !$("wechat-select-all").checked;
     $("review-selected-wechat").disabled = wechatState.creating || wechatState.selected.size === 0;
@@ -4219,15 +4300,16 @@
 
   function renderWechatConversations() {
     const box = $("wechat-conversations");
+    const visibleRows = workbench?.filterGroups(wechatState.rows) || wechatState.rows;
     const previousScroll = box.scrollTop;
     box.classList.toggle("empty", wechatState.rows.length === 0);
-    if (!wechatState.rows.length) {
+    if (!visibleRows.length) {
       box.replaceChildren();
       box.textContent = wechatState.error || (wechatState.loading ? "正在读取会话…" : "当前筛选范围没有会话。");
       updateWechatSelection();
       return;
     }
-    box.replaceChildren(...wechatState.rows.map((row) => {
+    box.replaceChildren(...visibleRows.map((row) => {
       const card = document.createElement("article");
       card.className = `wechat-conversation-card${wechatState.selected.has(row.conversation_id) ? " selected" : ""}${wechatState.selectedId === row.conversation_id ? " previewing" : ""}`;
       card.tabIndex = 0;
@@ -4253,6 +4335,7 @@
       };
       card.onclick = (event) => { if (event.target !== checkbox) previewConversation(); };
       card.onkeydown = (event) => { if ((event.key === "Enter" || event.key === " ") && event.target === card) { event.preventDefault(); previewConversation(); } };
+      workbench?.decorateGroup(card, row);
       return card;
     }));
     box.scrollTop = previousScroll;
@@ -4319,7 +4402,6 @@
   }
 
   async function createWechatReview({ today = false } = {}) {
-    if (!$("wechat-model-sharing").checked) throw new Error("请先确认允许当前任务使用所选会话文字。");
     const todayText = formatDate(new Date());
     const filters = today ? { date_from: todayText, date_to: todayText, query: "" } : wechatFilters();
     if (!filters.date_from || !filters.date_to) throw new Error("请选择开始和结束日期。");
@@ -4329,17 +4411,20 @@
     const modelKey = runtime.requested_model || model?.model?.default_model;
     const provider = modelProviders().find((item) => modelKey?.startsWith(item.id + "/") && item.status === "configured");
     const selectedModel = provider?.models.find((item) => modelKey === provider.id + "/" + item.id && item.enabled !== false && item.tools !== false);
-    if (!provider || !selectedModel) throw new Error("整理微信前，请先配置并选择具体的 API 供应商和模型。");
-    if (isCliProvider(provider)) throw new Error("微信会话整理首版不支持 Claude Code 或 Codex CLI；请改选可明确冻结接收方的 API 供应商模型。");
+    if (!provider || !selectedModel) throw new Error("整理微信前，请先配置并选择具体的模型供应商（API、Claude Code 或 Codex CLI）和模型。");
     runtime.requested_model = modelKey;
     const recipient = { provider_id: provider.id, base_url: provider.base_url, api: selectedModel.api || provider.api, model_id: selectedModel.id };
     const modelName = `${provider.name} · ${selectedModel.id}`;
+    const selectedRows = wechatState.rows.filter(row => conversationIds.includes(row.conversation_id));
+    const visibleIds = new Set((typeof workbench !== "undefined" && workbench ? workbench.filterGroups(wechatState.rows) : wechatState.rows).map(row => row.conversation_id));
+    const hiddenCount = conversationIds.filter(id => !visibleIds.has(id)).length;
+    const selectionDetail = today ? "" : `所选会话：${selectedRows.map(row => `${row.display_name || row.conversation_id}（${row.account_id || row.account_label || "历史导入"}）`).join("、")}。其中 ${hiddenCount} 个在当前筛选中不可见。`;
     const confirmed = await confirmAction({
       title: "确认整理微信会话",
       message: today
         ? `将把今天全部账号中有消息的会话交给“${modelName}”整理。`
         : `将把 ${conversationIds.length} 个会话在 ${filters.date_from} 至 ${filters.date_to} 的所选内容交给“${modelName}”整理。`,
-      detail: `账号：${today ? "全部已导入账号" : [...new Set(wechatState.rows.filter((row) => conversationIds.includes(row.conversation_id)).map((row) => row.account_id || row.account_label || "历史导入"))].join("、")}。接收地址：${recipient.base_url}；协议：${recipient.api}。云端处理会使文字离开本机；仅允许此供应商和模型处理所选范围，不自动更新台账。`,
+      detail: `${selectionDetail}账号：${today ? "全部已导入账号" : [...new Set(selectedRows.map((row) => row.account_id || row.account_label || "历史导入"))].join("、")}。接收地址：${recipient.base_url}；协议：${recipient.api}。大范围将按模型预算自动分批并汇总，可能产生多次模型调用。云端处理会使文字离开本机；仅允许此供应商和模型处理所选范围，不附带对话中选择的档案与文件，不自动更新台账。`,
       confirmText: "确认并开始",
     });
     if (!confirmed) return;
@@ -4369,6 +4454,7 @@
       body: JSON.stringify({ profile_id: "sales-director", service_id: "wechat-review", project_id: selectedProject, request, ...runtime }),
     });
     note(`微信会话整理任务已登记（${task.request_id}）。`);
+    if (typeof workbench !== "undefined") workbench?.created(task);
     await load(); switchView("tasks");
   }
 
@@ -4579,7 +4665,7 @@
     renderData(); renderOutputs(); renderProjects(); renderSchedules(); renderDashboard(); renderReimbursementLibrary(); renderWechatSummary(); renderToolPanels(); renderCustomerOperations(); renderAttention(); renderBidding(); switchView(currentView);
   }
 
-  async function createTask(request) {
+  async function createTask(request, explicitSelection) {
     let serviceId = selectedService;
     if (["sales-review", "industry-research"].includes(serviceId) && $("task-readonly").checked) serviceId += "-readonly";
     const structured = request.startsWith("[PRESENTATION_BRIEF]");
@@ -4596,10 +4682,16 @@
         ? "公开检索配置已保存，请关闭并重新打开销售总监智能工作台后再创建该任务。"
         : "公开检索服务暂不可用，请前往“设置 > 公开检索”查看状态。");
     }
-    return api("/api/task-requests", {
+    if (createTask.pending) throw Error("任务正在提交，请勿重复点击。");
+    createTask.pending = true;
+    try {
+    const response = await api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: selectedProfile, service_id: serviceId, project_id: selectedProject, request: structured ? request : `${request}${selectedCustomerContextText()}`, ...taskRuntimeSelection() }),
+      body: JSON.stringify({ profile_id: selectedProfile, service_id: serviceId, project_id: selectedProject, request: structured || explicitSelection ? request : `${request}${selectedCustomerContextText()}`, ...taskRuntimeSelection(), ...(explicitSelection ?? workbench?.selection() ?? {}) }),
     });
+    workbench?.created(response);
+    return response;
+    } finally { createTask.pending = false; }
   }
 
   function guidedRequest() {
@@ -4695,6 +4787,7 @@
     render();
     restoreTaskComposerFocus(composerFocus);
     freeChat.update(model.model);
+    workbench?.update();
     if (currentView === "tools" && activeTool === "wechat" && model?.wechat?.configured && model.wechat.revision !== wechatState.revision) {
       loadWechatConversations({ force: true });
     }
@@ -5653,7 +5746,7 @@
   $("wechat-date-to").addEventListener("change", refreshWechatFilters);
   $("refresh-wechat").onclick = () => loadWechatConversations({ force: true });
   $("wechat-select-all").onchange = () => {
-    wechatState.rows.forEach((row) => {
+    (workbench?.filterGroups(wechatState.rows) || wechatState.rows).forEach((row) => {
       if ($("wechat-select-all").checked) wechatState.selected.add(row.conversation_id);
       else wechatState.selected.delete(row.conversation_id);
     });
@@ -5846,7 +5939,41 @@
     });
   });
 
-  const freeChat = window.Agent4MarketFreeChat.create({ api, getToken: () => requestToken });
+  workbench = window.Agent4MarketBusinessLibrary?.create({
+    api, note, confirm: confirmAction, show: switchView,
+    files: () => libraryState.entries, tasks: () => model?.tasks || [], wechatRows: () => wechatState.rows,
+    pendingRequests: () => (model?.pending_requests || []).filter(r => r.profile_id === selectedProfile),
+    renderWechat: () => { renderWechatConversations(); workbench?.update(); },
+    loadWechat: () => loadWechatConversations({ force: true }),
+    activateWechat: () => { activeTool = "wechat"; renderToolPanels(); },
+    clearLegacyContext: clearCustomerContext,
+    selectProject: (id) => { if (projectById(id)?.status !== "active") throw Error("项目尚未加载或已归档，请刷新后重试。"); selectedProject = id; renderProjectSelectors(); },
+    createProject: async (name, description) => { const project = await api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, description: description.slice(0, 500) }) }); model.projects.push(project); renderProjectSelectors(); return project; },
+    projectStatus: (id, status) => api(`/api/projects/${encodeURIComponent(id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }),
+    openTask: (id) => { switchView("tasks"); const task = model?.tasks.find(t => t.task_id === id); if (task) renderWorkflow(task); document.querySelector(`[data-task-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "start" }); },
+    prepareWechat: async () => { if (!wxdecipherState.copied) await copyWxDatabases(); if (wxdecipherState.copied) await runWxDecipher(); },
+    startFlow: (serviceId, text, files) => {
+      const chatModel = $("chat-model").value;
+      if ([...$("task-model").options].some(option => option.value === chatModel)) { $("task-model").value = chatModel; renderTaskThinkingOptions(); }
+      openService(serviceId);
+      if (serviceId === "wechat-review") return;
+      if (serviceId === "presentation-studio") {
+        $("ppt-topic").value = text.slice(0, 240);
+        const count = Number(text.match(/(\d+)\s*页/u)?.[1]); if (count >= 4 && count <= 10) $("ppt-pages").value = String(count);
+      } else if (serviceId === "weekly-deck") $("weekly-focus").value = text.slice(0, 120);
+      else {
+        const key = { "sales-review": "scope", "industry-research": "topic", "pdf-import": "focus" }[serviceId];
+        if (key) { guidedDrafts[serviceId] ||= {}; guidedDrafts[serviceId][key] = text.slice(0, 500); }
+        if (serviceId === "pdf-import") guidedDrafts[serviceId].path = files.find(f => f.path)?.path || "";
+        guidedNotes[serviceId] = text.slice(0, 1200); renderGuidedForm(true);
+      }
+    },
+  });
+  const freeChat = window.Agent4MarketFreeChat.create({ api, getToken: () => requestToken,
+    routeWork: (text) => workbench?.route(text),
+    onNewChat: () => { if (workbench) { workbench.context = ""; workbench.files.clear(); workbench.renderContext(); } clearCustomerContext(); },
+  });
+  initializeWxSourcePreferences();
   initializeAppUpdates();
   localizeStaticInterface();
   load()

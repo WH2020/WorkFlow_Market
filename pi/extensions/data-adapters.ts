@@ -38,9 +38,11 @@ import {
 import type { BidDocumentPayload, DocumentCommitContext } from "./document-artifact.ts";
 import { sameRecipient } from "./model-selection.ts";
 import type { ModelRecipient } from "./model-selection.ts";
+import { reviewWechatSnapshot, wechatBatchBudget, type WechatReviewModel, type WechatSnapshot } from "./wechat-batching.ts";
 
 export type AdapterHooks = {
   projectRoot: () => string;
+  wechatReviewModel?: (currentContextTokens?: number) => WechatReviewModel;
   beforeLogicalTool: (logicalTool: string, params: unknown) => {
     intent_id?: string;
     payload_sha256?: string;
@@ -49,6 +51,7 @@ export type AdapterHooks = {
     profile_id?: string;
     project_id?: string;
     authorized_urls?: string[];
+    selected_files?: Array<{ path: string; sha256: string }>;
     authorized_wechat_scopes?: string[];
     model_recipient?: ModelRecipient;
     revision_base_payload?: string;
@@ -1649,10 +1652,21 @@ function escapeSqlLike(value: string): string {
   return `%${value.replace(/\\/gu, "\\\\").replace(/%/gu, "\\%").replace(/_/gu, "\\_")}%`;
 }
 
-function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipient?: ModelRecipient): Record<string, unknown> {
-  if (recipient && ["claude-code", "codex-cli"].includes(recipient.api)) {
-    throw new Error("微信授权会话暂不支持 CLI 后端，请选择 API 模型");
-  }
+function assertWechatScopeActive(projectRoot: string, scope: Record<string, unknown>, recipient?: ModelRecipient): void {
+  const database = new DatabaseSync(resolveWechatDatabase(projectRoot), { readOnly: true, allowExtension: false, defensive: true, timeout: 5000 });
+  try {
+    const current = database.prepare(`SELECT s.status,s.expires_at,s.model_sharing_confirmed,s.selection_sha256,s.project_id,s.message_count,r.recipient_json
+      FROM review_scopes s JOIN scope_recipients r ON r.scope_id=s.scope_id WHERE s.scope_id=?`).get(String(scope.scope_id)) as Record<string, unknown> | undefined;
+    if (!current || current.status !== "active" || Number(current.model_sharing_confirmed) !== 1 ||
+        current.project_id !== scope.project_id || Number(current.message_count) !== Number(scope.message_count) ||
+        current.selection_sha256 !== scope.selection_sha256 || !Number.isFinite(Date.parse(String(current.expires_at))) ||
+        Date.parse(String(current.expires_at)) <= Date.now() || !sameRecipient(JSON.parse(String(current.recipient_json)), recipient)) {
+      throw new Error("微信授权范围已变化或失效，停止后续批次");
+    }
+  } finally { database.close(); }
+}
+
+function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipient: ModelRecipient | undefined, batchBytes: number): WechatSnapshot {
   const database = new DatabaseSync(resolveWechatDatabase(projectRoot), {
     allowExtension: false,
     defensive: true,
@@ -1665,6 +1679,7 @@ function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipie
   });
   try {
     database.exec("PRAGMA query_only = ON");
+    database.exec("BEGIN"); // A coherent read snapshot; closed before any network call.
     database.exec("PRAGMA busy_timeout = 5000");
     const version = database.prepare("PRAGMA user_version").get() as Record<string, unknown> | undefined;
     if (Number(version?.user_version) !== 1) throw new Error("微信会话索引版本不受支持");
@@ -1716,14 +1731,24 @@ function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipie
       const escaped = escapeSqlLike(query);
       parameters.push(escaped, escaped);
     }
+    // Resource envelope matches local import, not a per-model message count.
+    const size = database.prepare(`SELECT count(*) AS rows, coalesce(sum(length(CAST(m.content AS BLOB))),0) AS bytes
+      FROM messages m WHERE ${clauses.join(" AND ")}`).get(...parameters) as { rows: number; bytes: number };
+    if (size.rows > 200_000 || size.bytes > 64 * 1024 * 1024) throw new Error("微信范围超过本地处理资源上限（20 万条 / 64 MiB），请分次选择");
+    // A valid record's fixed field names and evidence IDs alone exceed 128 bytes.
+    // This lower bound rejects obviously over-budget inputs BEFORE .all allocates
+    // their contents. Exact JSON escaping/fragments are checked by the planner.
+    if (size.bytes + size.rows * 128 > (batchBytes - 128) * 128) {
+      throw new Error("所选范围预计超过 128 个原文批次，请缩小日期或会话范围；尚未发送模型");
+    }
     const messages = database.prepare(
       `SELECT m.message_id,m.conversation_id,c.display_name AS conversation_name,c.chat_type,
               m.sender_name,m.is_self,m.sent_at,m.epoch,m.kind,m.content,m.source_locator,m.content_sha256
          FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id
-        WHERE ${clauses.join(" AND ")} ORDER BY m.epoch,m.message_id LIMIT 601`,
+        WHERE ${clauses.join(" AND ")} ORDER BY m.epoch,m.message_id LIMIT 200001`,
     ).all(...parameters) as Record<string, unknown>[];
     if (messages.length === 0) throw new Error("授权范围内的消息原文已被清理，请重新导入并选择会话");
-    if (messages.length > 600 || messages.length !== Number(scope.message_count)) {
+    if (messages.length > 200_000 || messages.length !== Number(scope.message_count)) {
       throw new Error("授权范围的消息集合已发生变化，请重新选择会话");
     }
     for (const message of messages) {
@@ -1736,7 +1761,7 @@ function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipie
         createHash("sha256").update(String(message.content ?? ""), "utf8").digest("hex") !== contentSha256
       ) throw new Error("微信会话消息证据校验失败，请重新导入并选择范围");
     }
-    const canonical = JSON.stringify({
+    const prefix = JSON.stringify({
       conversation_ids: [...conversationIds].sort(),
       conversations: conversationRows
         .map((conversation) => ({
@@ -1747,7 +1772,13 @@ function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipie
         .sort((left, right) => String(left.conversation_id).localeCompare(String(right.conversation_id), "en")),
       date_from: dateFrom,
       date_to: dateTo,
-      messages: messages.map((message) => ({
+    });
+    // Preserve the v1 canonical fingerprint without constructing a second full
+    // message array and one giant JSON string in memory.
+    const fingerprint = createHash("sha256").update(prefix.slice(0, -1) + ',"messages":[');
+    for (const [index, message] of messages.entries()) {
+      if (index) fingerprint.update(",");
+      fingerprint.update(JSON.stringify({
         content_sha256: message.content_sha256,
         conversation_id: message.conversation_id,
         epoch: message.epoch,
@@ -1757,10 +1788,10 @@ function readAuthorizedWechatScope(projectRoot: string, scopeId: string, recipie
         sent_at: message.sent_at,
         sender_name: message.sender_name,
         source_locator: message.source_locator,
-      })),
-      query,
-    });
-    if (createHash("sha256").update(canonical, "utf8").digest("hex") !== scope.selection_sha256) {
+      }));
+    }
+    fingerprint.update('],"query":' + JSON.stringify(query) + "}");
+    if (fingerprint.digest("hex") !== scope.selection_sha256) {
       throw new Error("微信会话授权范围指纹校验失败");
     }
     return {
@@ -2715,27 +2746,36 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
   pi.registerTool({
     name: "director_wechat_read",
     label: "读取已授权微信会话",
-    description: "只读打开用户在工作台明确选择并确认交给当前模型处理的微信会话范围；不能扩大日期、会话或关键词。",
+    description: "只读处理已授权微信范围，不扩大日期、会话或关键词。小范围返回原文；大范围自动按当前模型预算分批整理并汇总，全部成功才完成节点。",
     parameters: Type.Object({
       scope_id: Type.String({ pattern: "^wechat-scope-[a-f0-9]{20}$" }),
     }, { additionalProperties: false }),
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const context = hooks.beforeLogicalTool("wechat.read", params);
       if (context?.profile_id !== "sales-director") throw new Error("微信会话只允许销售总监角色读取");
       if (!context.task_id) throw new Error("微信会话读取缺少受管任务上下文");
       if (!(context.authorized_wechat_scopes ?? []).includes(params.scope_id)) {
         throw new Error("该微信会话授权范围未绑定到当前用户任务");
       }
-      const result = readAuthorizedWechatScope(hooks.projectRoot(), params.scope_id, context.model_recipient);
+      if (!hooks.wechatReviewModel) throw new Error("微信分批整理模型尚未就绪，请重启智能核心");
+      const usage = ctx?.getContextUsage?.();
+      const reviewModel = hooks.wechatReviewModel(typeof usage?.tokens === "number" ? usage.tokens : undefined);
+      const budget = wechatBatchBudget(reviewModel.contextWindow, reviewModel.maxTokens);
+      let result = readAuthorizedWechatScope(hooks.projectRoot(), params.scope_id, context.model_recipient, budget.inputBytes);
       const scopeProjectId = String((result.scope as Record<string, unknown>).project_id ?? "");
       if (!context.project_id || scopeProjectId !== context.project_id) {
         throw new Error("微信会话授权范围与当前项目空间不一致");
       }
+      result = await reviewWechatSnapshot(result, reviewModel, signal, (text) => {
+        onUpdate?.({ content: [{ type: "text", text }], details: { status: "processing" } });
+      }, () => assertWechatScopeActive(hooks.projectRoot(), result.scope, context.model_recipient));
+      signal?.throwIfAborted();
       assertResultSize(result);
       hooks.afterLogicalTool("wechat.read", params, {
         scope_id: params.scope_id,
         selection_sha256: (result.scope as Record<string, unknown>).selection_sha256,
         message_count: (result.scope as Record<string, unknown>).message_count,
+        batching: result.batching,
       });
       return { content: content(result), details: result };
     },
@@ -2943,6 +2983,7 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
     async execute(_toolCallId, params) {
       const context = hooks.beforeLogicalTool("pdf.read", params);
       const result = await readLocalPdf(hooks.projectRoot(), params.path, {
+        selectedFiles: context?.selected_files,
         title: params.title,
         maxPages: params.max_pages,
         maxChars: params.max_chars,

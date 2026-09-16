@@ -37,6 +37,7 @@
 .wxdecipher-status { margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: #edf4f8; color: #39576c; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.7; }
 .wxdecipher-status.error { background: #fff1f0; color: #9b343d; border: 1px solid #edc4c4; }
 #wxdecipher-copy-info { white-space: pre-wrap; overflow-wrap: anywhere; }
+#wxdecipher-storage-directory { user-select: text; min-width: 0; }
 .wxdecipher-export { padding-top: 16px; border-top: 1px solid #e5ebf2; }
 .wxdecipher-export label { font-size: 12px; font-weight: 700; color: #4f5d70; }
 .wxdecipher-export select { width: auto; max-width: 100%; font-size: 12px; }

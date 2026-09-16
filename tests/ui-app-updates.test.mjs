@@ -19,7 +19,7 @@ visit(parsed);
 
 const latest = { tag: "v0.20.3", version: "0.20.3", name: "Synthetic release", published_at: "2026-09-10T00:00:00Z", notes: "Synthetic notes" };
 const snapshot = (extra = {}) => ({ instance_id: "fixture", revision: 0, status: "not_checked", checking: false,
-  current_version: "0.20.2", latest: null, retry_after_seconds: 0, auto_retry_after_seconds: 0,
+  current_version: "0.20.2", latest: null, retry_after_seconds: 0, startup_check_attempted: false,
   can_open_release: false, update_available: false, checked_at: null, ...extra });
 
 class Element {
@@ -50,7 +50,7 @@ function fixture(preference = null) {
     confirmAction: async (options) => { confirmations.push(options); return confirm(options); },
   });
   vm.runInContext(`let model = { app_updates: ${JSON.stringify(snapshot())} }; let requestToken = "synthetic";
-    let appUpdateState = null, appUpdateRequestBusy = false, appUpdateOpening = false, appUpdateLocalError = "", appUpdateAutoEnabled = true, appUpdateLastAutoAttempt = null, appUpdateInstalling = false, appUpdatePolling = false;
+    let appUpdateState = null, appUpdateRequestBusy = false, appUpdateOpening = false, appUpdateLocalError = "", appUpdateAutoEnabled = true, appUpdateStartupAttempted = false, appUpdateInstalling = false, appUpdatePolling = false;
     ${pieces.join("\n")}
     globalThis.testUI = { render: renderAppUpdates, check: checkAppUpdates, open: openAppUpdateRelease, init: initializeAppUpdates,
       sync: syncAppUpdateState, install: installAppUpdate, cancel: cancelAppUpdate, poll: pollAppInstallation,
@@ -93,20 +93,24 @@ test("late bootstrap snapshots cannot replace a newer check response", () => {
   assert.equal(f.ui.state().revision, 5);
 });
 
-test("startup and periodic checks are spaced five minutes apart and can be disabled", async () => {
+test("startup checks once without periodic, visibility or network recovery checks", async () => {
   const f = fixture();
   f.ui.init();
   await f.ui.check();
   assert.equal(f.calls.length, 1, "first startup check works even with a zero fixture clock");
-  f.advance(60_000); await f.timers[0].fn();
-  assert.equal(f.calls.length, 1);
-  f.advance(240_001); await f.timers[0].fn();
-  assert.equal(f.calls.length, 2);
-  f.ui.setEnabled(false); f.advance(300_001); await f.timers[0].fn();
-  assert.equal(f.calls.length, 2);
+  for (const elapsed of [60_000, 300_001, 86_400_000]) {
+    f.advance(elapsed);
+    for (const timer of f.timers) await timer.fn();
+    await f.ui.check();
+    assert.equal(f.calls.length, 1);
+  }
+  assert.equal(f.documentEvents.has("visibilitychange"), false);
+  assert.equal(f.windowEvents.has("online"), false);
+  assert.equal(f.timers.length, 1);
+  assert.equal(f.timers[0].milliseconds, 2000, "Only local installation progress is polled");
+  f.ui.setEnabled(false);
   await f.ui.check(true);
-  assert.equal(f.calls.length, 3, "manual checking remains available when auto checking is off");
-  assert.equal(f.timers[0].milliseconds, 60_000);
+  assert.equal(f.calls.length, 2, "manual checking remains available when auto checking is off");
 });
 
 test("remembered opt-out suppresses startup and persists checkbox changes", async () => {
@@ -118,19 +122,52 @@ test("remembered opt-out suppresses startup and persists checkbox changes", asyn
   f.$("app-update-auto").onchange();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(f.saved.get("agent4market-auto-updates"), "true");
+  assert.equal(f.calls.length, 0, "Opting in takes effect next startup, not immediately");
+  await f.$("app-update-check").onclick();
   assert.equal(f.calls.length, 1);
+  assert.deepEqual(JSON.parse(f.calls[0].options.body), { manual: true });
+  const restarted = fixture("true");
+  restarted.ui.init(); await restarted.ui.check();
+  assert.equal(restarted.calls.length, 1);
 });
 
-test("in-flight, rate-limit and automatic backoff states suppress redundant requests", async () => {
-  const f = fixture();
-  for (const fields of [{ checking: true }, { retry_after_seconds: 90 }, { auto_retry_after_seconds: 600 }]) {
+test("in-flight, rate-limit and already attempted startup states suppress redundant requests", async () => {
+  for (const fields of [{ checking: true }, { retry_after_seconds: 90 }, { startup_check_attempted: true }]) {
+    const f = fixture();
     f.ui.sync(snapshot({ instance_id: JSON.stringify(fields), ...fields }));
     await f.ui.check();
+    assert.equal(f.calls.length, 0);
   }
-  assert.equal(f.calls.length, 0);
-  f.ui.sync(snapshot({ instance_id: "new", status: "error", auto_retry_after_seconds: 600 }));
+  const f = fixture();
+  f.ui.sync(snapshot({ instance_id: "new", status: "error", startup_check_attempted: true }));
   await f.ui.check(true);
-  assert.equal(f.calls.length, 1, "manual retry is distinct from automatic backoff");
+  assert.equal(f.calls.length, 1, "manual checking is independent of the startup attempt");
+});
+
+test("failed startup requests are not automatically retried", async () => {
+  const f = fixture();
+  f.respond(async () => { throw new Error("Synthetic disconnected"); });
+  await f.ui.check();
+  f.advance(86_400_000); await f.ui.check();
+  assert.equal(f.calls.length, 1);
+  assert.match(f.$("app-update-status").textContent, /Synthetic disconnected/u);
+  await f.ui.check(true);
+  assert.equal(f.calls.length, 2);
+});
+
+test("both manual entry points and the update-and-restart button are wired", async () => {
+  const f = fixture();
+  f.ui.init(); f.ui.render();
+  assert.match(f.$("app-update-check").textContent, /手动检查更新/u);
+  assert.match(f.$("app-update-install").textContent, /一键更新并重启/u);
+  assert.equal(f.$("app-update-install").onclick, f.ui.install);
+  await f.$("app-update-check").onclick();
+  f.$("app-updates-button").onclick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(f.calls.length, 2);
+  for (const call of f.calls) assert.deepEqual(JSON.parse(call.options.body), { manual: true });
+  assert.match(html, /每次启动仅检查一次/u);
+  assert.doesNotMatch(html, /每 5 分钟/u);
 });
 
 test("opening a release requires confirmation, only submits the frozen tag and coalesces clicks", async () => {

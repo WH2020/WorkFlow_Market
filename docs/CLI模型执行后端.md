@@ -1,6 +1,6 @@
 # CLI 模型执行后端
 
-工作台可使用本机 Claude Code 或 Codex CLI 执行普通任务的模型推理，无需在工作台配置该 CLI 的 API Key。原有 API 供应商仍可同时保留，并可继续用于指定任务或角色。
+工作台可使用本机 Claude Code 或 Codex CLI 执行普通任务及已授权微信会话整理的模型推理，无需在工作台配置该 CLI 的 API Key。原有 API 供应商仍可同时保留，并可继续用于指定任务或角色。
 
 这不同于已有的“编码助手对话入口”：后者只通过本机桥接创建、查看和调整任务；本功能让 CLI 真正参与 Pi 会话中的模型推理和工具选择，但不建立第二套业务执行引擎。
 
@@ -25,7 +25,7 @@
 | 输入与输出 | 文字；每轮最多一个工作台工具调用。暂不开放图片或 CLI 会话复用。 |
 | 模型与思考 | Codex `model/list` 自动发现；只开放 CLI 与当前 Pi 都支持的档位。保存、任务启动和传输均校验；精确传入 `model_reasoning_effort`，不允许静默裁剪。Claude 及历史手填配置保持原有行为。 |
 | 执行边界 | Pi 独占任务状态、DAG、业务工具、产物登记和审批。CLI 原生 Shell、读写文件、浏览器、插件、MCP、自主子代理不可用。 |
-| 微信 | 微信会话整理及其授权范围不支持 CLI 后端；请为这类任务选择原有 API 模型。CLI 账号身份/组织边界尚不能随会话授权可靠冻结。 |
+| 微信 | 支持既有范围选择、模型使用确认后的会话整理，不增加额外账号提示。按执行时 CLI 当前登录账号处理；冻结的是服务和模型，不是登录身份或组织。账号切换无法自动识别。 |
 | 超时与取消 | 单次模型请求 180 秒；每个 Pi 进程内，每个 CLI 实例最多两个在途请求。Pi 中止请求时终止本次进程树，丢弃迟到结果；沿用工作台既有任务取消状态规则。 |
 | 输出和费用 | 请求上限 1 MiB，输出上限 2 MiB，文本或工具参数各不超过 128 KiB。能取得时记录 token 用量；适配器中的零费用字段是未计价占位，不代表服务免费。 |
 
@@ -37,6 +37,7 @@
 
 - 配置采用 v3 多供应商注册表；旧 v2 CLI 配置须用户重新检测、确认模型并保存，不自动执行。
 - 每个实例绑定官方端点、协议、模型、程序路径、版本和启动文件 SHA-256。运行时清单也有摘要校验；登记/移除不改变历史接收方绑定。程序哈希按 1 MiB 分块异步读取，校验期间也可中止请求。操作系统、当前用户及安装目录须可信；摘要检查不能防御恶意本机程序在校验后替换可执行文件。
+- 微信范围继续使用既有内容指纹、到期时间、项目和模型接收方绑定；创建范围、任务入队、读取范围和发送模型前逐层校验。CLI 实例的启动参数、版本和摘要由不可变注册表另行绑定，无需复制到每个范围。没有新增授权弹窗，也不自动选择、读取或发送会话。
 - 提示词和工作台工具定义通过 stdin 传递，不写入命令行或请求文件。只在新建私有运行目录写无任务内容的 schema 和 Codex 模型能力目录；正常结束即清理，异常遗留的本工具目录在后续启动时按 24 小时阈值清理。已有不安全目录只拒绝，不改权限。
 - 模型目录查询使用空临时 HOME/CODEX_HOME 和阻断联网的代理，仅执行初始化与分页 `model/list`，不创建模型任务。仅保留模型 ID、名称、默认与支持的思考档位；目录缓存限于进程内 15 分钟并绑定程序摘要，不保存 CLI 原始响应。内置目录可见不代表该账号能调用。
 - 主任务和已指定的 CLI 只读角色在创建任务时固定思考强度；子任务启动参数、不可变合同和结果回执相互校验。旧任务若缺少必要的 CLI 思考记录，会拒绝执行并提示重新开始，不从当前默认值猜测。
@@ -45,6 +46,17 @@
 - 仅接收一个合法 JSON 结果，将工具请求转换成 Pi 工具事件并再次校验名称与参数；对象默认拒绝未声明字段，显式开放的字典字段按其 schema 校验。原生工具事件、残缺输出、多结果、超限内容均拒绝。错误信息不回显 CLI 原始 stderr 或私有上下文。
 
 ## 开发验证
+
+### 2026-09-16 微信会话整理接入
+
+- `python -m pytest tests/test_wechat_store.py tests/test_cli_provider.py tests/test_model_registry.py tests/test_cli_process_host.py ui/test_server.py -q --tb=short`：136 passed、1 skipped、91 subtests passed。
+- `node --test tests/ui-wechat-review.test.mjs tests/ui-model-settings.test.mjs pi/tests/cli-model-provider.test.ts pi/tests/data-adapters.test.ts pi/tests/model-boundaries.test.ts`：81 项通过；新增 CLI 范围创建、入队、读取和 UI 单次既有确认测试，保留无授权/模型漂移/范围篡改拒绝。
+- `node --test tests/vertical-workflow-selection.test.ts tests/ui-wxdecipher.test.mjs`：56 项通过；包括两种 CLI 微信历史的上下文与发送前守卫。
+- 使用发行版私有 Python 运行 `pi/tests/cli-provider-e2e.test.mjs`：8 项通过；合成 CLI 的真实 SDK / 进程宿主闭环，不调用云端。
+- `pi/tests/cli-native-offline.test.mjs`：Codex 两项本地合成服务测试通过，Claude 原生测试未配置而跳过。新增显式 `chatgpt_base_url` 固定参数，原生离线测试验证参数兼容性与工具隔离，不代表真实 ChatGPT 登录/网络已验收。
+- TypeScript `--noEmit`、`node --check ui/app.js`、`git diff --check` 和 `python -m agent_platform validate` 通过。
+
+未覆盖真实登录、权限、额度、云端响应、macOS 原生运行和安装包；本次没有读取真实聊天或 CLI 登录文件，也没有发布新版。
 
 默认测试只使用合成 CLI、合成数据和本地服务，不使用真实登录或云端模型：
 

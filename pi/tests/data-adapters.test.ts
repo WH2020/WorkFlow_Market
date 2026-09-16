@@ -35,6 +35,7 @@ function fixture(
   profileId = "market-director",
   wechatScopes: string[] = [],
   projectId: string | undefined = "project-default",
+  modelRecipient = fixtureRecipient,
 ) {
   const root = mkdtempSync(join(tmpdir(), "director-adapters-"));
   mkdirSync(join(root, "data", "knowledge"), { recursive: true });
@@ -62,6 +63,13 @@ function fixture(
   const before: string[] = [];
   const after: Array<{ tool: string; details: unknown }> = [];
   const errors: Array<{ tool: string; outcome: string }> = [];
+  const wechatCalls: string[] = [];
+  const wechatModel = { contextWindow: 32000, maxTokens: 4096, currentContextTokens: 0,
+    complete: async (_system: string, input: string) => {
+      wechatCalls.push(input);
+      return JSON.stringify({ coverage_id: input.split("\n")[0].slice("coverage_id=".length),
+        summary: `合成摘要 ${input.match(/wechat:\/\/message\/wxmsg-[a-f0-9]{24}/u)![0]}` });
+    } };
   let intent = 0;
   const pi = {
     registerTool(tool: RegisteredTool & { name: string }) {
@@ -70,6 +78,7 @@ function fixture(
   };
   const runtime = registerDataAdapters(pi as never, {
     projectRoot: () => root,
+    wechatReviewModel: () => wechatModel,
     beforeLogicalTool: (tool, params) => {
       before.push(tool);
       if (tool.endsWith(".write")) {
@@ -86,7 +95,7 @@ function fixture(
           storage_binding: { backend: backend.backend, binding_id: backend.binding_id },
         };
       }
-      if (taskId) return { task_id: taskId, profile_id: profileId, project_id: projectId, authorized_wechat_scopes: wechatScopes, model_recipient: fixtureRecipient };
+      if (taskId) return { task_id: taskId, profile_id: profileId, project_id: projectId, authorized_wechat_scopes: wechatScopes, model_recipient: modelRecipient };
     },
     afterLogicalTool: (tool, _params, details) => after.push({ tool, details }),
     onLogicalToolError: (tool, _params, outcome) => errors.push({ tool, outcome }),
@@ -98,6 +107,8 @@ function fixture(
     before,
     after,
     errors,
+    wechatModel,
+    wechatCalls,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -194,9 +205,10 @@ test("sales adapter reads several tables in one node and performs versioned writ
   }
 });
 
-test("WeChat adapter reads only the scope frozen into the sales-director task", async () => {
+for (const api of ["openai-completions", "claude-code", "codex-cli"]) test(`WeChat ${api} adapter reads only the scope frozen into the sales-director task`, async () => {
   const scopeId = "wechat-scope-0123456789abcdefabcd";
-  const state = fixture(false, "task-wechat", "sales-director", [scopeId]);
+  const recipient = { ...fixtureRecipient, api };
+  const state = fixture(false, "task-wechat", "sales-director", [scopeId], "project-default", recipient);
   try {
     const wechatRoot = join(state.root, "data", "wechat");
     mkdirSync(wechatRoot, { recursive: true });
@@ -237,7 +249,7 @@ test("WeChat adapter reads only the scope frozen into the sales-director task", 
       createHash("sha256").update(selection, "utf8").digest("hex"), 1, "2026-08-25T00:00:00Z", "2099-08-25T00:00:00Z", "active",
     );
     database.prepare("INSERT INTO conversations VALUES(?,?,?,?)").run(conversationId, "客户甲", "direct", "2026-08-25T02:00:00Z");
-    database.prepare("INSERT INTO scope_recipients VALUES(?,?)").run(scopeId, JSON.stringify(fixtureRecipient));
+    database.prepare("INSERT INTO scope_recipients VALUES(?,?)").run(scopeId, JSON.stringify(recipient));
     for (const [index, message] of messageFixtures.entries()) {
       database.prepare("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?)").run(
         message.messageId, conversationId, index ? "我" : "客户甲", index, `2026-08-${24 + index}T02:00:00Z`, 0,
@@ -267,6 +279,35 @@ test("WeChat adapter reads only the scope frozen into the sales-director task", 
     restored.prepare("UPDATE messages SET sender_name=? WHERE message_id=?").run("客户甲", messageFixtures[0].messageId);
     restored.close();
 
+    const wrongRecipient = new DatabaseSync(join(wechatRoot, "chat-index.sqlite3"));
+    wrongRecipient.prepare("UPDATE scope_recipients SET recipient_json=?").run(JSON.stringify({ ...recipient, model_id: "other-model" }));
+    wrongRecipient.close();
+    await assert.rejects(() => read.execute("wechat-wrong-model", { scope_id: scopeId }), /供应商、接收地址或模型/);
+    const restoreRecipient = new DatabaseSync(join(wechatRoot, "chat-index.sqlite3"));
+    restoreRecipient.prepare("UPDATE scope_recipients SET recipient_json=?").run(JSON.stringify(recipient));
+    restoreRecipient.close();
+
+    assert.equal(state.wechatCalls.length, 0, "small scopes return raw messages without extra inference");
+    const large = new DatabaseSync(join(wechatRoot, "chat-index.sqlite3"));
+    for (let index = 3; index <= 603; index++) {
+      const id = `wxmsg-${index.toString(16).padStart(24, "0")}`;
+      large.prepare("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?)").run(id, conversationId, "客户甲", 0,
+        "2026-08-24T02:00:00Z", 0, "text", messageFixtures[0].contentText, `wechat://message/${id}`, messageFixtures[0].contentSha256);
+    }
+    const canonical = JSON.parse(selection);
+    canonical.messages = large.prepare("SELECT content_sha256,conversation_id,epoch,is_self,kind,message_id,sent_at,sender_name,source_locator FROM messages ORDER BY epoch,message_id").all();
+    large.prepare("UPDATE review_scopes SET message_count=?,selection_sha256=?").run(603, createHash("sha256").update(JSON.stringify(canonical)).digest("hex"));
+    large.close();
+    const batched = await read.execute("wechat-large", { scope_id: scopeId }) as { details: { messages: unknown[]; batching: { complete: boolean; total_messages: number } } };
+    assert.deepEqual(batched.details.messages, []);
+    assert.equal(batched.details.batching.total_messages, 603);
+    assert.equal(batched.details.batching.complete, true);
+    assert.ok(state.wechatCalls.length > 1);
+    const completed = state.after.length;
+    state.wechatModel.complete = async () => { throw new Error("synthetic batch failed"); };
+    await assert.rejects(() => read.execute("wechat-failed-batch", { scope_id: scopeId }), /synthetic batch failed/);
+    assert.equal(state.after.length, completed, "failed batches must not advance the DAG");
+
     const blocked = fixture(false, "task-wechat-unauthorized", "sales-director", []);
     try {
       mkdirSync(join(blocked.root, "data", "wechat"), { recursive: true });
@@ -277,7 +318,7 @@ test("WeChat adapter reads only the scope frozen into the sales-director task", 
       );
     } finally { blocked.cleanup(); }
 
-    const missingProject = fixture(false, "task-wechat-no-project", "sales-director", [scopeId], "");
+    const missingProject = fixture(false, "task-wechat-no-project", "sales-director", [scopeId], "", recipient);
     try {
       mkdirSync(join(missingProject.root, "data", "wechat"), { recursive: true });
       writeFileSync(

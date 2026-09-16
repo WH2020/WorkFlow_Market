@@ -182,8 +182,8 @@ test("CLI controls use a discovered Codex catalog and state their security bound
   assert.doesNotMatch(html, /claude-opus-5|claude-sonnet-5|claude-haiku-4\.5/u);
   assert.match(html, /“已安装”不代表已经登录/u);
   assert.match(html, /不会授予 CLI 自带的文件、Shell 或 MCP 权限/u);
-  assert.match(html, /微信会话整理首版仅支持 API 模型/u);
-  assert.match(source, /微信会话整理首版不支持 Claude Code 或 Codex CLI/u);
+  assert.match(html, /微信会话整理也支持已配置的 Claude Code 和 Codex CLI/u);
+  assert.doesNotMatch(source, /微信会话整理首版不支持 Claude Code 或 Codex CLI/u);
   assert.match(source, /localizeStaticInterface\(\);\s*load\(\)\s*\.then\(\(\) =>\s*(?:\{\s*checkAppUpdates\(false\);\s*return\s+)?detectCodingAssistants\(\)/u,
     "saved registry state must render before asynchronous CLI detection");
 });

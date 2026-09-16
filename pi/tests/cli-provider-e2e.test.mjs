@@ -13,6 +13,7 @@ import registerCliProviders, { cliLaunchSha256 } from "../extensions/cli-model-p
 import registerModelGuard from "../extensions/subagent-model-guard.ts";
 import { createGovernedSubagentContract } from "../extensions/subagent-contracts.ts";
 import { runtimeModelRecipient } from "../extensions/model-selection.ts";
+import { createWechatReviewModel } from "../extensions/wechat-review-model.ts";
 
 // Real Pi SDK -> production CLI transport -> Python process host -> synthetic Node CLI.
 // This test never launches a real coding assistant, reads a login, or uses a network.
@@ -73,6 +74,15 @@ async function sessionFor(api, calls, guarded = false) {
 }
 
 for (const api of protocols) {
+  test(`${api}: isolated WeChat inference uses real registry auth and controlled process without tools`, { timeout: 15000 }, async () => {
+    const model = registry.find(`agent4market-${api}-synthetic`, "synthetic-model");
+    let guards = 0; let marked = false; let usages = 0;
+    const review = createWechatReviewModel({ model, registry, recipient: runtimeModelRecipient(model), thinking: "off",
+      guard: () => { guards++; }, markSensitive: () => { marked = true; }, recordUsage: () => { usages++; } });
+    const result = await review.complete("Synthetic isolated batch. Return text only.", "FIXTURE_TOOL_RESULT", 2048);
+    assert.equal(result, "合成 CLI 工具闭环完成");
+    assert.equal(marked, true); assert.ok(guards >= 4); assert.equal(usages, 1);
+  });
   test(`${api}: real SDK and process host complete the controlled tool-result roundtrip`, { timeout: 20000 }, async () => {
     const calls = []; const session = await sessionFor(api, calls);
     try {

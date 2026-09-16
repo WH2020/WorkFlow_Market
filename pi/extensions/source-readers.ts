@@ -47,7 +47,7 @@ export type SourceDocument = {
   };
 };
 
-type PdfOptions = { maxPages?: number; maxChars?: number; title?: string; deadlineMs?: number; allowFallback?: boolean };
+type PdfOptions = { maxPages?: number; maxChars?: number; title?: string; deadlineMs?: number; allowFallback?: boolean; selectedFiles?: Array<{ path: string; sha256: string }> };
 export type PublicAddress = { address: string; family: 4 | 6 };
 type SourceRequest = (url: URL, target: PublicAddress, signal?: AbortSignal) => Promise<Response>;
 
@@ -571,6 +571,10 @@ export async function readLocalPdf(projectRoot: string, configuredPath: string, 
   if (!configuredPath.trim() || isAbsolute(configuredPath) || configuredPath.includes("\0")) throw new Error("PDF 路径必须是项目内相对路径");
   const root = realpathSync.native(resolve(projectRoot));
   const candidate = resolve(root, configuredPath);
+  const selected = options.selectedFiles?.find(file => resolve(root, file.path) === candidate);
+  if (options.selectedFiles && (!selected || !/^[a-f0-9]{64}$/u.test(selected.sha256))) {
+    throw new Error("该 PDF 不在本次明确选择的资料范围内，请重新选择并创建任务");
+  }
   if (!isContained(root, candidate)) throw new Error("PDF 路径越出项目目录");
   const allowedRoots = [resolve(root, "inputs"), resolve(root, "data", "inbox")];
   if (!allowedRoots.some((allowed) => isContained(allowed, candidate))) {
@@ -604,6 +608,7 @@ export async function readLocalPdf(projectRoot: string, configuredPath: string, 
     throw new Error("PDF 在读取期间已发生替换，请重试");
   }
   if (Buffer.from(bytes.subarray(0, 5)).toString("ascii") !== "%PDF-") throw new Error("文件头不是有效 PDF");
+  if (selected && sha256(bytes) !== selected.sha256) throw new Error("所选 PDF 内容已变化，请重新选择资料并创建任务");
   const extracted = await extractPdf(bytes, options);
   const relativePath = relative(root, canonical).replaceAll("\\", "/");
   const accessedAt = new Date().toISOString();

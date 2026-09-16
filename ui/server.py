@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import sqlite3
 import shutil
 import subprocess
 import sys
@@ -49,6 +50,8 @@ if sys.platform == "darwin":
     from agent_platform.macos_updates import MacOSUpdateManager, public_failure as update_public_failure  # noqa: E402
 from agent_platform.windows_update_engine import UpdateFailure  # noqa: E402
 from agent_platform.free_chat import ChatError, ChatManager  # noqa: E402
+from agent_platform import business_library as dossiers  # noqa: E402
+from ui.business_library_api import source_records as dossier_sources, frozen_file  # noqa: E402
 
 FREE_CHAT = ChatManager()
 from agent_platform.search_provider import (  # noqa: E402
@@ -2234,6 +2237,22 @@ def recover_prepared_task_restarts() -> None:
             continue
 
 
+def pending_task_requests(tasks: list[dict]) -> list[dict]:
+    existing = {task["task_id"] for task in tasks}
+    pending = []
+    for path in sorted(REQUESTS.glob("request-*.json")) if REQUESTS.exists() else []:
+        if path.stem in existing or path.is_symlink() or path.stat().st_size > 1024 * 1024:
+            continue
+        try:
+            record = load_json(path)
+            if record.get("status") != "requested" or record.get("request_id") != path.stem:
+                continue
+            pending.append({k: record.get(k, "") for k in ("request_id", "service_id", "profile_id", "project_id", "created_at")})
+        except (ValueError, OSError):
+            continue
+    return sorted(pending, key=lambda r: r["created_at"], reverse=True)[:200]
+
+
 def task_summaries() -> list[dict[str, Any]]:
     recover_prepared_presentation_revisions()
     recover_prepared_task_restarts()
@@ -2252,7 +2271,7 @@ def task_summaries() -> list[dict[str, Any]]:
                 "task_id", "project_id", "schedule_id", "scheduled_for", "profile_id", "service_id", "workflow_id", "status", "current_stage",
                 "current_node", "waiting_node", "completed_nodes", "version", "created_at", "updated_at",
                 "approval_request", "pending_write", "artifacts", "request", "restarted_from_task_id", "superseded_by_task_id",
-                "requested_model", "requested_thinking_level", "effective_model", "effective_thinking_level"
+                "requested_model", "requested_thinking_level", "effective_model", "effective_thinking_level", "library_context"
             )}
             if isinstance(summary.get("approval_request"), dict):
                 summary["approval_request"] = {
@@ -2505,6 +2524,33 @@ def library_snapshot() -> dict[str, Any]:
     return snapshot
 
 
+def business_library_snapshot() -> dict[str, Any]:
+    return dossiers.snapshot(ROOT, dossier_sources(ROOT, project_records()))
+
+
+def business_library_mutation(payload: dict[str, Any]) -> dict[str, Any]:
+    references = payload.get("sources", [])
+    valid = set()
+    if not isinstance(references, list) or any(not isinstance(r, str) for r in references):
+        raise ValueError("资料引用必须为编号数组")
+    if any(r.startswith("file:") for r in references):
+        valid.update("file:" + e["library_id"] for e in library_snapshot()["entries"] if e.get("status") != "archived")
+    if any(r.startswith("wechat:") for r in references):
+        if not wechat_http_supported():
+            raise dossiers.DossierError("LOCAL_ISOLATION_UNSUPPORTED", "当前平台不开放微信资料关联")
+        offset = 0
+        while offset <= 100000:
+            result = list_wechat_conversations(ROOT, chat_type="group", limit=200, offset=offset)
+            valid.update("wechat:" + r["conversation_id"] for r in result["rows"])
+            offset += len(result["rows"])
+            if not result["rows"] or offset >= result["total"] or all(r in valid for r in references if r.startswith("wechat:")):
+                break
+    task = None
+    if payload.get("task_id"):
+        task = next((t for t in task_summaries() if t["task_id"] == payload["task_id"]), None)
+    return dossiers.mutate(ROOT, payload, sources=dossier_sources(ROOT, project_records()), valid_sources=valid, task=task)
+
+
 def library_quick_revision(data: dict[str, Any], files: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> str:
     material = {
         "catalog": catalog_revision(ROOT),
@@ -2740,6 +2786,14 @@ def initialize_a4_handler() -> bool:
 
 WINDOWS_UPDATES = (MacOSUpdateManager if sys.platform == "darwin" else WindowsUpdateManager)(ROOT, APP_UPDATES, idle=update_idle,
     pending=os.environ.get("AGENT4MARKET_UPDATE_PENDING"), on_committed=initialize_a4_handler)
+
+
+def wechat_storage_snapshot() -> dict:
+    if ACTIVE_PROFILE_ID not in {None, "sales-director"} or not wechat_http_supported():
+        return {"status": "unavailable", "configured": False, "directory": None,
+                "message": "当前平台或角色不支持微信本机数据目录。"}
+    from agent_platform.wechat_storage import storage_status
+    return storage_status(ROOT)
 
 
 def app_update_snapshot() -> dict:
@@ -3215,12 +3269,14 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 }
             wechat["decipher"] = wxdecipher.capabilities()
             wechat["http_available"] = wechat_http_supported()
+            wechat["storage"] = wechat_storage_snapshot()
             tasks = task_summaries()
             files = project_files()
             outputs = output_summary()
             data = data_summary()
             batches = reimbursement_batches()
             self.send_json(HTTPStatus.OK, {"profiles": profiles(), "workflows": workflows(), "tasks": tasks,
+                                           "pending_requests": pending_task_requests(tasks),
                                            "data": data, "outputs": outputs,
                                             "projects": project_summaries(tasks, files, outputs), "project_files": files,
                                             "library_revision": library_quick_revision(data, files, outputs),
@@ -3267,6 +3323,16 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, library_snapshot())
             except (LibraryStoreError, ValueError) as error:
                 self.send_library_error(error)
+            return
+        if route == "/api/business-library":
+            try:
+                view = business_library_snapshot()
+                if not wechat_http_supported():
+                    view["groups"] = {}
+                    view["links"] = {k: v for k, v in view["links"].items() if not k.startswith("wechat:")}
+                self.send_json(HTTPStatus.OK, view)
+            except (ValueError, RuntimeError, sqlite3.Error) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error), "code": getattr(error, "code", "DOSSIER_ERROR")})
             return
         if route == "/api/accounts":
             try:
@@ -3451,7 +3517,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
-        elif route not in ("/app.js", "/styles.css", "/wxdecipher.css", "/free-chat.js", "/free-chat.css"):
+        elif route not in ("/app.js", "/styles.css", "/wxdecipher.css", "/free-chat.js", "/free-chat.css", "/business-library.js", "/business-library.css"):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         super().do_GET()
@@ -3625,6 +3691,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, update_bid_project(ROOT, unquote(route.split("/")[3]), payload))
             elif route == "/api/projects":
                 self.send_json(HTTPStatus.CREATED, create_project_record(payload))
+            elif route == "/api/business-library":
+                self.send_json(HTTPStatus.OK, business_library_mutation(payload))
             elif route.startswith("/api/projects/") and route.endswith("/status"):
                 self.send_json(HTTPStatus.OK, set_project_status(route.split("/")[3], str(payload.get("status", ""))))
             elif route == "/api/schedules":
@@ -3833,6 +3901,9 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_bid_error(error)
         except LibraryStoreError as error:
             self.send_library_error(error)
+        except dossiers.DossierError as error:
+            self.send_json(HTTPStatus.SERVICE_UNAVAILABLE if error.code == "STORE_BUSY" else HTTPStatus.CONFLICT if error.code in {"CONFLICT", "DUPLICATE"} else HTTPStatus.BAD_REQUEST,
+                           {"error": str(error), "code": error.code})
         except WechatStoreError as error:
             self.send_wechat_error(error)
         except UpdateFailure:
@@ -3956,7 +4027,28 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if payload.get("workflow_id") is not None and payload["workflow_id"] != service["workflow"]:
             raise ValueError("服务与工作流不匹配")
         runtime_selection = task_runtime_selection(payload)
+        library_context = None
+        if "library_selection" in payload:
+            selection = payload["library_selection"]
+            if not isinstance(selection, dict) or set(selection) - {"entity_id", "revision", "file_ids"}:
+                raise ValueError("资料选择格式无效")
+            view = business_library_snapshot()
+            if selection.get("entity_id"):
+                library_context = dossiers.task_context(view, selection["entity_id"], selection.get("revision", ""))
+                if library_context.get("workspace_id") and library_context["workspace_id"] != project_id:
+                    raise ValueError("项目档案与任务空间不一致，请重新选择背景")
+            else:
+                library_context = {"entity_id": "", "revision": view["revision"], "scope_ids": [], "snapshot": {}}
+            file_ids = selection.get("file_ids", [])
+            if not isinstance(file_ids, list) or len(file_ids) > 20 or any(not isinstance(i, str) for i in file_ids):
+                raise ValueError("每次最多选择 20 份资料")
+            entries = {e["library_id"]: e for e in library_snapshot()["entries"]} if file_ids else {}
+            if any(i not in entries or entries[i].get("status") in {"archived", "rejected"} for i in file_ids):
+                raise ValueError("所选资料已失效，请重新选择")
+            library_context["files"] = [frozen_file(ROOT, entries[i], project_id) for i in dict.fromkeys(file_ids)]
         if service_id == "wechat-review":
+            if library_context is not None:
+                raise ValueError("微信整理仅使用已确认的会话范围，不附带其他档案或文件背景")
             if profile_id != "sales-director":
                 raise ValueError("微信会话整理只在销售总监版本中提供")
             scope_ids = sorted(set(re.findall(r"\bwechat-scope-[a-f0-9]{20}\b", request_text)))
@@ -3967,8 +4059,6 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 raise ValueError("微信会话授权范围与当前项目空间不一致")
             from agent_platform.model_registry import available_models
             recipient = available_models(ROOT).get(runtime_selection.get("requested_model", ""))
-            if recipient and recipient.get("api") in {"claude-code", "codex-cli"}:
-                raise ValueError("微信授权会话暂不支持 CLI 后端，请选择 API 模型")
             if not recipient or scope.get("model_recipient") != recipient:
                 raise ValueError("微信授权与当前任务模型接收方不一致，请重新选择并确认")
         if service_id in PUBLIC_SEARCH_SERVICES:
@@ -3987,6 +4077,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
                   "service_id": service_id, "workflow_id": service["workflow"], "request": request_text,
                   "created_at": now(), "source": "local-workbench", "project_id": project_id,
                   **runtime_selection}
+        if library_context is not None:
+            record["library_context"] = library_context
         atomic_json(REQUESTS / f"{request_id}.json", record)
         self.send_json(HTTPStatus.CREATED, record)
 
@@ -4343,6 +4435,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "request": request_text, "created_at": now(), "source": "local-workbench",
                     "project_id": project_id, "request_kind": "task-restart",
                     "restart_of_task_id": task_id, "source_task_version": expected_version,
+                    **({"library_context": task["library_context"]} if task.get("library_context") else {}),
                     **_stored_runtime_selection(task),
                 }
                 atomic_json(request_path, record)
@@ -4480,6 +4573,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "project_id": project_id,
                     "request_kind": "presentation-plan-revision",
                     "revision_of_task_id": task_id, "source_plan_sha256": expected_plan_sha256,
+                    **({"library_context": task["library_context"]} if task.get("library_context") else {}),
                     "source_task_version": expected_version,
                     **_stored_runtime_selection(task),
                 }

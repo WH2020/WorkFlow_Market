@@ -105,6 +105,25 @@ def enrolled_root(project_root: Path | str) -> Path | None:
         return selected
 
 
+def storage_status(project_root: Path | str) -> dict:
+    """Read only the enrollment and directory permissions, never database bytes.
+
+    Do not use permission_plan: displaying a location must not mint consent
+    tokens, create directories, repair ACLs or require an empty active store.
+    """
+    from .wechat_store import WechatStoreError, _wechat_root
+    try:
+        with _LOCK:
+            active = enrolled_root(project_root)
+            directory = active if active is not None else _wechat_root(project_root)
+            return {"status": "configured" if active is not None else "default",
+                    "configured": active is not None, "directory": str(directory)}
+    except (WechatStoreError, OSError, ValueError, RuntimeError):
+        # Never present an unverified marker path as an active destination.
+        return {"status": "error", "configured": False, "directory": None,
+                "message": "数据目录配置或权限校验失败，无法确认当前保存位置；请检查目录和当前用户权限。"}
+
+
 def _check_legacy_empty(project_root: Path | str) -> None:
     data = Path(project_root).resolve() / "data"
     legacy = data / "wechat"

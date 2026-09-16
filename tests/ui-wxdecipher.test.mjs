@@ -9,7 +9,7 @@ const source = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("../ui/index.html", import.meta.url), "utf8");
 const ids = Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => match[1]);
 const parsed = ts.createSourceFile("app.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-const names = new Set(["wxDecipherStatus", "renderWxDecipherControls", "renderWxDatabaseDiscovery", "appendWxDecipherEntries", "discoverWxDatabases", "addDiscoveredWxDatabases", "renderWxDecipherFiles", "requestWxStorageAccess", "copyWxDatabases", "clearWxCopiedDatabases", "runWxDecipher", "exportSelectedWechat", "refreshWxProcesses", "clearWxMedia", "restoreWxMedia"]);
+const names = new Set(["validWxSourcePreferences", "saveWxSourcePreferences", "forgetWxSourcePreferences", "initializeWxSourcePreferences", "wxDecipherStatus", "renderWxStorageDirectory", "renderWxDecipherControls", "renderWxDatabaseDiscovery", "appendWxDecipherEntries", "discoverWxDatabases", "addDiscoveredWxDatabases", "renderWxDecipherFiles", "requestWxStorageAccess", "copyWxDatabases", "clearWxCopiedDatabases", "runWxDecipher", "exportSelectedWechat", "refreshWxProcesses", "clearWxMedia", "restoreWxMedia"]);
 const hooks = ["wxdecipher-auto-discover", "wxdecipher-add-files", "wxdecipher-discovery-add", "wxdecipher-discovery-dismiss", "wxdecipher-file-input", "wxdecipher-clear-files", "wxdecipher-run", "wxdecipher-snapshot", "wechat-ownership", "wechat-export-selected", "wxdecipher-process-refresh", "wxdecipher-capture-confirm", "wxdecipher-media-choose", "wxdecipher-media-input", "wxdecipher-media-clear"];
 const pieces = [];
 function visit(node) {
@@ -32,7 +32,7 @@ class Element {
   remove() {}
 }
 
-function fixture() {
+function fixture(saved = new Map()) {
   const elements = new Map();
   const $ = (id) => {
     assert.equal(ids.filter((value) => value === id).length, 1, `Control exists exactly once: ${id}`);
@@ -44,6 +44,7 @@ function fixture() {
   const wechatState = { selected: new Set(), messages: [], loaded: false, revision: "" };
   const calls = []; const notices = [];
   const context = vm.createContext({ $, wxdecipherState: state, wxmediaState: mediaState, wechatState, model: { wechat: { decipher: { decrypt_available: true } } },
+    localStorage: { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value), removeItem: (key) => saved.delete(key) },
     document: { createElement: (tag) => new Element(tag), body: new Element("body") },
     api: async (url, options) => { calls.push([url, options]); throw new Error("offline"); },
     load: async () => {}, renderWechatSummary() {}, wechatFilters: () => ({ date_from: "2026-09-01", date_to: "2026-09-09", query: "报价" }),
@@ -51,13 +52,130 @@ function fixture() {
     URL: { createObjectURL: () => "blob:synthetic", revokeObjectURL() {} }, Blob, atob, requestToken: "synthetic-token", setTimeout: (callback) => callback(),
   });
   vm.runInContext(pieces.join("\n"), context);
+  context.initializeWxSourcePreferences();
   $("wxdecipher-cipher-mode").value = "auto"; $("wechat-export-format").value = "jsonl";
-  return { context, $, state, mediaState, wechatState, calls, notices };
+  return { context, $, state, mediaState, wechatState, calls, notices, saved };
 }
+
+test("manual source hints survive reopening without restoring files, keys or consent", () => {
+  for (const directory of ["E:\\synthetic\\微信记录\\wxid_test", "/Users/synthetic/WeChat Files/wxid_test"]) {
+    const first = fixture();
+    first.$("wxdecipher-directory-path").value = directory;
+    first.$("wxdecipher-directory-path").oninput();
+    first.$("wxdecipher-self-id").value = "wxid_test";
+    first.$("wxdecipher-key").value = "synthetic-secret-key";
+    first.$("wechat-ownership").checked = true;
+    first.$("wxdecipher-snapshot").checked = true;
+    first.state.files = [{ file: { name: "message.db", size: 4096 }, key: "synthetic-file-key" }];
+    markCopied(first.state);
+    first.$("wxdecipher-self-id").onchange();
+    const stored = JSON.parse(first.saved.get("agent4market.wechat-source.v1"));
+    assert.deepEqual(stored, { version: 1, directory, selfId: "wxid_test" });
+    assert.equal(first.saved.size, 1);
+    const next = fixture(first.saved);
+    assert.equal(next.$("wxdecipher-directory-path").value, directory);
+    assert.equal(next.$("wxdecipher-self-id").value, "wxid_test");
+    assert.equal(next.$("wxdecipher-key").value, "");
+    for (const id of ["wechat-ownership", "wxdecipher-snapshot", "wxdecipher-wal-confirm", "wxdecipher-capture-confirm"]) assert.equal(next.$(id).checked, false);
+    assert.equal(next.state.files.length, 0);
+    assert.equal(next.state.copied, undefined);
+    assert.equal(next.state.discoveryGroups.length, 0);
+    assert.equal(next.calls.length, 0, "Restoring preferences never requests discovery, copy or parsing");
+    assert.match(next.$("wxdecipher-source-memory-status").textContent, /已恢复上次/u);
+  }
+  assert.match(source, /initializeWxSourcePreferences\(\);\s*initializeAppUpdates\(\);/u, "Restore once at startup, not on periodic render");
+});
+
+test("editing, clearing fields and forgetting replace or remove only source hints", () => {
+  const f = fixture();
+  f.saved.set("unrelated-preference", "keep");
+  f.$("wxdecipher-self-id").value = "wxid_first"; f.$("wxdecipher-self-id").oninput();
+  f.$("wxdecipher-self-id").value = "wxid_second"; f.$("wxdecipher-self-id").oninput();
+  assert.equal(fixture(f.saved).$("wxdecipher-self-id").value, "wxid_second");
+  f.$("wxdecipher-self-id").value = ""; f.$("wxdecipher-self-id").oninput();
+  assert.equal(f.saved.has("agent4market.wechat-source.v1"), false);
+  f.$("wxdecipher-directory-path").value = "E:\\synthetic"; f.$("wxdecipher-directory-path").oninput();
+  f.state.copied = {}; f.context.renderWxDecipherControls();
+  assert.equal(f.$("wxdecipher-source-forget").disabled, true);
+  f.context.forgetWxSourcePreferences();
+  assert.equal(f.saved.has("agent4market.wechat-source.v1"), true);
+  f.state.copied = null;
+  f.$("wxdecipher-source-forget").onclick();
+  assert.equal(f.saved.has("agent4market.wechat-source.v1"), false);
+  assert.equal(f.saved.get("unrelated-preference"), "keep");
+  assert.equal(f.$("wxdecipher-directory-path").value, "");
+  assert.equal(fixture(f.saved).$("wxdecipher-directory-path").value, "");
+  assert.equal(f.calls.length, 0);
+});
+
+test("corrupt, unsupported and oversized preferences are ignored safely", () => {
+  for (const saved of ["broken json", "null", JSON.stringify({ version: 2, directory: "E:\\synthetic", selfId: "wxid_test" }),
+    JSON.stringify({ version: 1, directory: "x".repeat(4097), selfId: "wxid_test" }),
+    JSON.stringify({ version: 1, directory: "E:\\synthetic", selfId: "x".repeat(129) }),
+    JSON.stringify({ version: 1, directory: "bad\npath", selfId: "wxid_test" }), "x".repeat(32769)]) {
+    const f = fixture(new Map([["agent4market.wechat-source.v1", saved]]));
+    assert.equal(f.$("wxdecipher-directory-path").value, "");
+    assert.equal(f.$("wxdecipher-self-id").value, "");
+    assert.match(f.$("wxdecipher-source-memory-status").textContent, /无法恢复/u);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("unavailable storage and invalid edits do not block manual inputs or claim a successful save", () => {
+  const f = fixture();
+  f.context.localStorage = { getItem() { throw new Error("unavailable"); }, setItem() { throw new Error("quota"); }, removeItem() { throw new Error("unavailable"); } };
+  f.context.initializeWxSourcePreferences();
+  f.$("wxdecipher-directory-path").value = "E:\\synthetic";
+  f.$("wxdecipher-directory-path").oninput();
+  assert.match(f.$("wxdecipher-source-memory-status").textContent, /无法记住/u);
+  f.$("wxdecipher-source-forget").onclick();
+  assert.match(f.$("wxdecipher-source-memory-status").textContent, /未能清除/u);
+  assert.equal(f.$("wxdecipher-directory-path").value, "E:\\synthetic");
+  f.$("wxdecipher-self-id").value = "x".repeat(129); f.$("wxdecipher-self-id").oninput();
+  assert.match(f.$("wxdecipher-source-memory-status").textContent, /未保存/u);
+  assert.equal(f.calls.length, 0);
+});
 
 function markCopied(state) {
   state.copied = { sessionId: "synthetic", directory: "C:\\Chosen\\synthetic", fileCount: state.files.length, expiresAt: Date.now() + 1800000 };
 }
+
+test("storage location is visible before copying and uses only verified backend state", () => {
+  const f = fixture();
+  f.context.renderWxDecipherControls();
+  assert.match(f.$("wxdecipher-storage-directory").textContent, /正在读取/u);
+  for (const directory of ["E:\\Synthetic private data\\微信副本", "/Users/synthetic/微信数据库", "E:\\" + "long-directory".repeat(70)]) {
+    f.context.model.wechat.storage = { status: "configured", configured: true, directory };
+    f.context.renderWxDecipherControls();
+    assert.ok(f.$("wxdecipher-storage-directory").textContent.includes(directory));
+    assert.equal(f.$("wxdecipher-storage-setup").textContent, "更改专用数据目录");
+    assert.equal(f.state.copied, undefined);
+  }
+  f.context.model.wechat.storage = { status: "default", configured: false, directory: "E:\\Synthetic\\data\\wechat" };
+  f.context.renderWxDecipherControls();
+  assert.match(f.$("wxdecipher-storage-directory").textContent, /尚未设置专用数据目录/u);
+  assert.match(f.$("wxdecipher-storage-directory").textContent, /E:\\Synthetic\\data\\wechat/u);
+  assert.equal(f.$("wxdecipher-storage-setup").textContent, "申请专用数据目录");
+  for (const status of ["error", "unavailable"]) {
+    f.context.model.wechat.storage = { status, directory: null, message: "Synthetic permission error" };
+    f.context.renderWxDecipherControls();
+    assert.equal(f.$("wxdecipher-storage-directory").textContent, "Synthetic permission error");
+    assert.doesNotMatch(f.$("wxdecipher-storage-directory").textContent, /E:\\/u, "Do not retain a stale path after permissions fail");
+  }
+  assert.equal(f.calls.length, 0, "Rendering never requests permission or reads database files");
+});
+
+test("confirmed storage selection refreshes the persistent location display", async () => {
+  const f = fixture();
+  const directory = "E:\\Synthetic\\chosen-store";
+  f.context.api = async () => ({ configured: true, directory, message: "已配置" });
+  f.context.confirmAction = async () => directory;
+  let loads = 0;
+  f.context.load = async () => { loads++; f.context.model.wechat.storage = { status: "configured", configured: true, directory }; };
+  await f.context.requestWxStorageAccess();
+  assert.equal(loads, 1);
+  assert.ok(f.$("wxdecipher-storage-directory").textContent.includes(directory));
+});
 
 test("file selection is additive and accepts selected WAL but rejects SHM, duplicates, and oversized batches", () => {
   const { $, state } = fixture();
@@ -231,13 +349,13 @@ test("automatic discovery imports opaque candidates server-side while manual fil
   assert.equal(calls[2][1].body.name, "session.db");
 });
 
-test("successful parse only reads copied session, clears secrets, and revokes model consent", async () => {
+test("successful parse only reads copied session, clears secrets, and clears model selection scope", async () => {
   const { context, $, state, wechatState } = fixture();
   const calls = [];
   state.files = [{ file: { name: "message_0.db", size: 4096 }, key: "a".repeat(64) }];
   markCopied(state);
   $("wechat-ownership").checked = true; $("wxdecipher-snapshot").checked = true;
-  $("wechat-model-sharing").checked = true; $("wxdecipher-key").value = "b".repeat(64);
+  $("wxdecipher-key").value = "b".repeat(64);
   $("wechat-account").value = "合成微信";
   $("wxdecipher-self-id").value = "wxid_synthetic_self";
   context.api = async (url, options) => {
@@ -253,7 +371,7 @@ test("successful parse only reads copied session, clears secrets, and revokes mo
   assert.equal(JSON.parse(calls[0][1].body).file_keys["message_0.db"], "a".repeat(64));
   assert.equal(state.files.length, 1); assert.equal(state.busy, false);
   assert.equal(state.copied.sessionId, "synthetic");
-  assert.equal($("wechat-model-sharing").checked, false);
+  assert.doesNotMatch(html, /id="wechat-model-sharing"/);
   assert.equal(wechatState.selected.size, 0);
   assert.match($("wxdecipher-status").textContent, /媒体占位/);
 });
@@ -312,7 +430,7 @@ test("local export requires explicit selection and confirmation and freezes the 
   assert.equal(captured[0], "/api/wechat/export");
   assert.equal(captured[1].query, "报价");
   assert.deepEqual(captured[1].conversation_ids, ["wxconv-synthetic"]);
-  assert.equal($("wechat-model-sharing").checked, false);
+  assert.doesNotMatch(html, /id="wechat-model-sharing"/);
 });
 
 test("parse requires a ready copy and retry sends only the same copied session", async () => {
@@ -426,7 +544,7 @@ test("media recovery validates inputs, clears image secrets, reports partial fai
   assert.equal(captured[0][1].headers["X-WXDecipher-Image-Key"], "0123456789abcdef");
   assert.match($("wxdecipher-media-status").textContent, /1\/2/);
   assert.equal(mediaState.urls.length, 1);
-  assert.equal($("wechat-model-sharing").checked, false);
+  assert.doesNotMatch(html, /id="wechat-model-sharing"/);
   const revoked = []; context.URL.revokeObjectURL = (url) => revoked.push(url);
   context.clearWxMedia(); assert.deepEqual(revoked, ["blob:synthetic"]);
   assert.equal(mediaState.urls.length, 0);

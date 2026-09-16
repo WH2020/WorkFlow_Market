@@ -12,7 +12,6 @@ import json
 import math
 import os
 from pathlib import Path
-import random
 import re
 import subprocess
 import sys
@@ -28,7 +27,6 @@ from uuid import uuid4
 REPOSITORY = "WH2020/WorkFlow_Market"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
 LATEST_API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
-CHECK_INTERVAL = 300
 MANUAL_COOLDOWN = 60
 MAX_RESPONSE_BYTES = 512 * 1024
 MAX_NOTES = 12000
@@ -212,7 +210,7 @@ def fetch_latest(etag: str | None = None, *, opener=None) -> tuple[dict | None, 
             if error.code == 404:
                 raise UpdateError("SOURCE_UNAVAILABLE", "更新源暂不可用：仓库可能未公开、尚无正式 Release，或地址已变化。") from None
             if error.code == 429 or (error.code == 403 and (error.headers.get("Retry-After") or error.headers.get("X-RateLimit-Remaining") == "0")):
-                raise UpdateError("RATE_LIMITED", "GitHub 暂时限制了更新请求，将在等待后重试。", _retry_delay(error.headers, time.time())) from None
+                raise UpdateError("RATE_LIMITED", "GitHub 暂时限制了更新请求，请在等待后手动重试。", _retry_delay(error.headers, time.time())) from None
             if error.code == 403:
                 raise UpdateError("ACCESS_DENIED", "GitHub 拒绝了更新访问，请检查发布源是否公开或网络访问是否受限。") from None
             if 300 <= error.code < 400:
@@ -244,9 +242,7 @@ class UpdateChecker:
         self._etag = None
         self._latest = None
         self._retry_until = 0.0
-        self._auto_retry_until = 0.0
-        self._failures = 0
-        self._last_attempt = None
+        self._startup_check_attempted = False
         self._worker = None
         self._state = {"instance_id": uuid4().hex, "revision": 0, "status": "not_checked", "checking": False,
                        "checked_at": None, "last_success_at": None, "error": None}
@@ -258,9 +254,11 @@ class UpdateChecker:
         retry = max(0, math.ceil(self._retry_until - self._mono()))
         newer = bool(self._latest) and version_key(self._latest["version"]) > version_key(self.current_version)
         return copy.deepcopy({**self._state, "current_version": self.current_version, "repository": REPOSITORY,
-                              "channel": "stable", "check_interval_seconds": CHECK_INTERVAL,
+                              "channel": "stable", "check_policy": "startup_once",
+                              "startup_check_attempted": self._startup_check_attempted,
+                              # Keep legacy timing fields inert for older UI clients.
+                              "check_interval_seconds": 0, "auto_retry_after_seconds": 0,
                               "retry_after_seconds": retry, "latest": self._latest,
-                              "auto_retry_after_seconds": max(0, math.ceil(self._auto_retry_until - self._mono())),
                               "update_available": self._state["status"] == "available",
                               "can_open_release": newer, "stale": bool(self._latest) and self._state["status"] == "error",
                               "automatic_install": False})
@@ -271,6 +269,12 @@ class UpdateChecker:
 
     def check(self, *, manual: bool = False) -> dict:
         with self._lock:
+            if not manual:
+                if self._startup_check_attempted:
+                    return self._snapshot()
+                # Consume the startup attempt even on failure; reloads, other
+                # windows and old polling clients must not trigger auto retries.
+                self._startup_check_attempted = True
             try:
                 version_key(self.current_version)
             except UpdateError:
@@ -278,12 +282,10 @@ class UpdateChecker:
                 self._state["revision"] += 1
                 return self._snapshot()
             now = self._mono()
-            interval = MANUAL_COOLDOWN if manual else CHECK_INTERVAL
-            if self._state["checking"] or now < self._retry_until or (not manual and now < self._auto_retry_until) or (self._last_attempt is not None and now - self._last_attempt < interval):
+            if self._state["checking"] or now < self._retry_until:
                 return self._snapshot()
-            self._last_attempt = now
+            self._startup_check_attempted = True
             self._retry_until = now + MANUAL_COOLDOWN
-            self._auto_retry_until = now + CHECK_INTERVAL
             self._state.update(status="checking", checking=True, error=None)
             self._state["revision"] += 1
             self._worker = threading.Thread(target=self._run, name="agent4market-update-check", daemon=True)
@@ -305,15 +307,11 @@ class UpdateChecker:
                 latest, current = version_key(self._latest["version"]), version_key(self.current_version)
                 status = "available" if latest > current else "up_to_date" if latest == current else "current_ahead"
                 self._state.update(status=status, last_success_at=self._iso(), error=None)
-                self._failures = 0
         except Exception as error:
             safe = error if isinstance(error, UpdateError) else UpdateError("CHECK_FAILED", "检查更新失败，请稍后重试。")
             with self._lock:
                 self._state.update(status="error", error={"code": safe.code, "message": str(safe)})
                 self._retry_until = max(self._retry_until, self._mono() + safe.retry_after)
-                self._failures += 1
-                delay = min(21600, CHECK_INTERVAL * 2 ** min(self._failures, 7))
-                self._auto_retry_until = max(self._retry_until, self._mono() + delay + random.uniform(0, 60))
         finally:
             with self._lock:
                 self._state.update(checking=False, checked_at=self._iso())

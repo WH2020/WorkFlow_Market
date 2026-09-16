@@ -121,7 +121,7 @@ try {
   const mediaPath = join(output, "synthetic-restored.png");
   await mediaDownload.saveAs(mediaPath);
   assert.deepEqual(await readFile(mediaPath), await readFile(fixture.media_plain));
-  assert.equal(await page.locator("#wechat-model-sharing").isChecked(), false);
+  assert.equal(await page.locator("#wechat-model-sharing").count(), 0);
   await page.locator("#wxdecipher-clear-copy").click();
   await page.getByRole("button", { name: "清除副本", exact: true }).click();
   await page.locator("#wxdecipher-status").filter({ hasText: "已清除本批副本" }).waitFor();

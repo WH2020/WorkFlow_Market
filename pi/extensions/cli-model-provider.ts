@@ -195,6 +195,7 @@ export function cliArguments(entry: CliBackend, model: string, schema: unknown, 
     "--output-format", "json", "--json-schema", JSON.stringify(schema), "--system-prompt", SYSTEM, "--model", model];
   return [...entry.args, "exec", "--strict-config", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--json", "--color", "never",
     "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"', "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
+    "-c", 'chatgpt_base_url="https://chatgpt.com/backend-api/"',
     "-c", "skills.include_instructions=false", "-c", "project_doc_max_bytes=0", "-c", "tools.update_plan.enabled=false", "-c", "tools.experimental_request_user_input.enabled=false",
     "-c", 'model_catalog_json="__A4M_CLI_MODEL_CATALOG__"',
     ...(configured.cli_reasoning ? ["-c", `model_reasoning_effort=${JSON.stringify(nativeEffort(level))}`] : []),

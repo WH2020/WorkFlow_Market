@@ -38,6 +38,35 @@ class WechatStorageTests(unittest.TestCase):
         plan = storage.permission_plan(self.project)
         self.assertFalse(self.base.exists())
 
+    def test_display_status_without_enrollment_is_read_only_and_labels_default(self):
+        state = storage.storage_status(self.project)
+        self.assertEqual(state, {"status": "default", "configured": False,
+                                 "directory": str(self.project / "data" / "wechat")})
+        self.assertFalse(self.base.exists())
+        self.assertFalse((self.project / "data").exists())
+        self.assertEqual(storage._PLANS, {})
+
+    def test_display_status_restores_selected_root_without_scanning_existing_data(self):
+        selected = self.root / "chosen-store"
+        plan = storage.permission_plan(self.project, {"directory": str(selected)})
+        storage.grant_permission(self.project, {"confirmed": True, "confirmation_token": plan["confirmation_token"]})
+        storage._PLANS.clear()
+        with patch.object(storage, "permission_plan", side_effect=AssertionError("No consent plans")), \
+             patch.object(storage, "_require_empty", side_effect=AssertionError("No data scans")), \
+             patch.object(privacy, "ensure_private_directory", side_effect=AssertionError("No permission writes")):
+            state = storage.storage_status(self.project)
+        self.assertEqual(state, {"status": "configured", "configured": True, "directory": str(selected)})
+        self.assertEqual(storage._PLANS, {})
+
+    def test_display_status_rejects_unverified_paths_and_redacts_internal_errors(self):
+        self.grant()
+        with patch.object(storage, "_verify_existing", side_effect=WechatStoreError("UNSAFE_PATH", "synthetic-private-details")):
+            state = storage.storage_status(self.project)
+        self.assertEqual(state["status"], "error")
+        self.assertIsNone(state["directory"])
+        self.assertFalse(state["configured"])
+        self.assertNotIn("synthetic-private-details", json.dumps(state))
+
     def _set_container_access(self, unsafe=False):
         if os.name == "nt":
             access = "(RX,DC)" if unsafe else "(RX)"

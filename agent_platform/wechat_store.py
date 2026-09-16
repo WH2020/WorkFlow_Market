@@ -23,8 +23,10 @@ MAX_IMPORT_BYTES = 64 * 1024 * 1024
 MAX_IMPORT_ROWS = 200_000
 MAX_MESSAGE_CHARS = 20_000
 MAX_SCOPE_CONVERSATIONS = 50
-MAX_SCOPE_MESSAGES = 600
-MAX_SCOPE_TEXT_BYTES = 750_000
+# Local resource envelope, aligned with import. Model inputs are separately
+# budgeted and summarized in batches by the runtime, never sent all at once.
+MAX_SCOPE_MESSAGES = MAX_IMPORT_ROWS
+MAX_SCOPE_TEXT_BYTES = MAX_IMPORT_BYTES
 MAX_EXPORT_ROWS = 50_000
 MAX_EXPORT_BYTES = 16 * 1024 * 1024
 ALLOWED_IMPORT_SUFFIXES = {".json", ".jsonl", ".csv"}
@@ -289,6 +291,8 @@ def _initialize_locked(connection: sqlite3.Connection) -> None:
     if version not in {0, SCHEMA_VERSION}:
         raise WechatStoreError("SCHEMA_MISMATCH", "微信会话索引版本不受支持")
     if version == SCHEMA_VERSION:
+        # Additive index: old stores remain readable without a data migration.
+        connection.execute("CREATE INDEX IF NOT EXISTS message_imports_message_idx ON message_imports(message_id)")
         # Additive v1 extension: existing scopes remain unbound and cannot be sent to a model.
         connection.execute("""CREATE TABLE IF NOT EXISTS scope_recipients (
             scope_id TEXT PRIMARY KEY REFERENCES review_scopes(scope_id) ON DELETE CASCADE,
@@ -355,6 +359,7 @@ def _initialize_locked(connection: sqlite3.Connection) -> None:
           row_number INTEGER NOT NULL,
           PRIMARY KEY(batch_id, message_id)
         ) STRICT;
+        CREATE INDEX message_imports_message_idx ON message_imports(message_id);
 
         CREATE TABLE review_scopes (
           scope_id TEXT PRIMARY KEY,
@@ -1036,8 +1041,9 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
     recipient = payload.get("model_recipient")
     if not isinstance(recipient, dict) or set(recipient) != {"provider_id", "base_url", "api", "model_id"}:
         raise WechatStoreError("MODEL_RECIPIENT_REQUIRED", "请先选择并确认具体模型供应商、地址和模型")
-    if recipient.get("api") in {"claude-code", "codex-cli"}:
-        raise WechatStoreError("CLI_WECHAT_UNSUPPORTED", "微信授权会话暂不支持 CLI 后端，请选择 API 模型；CLI 登录账号无法可靠冻结")
+    # CLI scopes bind the registered service/model, not the CLI login identity.
+    # Login is intentionally resolved by the CLI at execution time. The registry
+    # separately keeps each CLI provider ID bound to its immutable launch ledger.
     key = f"{recipient.get('provider_id')}/{recipient.get('model_id')}"
     if available_models(project_root).get(key) != recipient:
         raise WechatStoreError("MODEL_RECIPIENT_CHANGED", "模型接收方不可用或已发生变化，请重新确认")
@@ -1061,6 +1067,10 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
             conversation_ids.append(identity)
     connection = _connect(project_root, writable=True)
     try:
+        # Bind count, members and fingerprint to one snapshot; no model/network
+        # work happens while holding this short scope-creation transaction.
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
         if not conversation_ids and payload.get("all_in_period") is True:
             conversation_ids = [row[0] for row in connection.execute(
                 """SELECT DISTINCT conversation_id FROM messages
@@ -1085,22 +1095,27 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
             escaped = _like(query)
             values.extend([escaped, escaped])
         where = " AND ".join(clauses)
+        scope_size = connection.execute(
+            f"SELECT count(*),coalesce(sum(length(CAST(content AS BLOB))),0),min(purge_at) FROM messages WHERE {where}", values,
+        ).fetchone()
+        if scope_size[0] > MAX_SCOPE_MESSAGES or scope_size[1] > MAX_SCOPE_TEXT_BYTES:
+            raise WechatStoreError("SCOPE_TOO_LARGE", "所选范围超过本地处理资源上限（20 万条 / 64 MiB），请分次选择")
         selected_content = connection.execute(
-            f"""SELECT message_id,conversation_id,sender_name,is_self,sent_at,epoch,kind,content,
+            f"""SELECT message_id,conversation_id,sender_name,is_self,sent_at,epoch,kind,
                        source_locator,content_sha256
                   FROM messages WHERE {where} ORDER BY epoch,message_id""",
             values,
-        ).fetchall()
-        message_count = len(selected_content)
+        )
+        message_count = scope_size[0]
         if message_count <= 0:
             raise WechatStoreError("EMPTY_SCOPE", "所选日期和会话范围内没有可整理的消息")
         if message_count > MAX_SCOPE_MESSAGES:
-            raise WechatStoreError("SCOPE_TOO_LARGE", f"一次最多整理 {MAX_SCOPE_MESSAGES} 条消息，请缩短日期或减少会话")
-        text_bytes = sum(len(str(row["content"]).encode("utf-8")) for row in selected_content)
+            raise WechatStoreError("SCOPE_TOO_LARGE", "所选范围超过本地处理资源上限（20 万条），请分次选择")
+        text_bytes = scope_size[1]
         if text_bytes > MAX_SCOPE_TEXT_BYTES:
             raise WechatStoreError(
                 "SCOPE_TOO_LARGE",
-                "所选会话原文超过单次整理安全上限，请缩短日期、输入关键词或减少会话",
+                "所选会话原文超过本地处理资源上限（64 MiB），请分次选择",
             )
         selected_conversations = connection.execute(
             f"""SELECT conversation_id,display_name,chat_type
@@ -1115,7 +1130,7 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
             f"{names[0]} 等 {len(names)} 个会话" if len(names) > 1 else names[0]
         )
         scope_id = f"wechat-scope-{uuid.uuid4().hex[:20]}"
-        canonical = json.dumps({
+        prefix = json.dumps({
             "conversation_ids": sorted(conversation_ids),
             "conversations": [
                 {
@@ -1127,8 +1142,12 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
             ],
             "date_from": date_from,
             "date_to": date_to,
-            "messages": [
-                {
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        fingerprint = hashlib.sha256((prefix[:-1] + ',"messages":[').encode("utf-8"))
+        for index, row in enumerate(selected_content):
+            if index:
+                fingerprint.update(b",")
+            fingerprint.update(json.dumps({
                     "content_sha256": row["content_sha256"],
                     "conversation_id": row["conversation_id"],
                     "epoch": row["epoch"],
@@ -1138,19 +1157,19 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
                     "sent_at": row["sent_at"],
                     "sender_name": row["sender_name"],
                     "source_locator": row["source_locator"],
-                }
-                for row in selected_content
-            ],
-            "query": query,
-        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        fingerprint.update(('],"query":' + json.dumps(query, ensure_ascii=False) + '}').encode("utf-8"))
+        selection_sha256 = fingerprint.hexdigest()
         created_at = _now()
-        expires_at = created_at + timedelta(days=7)
+        expires_at = min(created_at + timedelta(days=7), datetime.fromisoformat(str(scope_size[2]).replace("Z", "+00:00")))
+        if expires_at <= created_at:
+            raise WechatStoreError("SCOPE_EXPIRED", "所选消息原文已到期，请重新导入并选择会话")
         connection.execute(
             "INSERT INTO review_scopes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 scope_id, project_id, title, date_from, date_to, query,
                 json.dumps(conversation_ids, ensure_ascii=False), message_count,
-                hashlib.sha256(canonical.encode("utf-8")).hexdigest(), 1,
+                selection_sha256, 1,
                 _iso(created_at), _iso(expires_at), "active",
             ),
         )
@@ -1168,7 +1187,7 @@ def create_review_scope(project_root: Path | str, payload: Mapping[str, Any]) ->
             "message_count": message_count,
             "text_bytes": text_bytes,
             "expires_at": _iso(expires_at),
-            "selection_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "selection_sha256": selection_sha256,
             "model_recipient": recipient,
         }
     finally:
@@ -1261,7 +1280,13 @@ def cleanup_expired(project_root: Path | str, *, reference: datetime | None = No
                 if (re.fullmatch(r"wechat-batch-[a-f0-9]{20}", candidate.name)
                         and candidate.name not in known and candidate.lstat().st_mtime <= orphan_cutoff):
                     purged_files += _purge_batch_directory(root, candidate.name)
-        expired_ids = [row[0] for row in connection.execute("SELECT message_id FROM messages WHERE purge_at<=?", (cutoff,))]
+        expired_ids: list[str] = []
+        affected_conversations: set[str] = set()
+        for message_id, conversation_id in connection.execute(
+            "SELECT message_id,conversation_id FROM messages WHERE purge_at<=?", (cutoff,),
+        ):
+            expired_ids.append(message_id)
+            affected_conversations.add(conversation_id)
         if expired_ids:
             try:
                 connection.executemany("DELETE FROM message_fts WHERE message_id=?", ((value,) for value in expired_ids))
@@ -1269,8 +1294,9 @@ def cleanup_expired(project_root: Path | str, *, reference: datetime | None = No
                 pass
             connection.executemany("DELETE FROM messages WHERE message_id=?", ((value,) for value in expired_ids))
         connection.execute("UPDATE review_scopes SET status='expired' WHERE status='active' AND expires_at<=?", (cutoff,))
-        conversation_ids = [row[0] for row in connection.execute("SELECT conversation_id FROM conversations")]
-        for conversation_id in conversation_ids:
+        # No-op cleanup must not rewrite every summary/revision and cause the
+        # polling UI to reload unchanged conversations. Only purges affect them.
+        for conversation_id in sorted(affected_conversations):
             _refresh_conversation(connection, conversation_id)
         connection.commit()
         return {"purged_batches": len(batches), "purged_messages": len(expired_ids), "purged_files": purged_files}

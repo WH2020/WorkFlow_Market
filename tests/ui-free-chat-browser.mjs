@@ -44,7 +44,7 @@ try {
   await page.locator("#chat-status").filter({ hasText: "回复完成" }).waitFor();
   assert.match(await page.locator(".free-chat-message.assistant .free-chat-text").last().innerText(), /小松/u);
   assert.equal((await stats()).requests.length, 2);
-  await page.locator('button.nav-item[data-view="home"]').click();
+  await page.locator('button.nav-item[data-view="tasks"]').click();
   assert.equal(await page.locator(".task-runtime-picker").isVisible(), true);
   await page.locator('button.nav-item[data-view="chat"]').click();
   assert.equal(await page.locator(".free-chat-message").count(), 4);

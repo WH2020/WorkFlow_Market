@@ -33,6 +33,8 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => requests.push({ method: request.method(), path: new URL(request.url()).pathname }));
   await page.goto(fixture.url);
+  await page.locator('#sidebar [data-view="settings"]').click();
+  await page.locator('.hub-utilities summary').click();
   await page.locator('[data-view="tools"]').click();
   await page.locator('[data-tool="wechat"]').click();
   await page.locator("#wxdecipher-console").waitFor({ state: "visible" });
@@ -79,7 +81,7 @@ try {
   const records = (await readFile(destination, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(records.length, 3);
   assert.ok(records.every((row) => row.account_id === fixture.self_id));
-  assert.equal(await page.locator("#wechat-model-sharing").isChecked(), false);
+  assert.equal(await page.locator("#wechat-model-sharing").count(), 0);
   assert.deepEqual(await readdir(join(fixture.root, "data/wechat/decipher")), copiedBatch);
   assert.equal(requests.filter((request) => request.path.endsWith("/upload")).length, 1, "Retry does not recopy");
   await page.locator("#wxdecipher-clear-copy").click();
@@ -104,7 +106,7 @@ try {
   assert.match(await page.locator("#wxdecipher-status").innerText(), /自动匹配 1/);
   assert.doesNotMatch(await page.locator("#wxdecipher-status").innerText(), /未合并 WAL|本版不恢复/);
   assert.equal(await page.locator("#wxdecipher-capture-confirm").isChecked(), false);
-  assert.equal(await page.locator("#wechat-model-sharing").isChecked(), false);
+  assert.equal(await page.locator("#wechat-model-sharing").count(), 0);
   await page.locator("#wxdecipher-clear-copy").click();
   await page.getByRole("button", { name: "清除副本", exact: true }).click();
   await page.locator("#wxdecipher-status").filter({ hasText: "已清除本批副本" }).waitFor();
