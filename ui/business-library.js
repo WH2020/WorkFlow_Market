@@ -6,14 +6,25 @@
   const kinds = {followup:"跟进",action:"行动",milestone:"里程碑"};
   const button = (text, action, id="", cls="secondary") => `<button type="button" class="${cls}" data-hub-action="${action}" data-id="${esc(id)}">${esc(text)}</button>`;
   function detectIntent(text) {
-    if (/^(如何|怎么|怎样|什么是|为什么|能否解释|请解释)|(?:是什么|怎么做|如何做|什么意思)[？?]?$|^(不要|不用|别|无需)/u.test(text.trim())) return null;
-    if (/(微信|群聊|聊天记录|会话).*(整理|复盘|总结|分析)|(整理|复盘|总结|分析).*(微信|群聊|聊天记录|会话)/u.test(text)) return "wechat-review";
-    if (/(制作|生成|做|准备|输出).*(PPT|ppt|演示文稿|幻灯片)/u.test(text)) return "presentation-studio";
-    if (/(复盘|回顾).*(客户|销售|进展|本周|本月)|(客户|销售|进展).*(复盘|回顾)/u.test(text)) return "sales-review";
-    if (/(解读|分析|提取|总结).*(文档|文件|资料|招标|PDF|pdf)/u.test(text)) return "pdf-import";
-    if (/(研究|调研).*(行业|客户|竞品|趋势)/u.test(text)) return "industry-research";
-    if (/(生成|制作|整理).*(周报|行动简报)/u.test(text)) return "weekly-deck";
-    return null;
+    const intents = new Set();
+    const clauses = text.replace(/(?:但是|不过|而是|改为|改成|然后|接着)/gu, "，").split(/[，,。；;！!？?\n]+/u);
+    for (const clause of clauses) {
+      const part = clause.trim();
+      if (!part || /如何|怎么|怎样|什么是|为什么|能否解释|请解释|什么意思|是什么/u.test(part)) continue;
+      const action = part.search(/制作|生成|做|准备|输出|整理|转成|改成|解读|分析|提取|总结|复盘|回顾|研究|调研/u);
+      const negative = part.search(/不要|不用|无需|不必|暂不|先不|不想|不需要|别/u);
+      if (negative >= 0 && (action < 0 || negative < action)) continue;
+      let intent = null;
+      if (/(微信|群聊|聊天记录|会话).*(整理|复盘|总结|分析)|(整理|复盘|总结|分析).*(微信|群聊|聊天记录|会话)/u.test(part)) intent = "wechat-review";
+      else if (/(制作|生成|做|准备|输出|整理|转成).*(ppt|演示文稿|幻灯片)/iu.test(part)) intent = "presentation-studio";
+      else if (/(生成|制作|整理).*(周报|行动简报)/u.test(part)) intent = "weekly-deck";
+      else if (/(解读|分析|提取|总结).*(招标|标书|采购文件)|(招标|标书|采购文件).*(解读|分析|提取|总结)/u.test(part)) intent = "bid-interpretation";
+      else if (/(复盘|回顾).+|(客户|销售|进展).*(复盘|回顾)/u.test(part)) intent = "sales-review";
+      else if (/(解读|分析|提取|总结).*(文档|文件|资料|pdf)/iu.test(part)) intent = "pdf-import";
+      else if (/(研究|调研).*(行业|客户|竞品|趋势)/u.test(part)) intent = "industry-research";
+      if (intent) intents.add(intent);
+    }
+    return intents.size === 1 ? [...intents][0] : null;
   }
 
   class BusinessLibrary {
@@ -21,6 +32,7 @@
       this.b=bridge; this.data=null; this.tab="customer"; this.id=""; this.detail="overview";
       this.query=""; this.archive="active"; this.owner=""; this.context=""; this.files=new Set(); this.sources=new Set();
       this.groupFilter=""; this.groupEntity=""; this.loading=null; this.pending=[];
+      this.autoProject=true; this.projectMatch=null; this.projectChoice=null;
       this.mount();
     }
     mount() {
@@ -42,7 +54,7 @@
       dialog.addEventListener("click",event=>this.action(event));
       dialog.addEventListener("submit",event=>event.preventDefault());
       const context=document.createElement("section");context.id="hub-chat-scope";context.className="hub-context";
-      $("chat-form").before(context);context.addEventListener("click",event=>this.action(event));this.renderContext();
+      $("chat-form").prepend(context);context.addEventListener("click",event=>this.action(event));this.renderContext();
       const filters=document.createElement("div");filters.className="hub-group-filters";
       filters.innerHTML='<label>业务分类<select id="hub-group-filter"><option value="">全部会话</option><option value="customer">客户群</option><option value="sales">销售群</option><option value="other">其他群</option><option value="unclassified">未分类群</option></select></label><label>关联档案<select id="hub-group-entity"><option value="">全部档案</option></select></label><small>仅筛选当前已加载的会话，不按群名推断分类；勾选范围独立保留。</small>';
       $("wechat-conversations").closest(".wechat-browser-grid").before(filters);
@@ -52,10 +64,10 @@
       prepare.onclick=async()=>{prepare.disabled=true;try{await this.b.prepareWechat();}finally{prepare.disabled=false;}};
       $("wechat-summary").before(prepare);
       const progress=document.createElement("section");progress.id="hub-pending";progress.className="panel";progress.hidden=true;
-      document.querySelector('[data-page="tasks"] .page-heading').after(progress);
+      $("chat-task-heading").after(progress);
       const back=document.createElement("div");back.className="hub-flow-return";
       back.innerHTML=button("← 继续对话","chat")+button("选择本次资料与背景","scope");
-      const flowSelect=document.createElement("select");flowSelect.id="hub-flow-type";flowSelect.setAttribute("aria-label","调整工作流类型");flowSelect.innerHTML='<option value="sales-review">客户复盘</option><option value="pdf-import">资料解读</option><option value="presentation-studio">PPT 制作</option><option value="industry-research">行业研究</option><option value="wechat-review">微信整理</option><option value="weekly-deck">销售简报</option>';
+      const flowSelect=document.createElement("select");flowSelect.id="hub-flow-type";flowSelect.setAttribute("aria-label","调整工作流类型");flowSelect.innerHTML='<option value="sales-review">客户复盘</option><option value="pdf-import">资料解读</option><option value="bid-interpretation">招标文件解读</option><option value="presentation-studio">PPT 制作</option><option value="industry-research">行业研究</option><option value="wechat-review">微信整理</option><option value="weekly-deck">销售简报</option>';
       flowSelect.onchange=()=>this.b.startFlow(flowSelect.value,this.lastRequest||"",[...this.files].map(id=>this.b.files().find(f=>f.library_id===id)).filter(Boolean));back.append(flowSelect);
       back.addEventListener("click",event=>this.action(event));document.querySelector('[data-page="work"]').prepend(back);
       this.render();
@@ -70,13 +82,13 @@
     entity(id=this.id){return this.data?.entities.find(e=>e.id===id);}
     name(id){return this.entity(id)?.name||"未分配";}
     async onView(view,old){
-      const parent={home:"chat",work:"chat",weekly:"chat",tools:"knowledge",sales:"knowledge",projects:"knowledge",bids:"knowledge",outputs:"tasks",schedules:"tasks"}[view]||view;
+      const parent={home:"chat",work:"chat",tasks:"chat",weekly:"chat",tools:"knowledge",sales:"knowledge",projects:"knowledge",bids:"knowledge",outputs:"chat",schedules:"chat"}[view]||view;
       document.querySelectorAll('#sidebar nav .nav-item').forEach(n=>{n.classList.toggle("active",n.dataset.view===parent);n.toggleAttribute("aria-current",n.dataset.view===parent);});
       if(view==="knowledge" && (!this.data || old!==view))await this.refresh();
-      if(view==="tools")for(const [panel,anchor] of this.wxAnchors)anchor.after(panel);
+      if(view==="tools")for(const [panel,anchor] of this.wxAnchors)if(anchor.nextSibling!==panel)anchor.after(panel);
       else if(view==="knowledge"&&this.tab==="wechat")this.mountWechat();
     }
-    mountWechat(){for(const [panel] of this.wxAnchors){$("hub-wechat").append(panel);panel.hidden=false;}}
+    mountWechat(){const target=$("hub-wechat");for(const [panel] of this.wxAnchors){if(panel.parentElement!==target)target.append(panel);panel.hidden=false;}}
     async openWechat(){this.tab="wechat";this.id="";this.b.show("knowledge");this.b.activateWechat();this.render();await this.refresh();await this.b.loadWechat();}
     render(){
       const hub=$("business-library");if(!hub)return;
@@ -91,12 +103,12 @@
         hub.insertAdjacentHTML("beforeend",`<details class="panel"><summary>文件与业务对象关联</summary>${button("批量追加关联","batch-link")}<div class="hub-source-list">${this.sourceRows(this.fileSources())}</div></details>`);return;
       }
       if(this.id && this.entity()){hub.insertAdjacentHTML("beforeend",this.entityDetail());return;}
-      hub.insertAdjacentHTML("beforeend",`<div class="hub-toolbar"><label class="grow">搜索档案<input id="hub-query" value="${esc(this.query)}" placeholder="名称、团队或关键词" maxlength="100"></label><label>负责人<select id="hub-owner">${this.ownerOptions(this.owner,"全部")}</select></label><label>状态<select id="hub-archive">${[["active","在用"],["archived","已归档"],["all","全部"]].map(([v,l])=>`<option value="${v}" ${this.archive===v?"selected":""}>${l}</option>`).join("")}</select></label>${button("＋ 新增"+labels[this.tab],"new","","primary")}</div><section class="panel" id="hub-list"></section><p class="hint">本地扩展档案独立保存。修改不会直接改写历史销售台账；已有来源按编号关联，历史负责人文字不自动匹配人员。</p>`);
+      hub.insertAdjacentHTML("beforeend",`<div class="hub-toolbar"><label class="grow">搜索档案<input id="hub-query" value="${esc(this.query)}" placeholder="名称、团队或关键词" maxlength="100"></label><label>负责人<select id="hub-owner">${this.ownerOptions(this.owner,"全部")}</select></label><label>状态<select id="hub-archive">${[["active","在用"],["archived","已归档"],["all","全部"]].map(([v,l])=>`<option value="${v}" ${this.archive===v?"selected":""}>${l}</option>`).join("")}</select></label>${button("＋ 新增"+labels[this.tab],"new","","primary")}</div><section class="panel" id="hub-list"></section><p class="hint">这里保存的档案修改和行动记录尚未纳入正式销售台账或销售行动简报。关联历史来源的档案保留原编号；历史负责人需核对关联。</p>`);
       this.renderList();
     }
     renderList(){
       const box=$("hub-list");if(!box||!this.data)return;
-      const rows=this.data.entities.filter(e=>e.type===this.tab&&(this.archive==="all"||!!e.archived===(this.archive==="archived"))&&(!this.owner||e.owner===this.owner||e.type==="sales"&&e.id===this.owner)&&[e.name,e.team,e.industry,e.description,this.name(e.owner)].join(" ").toLowerCase().includes(this.query.toLowerCase()));
+      const rows=this.data.entities.filter(e=>e.type===this.tab&&(this.archive==="all"||!!e.archived===(this.archive==="archived"))&&(!this.owner||e.owner===this.owner||e.type==="sales"&&e.id===this.owner)&&[e.name,e.aliases,e.team,e.industry,e.description,this.name(e.owner)].join(" ").toLowerCase().includes(this.query.toLowerCase()));
       box.innerHTML=rows.length?rows.map(e=>`<article class="hub-entity-row"><div class="hub-avatar">${esc(e.name.slice(0,1))}</div><div class="grow"><h3>${esc(e.name)}</h3><p>${esc(e.type==="sales"?e.team||"团队待补充":e.type==="project"?this.name(e.customer)+" · "+this.name(e.owner):e.industry||"行业待补充")} · ${e.source_ref?"关联历史来源":"本地档案"}</p><small>${esc(e.description)}</small></div><span class="hub-badge">${esc(e.archived?"已归档":e.stage||"待补充")}</span>${button("查看档案","open",e.id)}</article>`).join(""):'<p class="empty">没有符合筛选的档案，可调整筛选或新增。</p>';
     }
     ownerOptions(value,empty="暂不分配"){return `<option value="">${empty}</option>`+(this.data?.entities||[]).filter(e=>e.type==="sales"&&(!e.archived||e.id===value)).map(e=>`<option value="${esc(e.id)}" ${value===e.id?"selected":""}>${esc(e.name)}</option>`).join("");}
@@ -118,13 +130,52 @@
     edit(type,id="",customer=""){
       this.editing=id;this.editType=type;this.createdWorkspace=null;const e=this.entity(id)||{name:"",owner:this.entity(customer)?.owner||"",customer,stage:"待补充"};
       this.dialog((id?"编辑":"新增")+labels[type]+"档案",`<label>名称<input id="hub-name" required maxlength="80" value="${esc(e.name)}"></label>${type==="sales"?`<label>团队<input id="hub-team" maxlength="128" value="${esc(e.team)}"></label>`:`<label>负责人<select id="hub-edit-owner">${this.ownerOptions(e.owner)}</select></label>`}${type==="customer"?`<label>行业<input id="hub-industry" maxlength="128" value="${esc(e.industry)}"></label>`:""}${type==="project"?`<label>所属客户<select id="hub-customer">${this.customerOptions(e.customer)}</select></label><label>项目类型<select id="hub-project-type"><option ${e.project_type==="普通项目"?"selected":""}>普通项目</option><option ${e.project_type==="投标项目"?"selected":""}>投标项目</option></select></label>`:""}<label>阶段 / 状态<input id="hub-stage" maxlength="128" value="${esc(e.stage)}"></label><label>说明<textarea id="hub-description" maxlength="1000">${esc(e.description)}</textarea></label><p class="hint">保存到本地扩展档案，不直接改写历史销售台账。新项目会同时建立项目空间。</p>`,"save-entity");
+      if(type==="project")$("hub-name").closest("label").insertAdjacentHTML("afterend",`<label>简称 / 别名<input id="hub-aliases" maxlength="128" value="${esc(e.aliases||"")}" placeholder="多个简称用逗号分隔，用于对话检索"></label>`);
     }
     recordDialog(taskId=""){
       this.recordTask=taskId;const e=this.entity();
-      this.dialog(taskId?"核对工作结果后保存行动":"新增记录",`<p>写入：${esc(e.name)}${taskId?" · 来源 "+esc(taskId):""}</p><label>类型<select id="hub-record-kind">${Object.entries(kinds).map(([v,l])=>`<option value="${v}" ${taskId&&v==="action"?"selected":""}>${l}</option>`).join("")}</select></label><label>内容<textarea id="hub-record-text" required maxlength="2000" placeholder="请填写已核对的跟进事实或下一步行动；不会自动提取为事实。"></textarea></label><label>负责人<select id="hub-record-owner">${this.ownerOptions(e.owner)}</select></label><label>截止日期<input id="hub-record-due" type="date"></label><p class="hint">仅保存本地记录，不自动改变阶段、不对外发送。</p>`,"save-record");
+      this.dialog(taskId?"核对工作结果后保存行动":"新增记录",`<p>写入：${esc(e.name)}${taskId?" · 来源 "+esc(taskId):""}</p><label>类型<select id="hub-record-kind">${Object.entries(kinds).map(([v,l])=>`<option value="${v}" ${taskId&&v==="action"?"selected":""}>${l}</option>`).join("")}</select></label><label>内容<textarea id="hub-record-text" required maxlength="2000" placeholder="请填写已核对的跟进事实或下一步行动；不会自动提取为事实。"></textarea></label><label>负责人<select id="hub-record-owner">${this.ownerOptions(e.owner)}</select></label><label>截止日期<input id="hub-record-due" type="date"></label><p class="hint">保存到业务档案，尚未纳入正式销售台账或销售行动简报；不自动改变阶段或对外发送。</p>`,"save-record");
     }
     linksDialog(refs,append=false){this.linkRefs=refs;this.appendLinks=append;this.dialog(append?"批量追加关联":"管理资料关联",`<p>${refs.length} 份资料。${append?"保留已有关系，只追加。":"取消勾选会解除引用，不删除原件。"}</p><div class="hub-options">${this.data.entities.map(e=>`<label><input type="checkbox" data-link-id="${esc(e.id)}" ${!append&&(this.data.links[refs[0]]||[]).includes(e.id)?"checked":""}>${labels[e.type]} · ${esc(e.name)}</label>`).join("")}</div>`,"save-links");}
-    renderContext(){const box=$("hub-chat-scope");if(!box)return;const e=this.entity(this.context);box.innerHTML=`<span>${e?esc(labels[e.type]+"："+e.name):"未关联档案"}</span><span>本次选择 ${this.files.size} 份资料</span>${button("选择资料与背景","scope")}${button("清空范围","clear-scope","","text-button")}<small>普通问答不读取业务资料；触发工作流后，确认开始才使用本次所选背景。</small>`;}
+    renderContext(){
+      const box=$("hub-chat-scope");if(!box)return;const e=this.entity(this.context),match=this.projectMatch;
+      box.innerHTML=`<span>${e?esc(labels[e.type]+"："+e.name):match?.project?esc("项目："+match.project.name):"未关联档案"}</span><span>工作流已选 ${this.files.size} 份资料</span>${button("选择资料与背景","scope")}${button("清空范围","clear-scope","","text-button")}<label><input id="hub-auto-project" type="checkbox" ${this.autoProject?"checked":""}>对话使用档案背景</label><small>${!this.autoProject?"本轮普通问答不读取档案。":e?.type==="customer"?"普通问答使用所选客户的基本信息与最近 8 条记录；切换客户请重新选择。":e?.type==="sales"?"销售人员档案仅供工作流使用；普通问答可按名称检索项目。":"按名称检索项目，只带入匹配档案与最近 8 条记录。"} 文件正文、微信原文未读取；已选文件仅供任务确认使用。</small>`;
+      $("hub-auto-project").onchange=()=>{this.autoProject=$("hub-auto-project").checked;this.projectMatch=null;this.projectChoice=null;this.renderContext();};
+      if(match?.status==="ambiguous")box.insertAdjacentHTML("beforeend",`<div class="hub-project-matches" role="status"><b>请确认你说的是哪个项目（${match.candidate_count} 个候选）</b>${match.candidates.map(p=>`<div>${button(p.name,"choose-project",p.entity_id)}<small>${esc(p.customer||"未关联客户")} · ${esc(p.owner||"未分配负责人")}</small></div>`).join("")}${match.candidate_count>12?'<p>仅显示前 12 个，请补充完整名称或在资料库手动选择。</p>':""}<small>尚未把本轮问题或项目资料发送给模型。</small></div>`);
+      if(match?.status==="not_found"&&match.showMissing)box.insertAdjacentHTML("beforeend",`<small>未找到明确项目，不会套用其他项目的信息。可补充完整名称，或${button("前往项目资料库","project-library","","text-button")}。</small>`);
+      if(match?.status==="matched")box.insertAdjacentHTML("beforeend",`<small>本轮背景：${match.project.entity_type==="customer"?"客户":"项目"}档案 · ${esc(match.project.name)}；实际读取范围会随回复展示。</small>`);
+      if($("chat-input").disabled)box.querySelectorAll("button,input").forEach(control=>{control.disabled=true;});
+    }
+    async prepareChat(text){
+      if(!this.autoProject)return {};
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);
+      try{
+        const current=this.entity(this.context),choice=this.projectChoice?.text===text?this.projectChoice.id:"";
+        const customer = current?.type === "customer";
+        const result=await this.b.api(customer?"/api/chat/customer-context":"/api/chat/project-context",{method:"POST",signal:controller.signal,headers:{"Content-Type":"application/json"},body:JSON.stringify(customer?{entity_id:current.id}:{message:text,current_entity_id:current?.type==="project"?current.id:"",...(choice?{selected_entity_id:choice}:{})})});
+        if(customer)result.project=result.customer;
+        const previousMatch=this.projectMatch;
+        this.projectMatch={...result,showMissing:/项目/u.test(text)};this.projectQuery=text;
+        if(result.status==="ambiguous"){this.renderContext();return {blocked:true};}
+        if(result.status==="matched"){
+          if(!this.data||!this.entity(result.project.entity_id))await this.refresh();
+        }
+        return {
+          ...(result.status==="matched"?{[customer?"customer_selection":"project_selection"]:{entity_id:result.project.entity_id,revision:result.revision}}:{}),
+          commit:()=>{
+            if(result.status==="matched"){
+              this.b.selectProject(result.project.workspace_id||"project-default");
+              if(this.context!==result.project.entity_id)this.files.clear();
+              this.context=result.project.entity_id;this.b.clearLegacyContext();
+            }else if(current?.type==="project"&&!detectIntent(text)){
+              this.b.selectProject("project-default");this.context="";this.files.clear();this.b.clearLegacyContext();
+            }
+            this.projectChoice=null;this.renderContext();
+          },
+          cancel:()=>{this.projectMatch=previousMatch;this.projectChoice=null;this.renderContext();}
+        };
+      }finally{clearTimeout(timer);}
+    }
     selection(){return this.data&&(this.context||this.files.size)?{library_selection:{entity_id:this.context,revision:this.data.revision,file_ids:[...this.files]}}:{};}
     scopeDialog(){this.dialog("本次工作的资料与背景",`<label>关联对象<select id="hub-context"><option value="">不关联</option>${this.data.entities.filter(e=>!e.archived&&!e.source_unavailable).map(e=>`<option value="${esc(e.id)}" ${this.context===e.id?"selected":""}>${labels[e.type]} · ${esc(e.name)}</option>`).join("")}</select></label><p class="hint">文件需逐项选择，关联档案不会自动勾选其全部资料。本地正文目前通过受控 PDF 工具读取，其他格式仅作为来源引用；不支持的格式请先转换为 PDF。微信群请单独选择范围。</p><div class="hub-options">${this.fileSources().map(f=>`<label><input type="checkbox" data-context-file="${esc(f.file.library_id)}" ${this.files.has(f.file.library_id)?"checked":""}>${esc(f.name)}</label>`).join("")}</div>`,"save-scope");}
     route(text){const intent=detectIntent(text);if(!intent)return false;this.lastRequest=text;$("hub-flow-type").value=intent;this.b.startFlow(intent,text,[...this.files].map(id=>this.b.files().find(f=>f.library_id===id)).filter(Boolean));return true;}
@@ -148,6 +199,7 @@
     created(request){this.pending.push(request);this.update();this.b.show("tasks");}
     async action(event){
       const btn=event.target.closest("[data-hub-action]");if(!btn)return;const a=btn.dataset.hubAction,id=btn.dataset.id;btn.disabled=true;
+      if($("chat-input").disabled&&["choose-project","scope","save-scope","clear-scope","entity-chat","use-file"].includes(a)){btn.disabled=false;return;}
       try{
         if(a==="close")$("hub-dialog").close();
         else if(a==="refresh")await this.refresh();
@@ -161,7 +213,7 @@
         else if(a==="save-entity"){
           if(!$("hub-form").reportValidity())return;
           const fields={name:$("hub-name").value.trim(),stage:$("hub-stage").value.trim(),description:$("hub-description").value.trim()};
-          for(const [field,dom] of [["owner","hub-edit-owner"],["customer","hub-customer"],["team","hub-team"],["industry","hub-industry"],["project_type","hub-project-type"]])if($(dom))fields[field]=$(dom).value;
+          for(const [field,dom] of [["aliases","hub-aliases"],["owner","hub-edit-owner"],["customer","hub-customer"],["team","hub-team"],["industry","hub-industry"],["project_type","hub-project-type"]])if($(dom))fields[field]=$(dom).value;
           if(!fields.name)throw Error("名称不能为空。");
           if(this.editType==="project"&&!this.editing){
             const project=this.createdWorkspace||(this.createdWorkspace=await this.b.createProject(fields.name,fields.description));if(this.loading)await this.loading;await this.refresh();
@@ -177,7 +229,7 @@
         else if(a==="contact")this.dialog("新增联系人",'<label>姓名<input id="hub-contact-name" required maxlength="80"></label><label>角色<input id="hub-contact-role" maxlength="100"></label><label>备注<input id="hub-contact-note" maxlength="200"></label>',"save-contact");
         else if(a==="save-contact"){if(!$("hub-form").reportValidity())return;await this.save({operation:"contact",id:this.id,name:$("hub-contact-name").value,role:$("hub-contact-role").value,note:$("hub-contact-note").value});$("hub-dialog").close();}
         else if(a==="record"||a==="task-record")this.recordDialog(a==="task-record"?id:"");
-        else if(a==="save-record"){if(!$("hub-form").reportValidity())return;await this.save({operation:"record",id:this.id,kind:$("hub-record-kind").value,text:$("hub-record-text").value,owner:$("hub-record-owner").value,due:$("hub-record-due").value,task_id:this.recordTask});$("hub-dialog").close();}
+        else if(a==="save-record"){if(!$("hub-form").reportValidity())return;await this.save({operation:"record",id:this.id,kind:$("hub-record-kind").value,text:$("hub-record-text").value,owner:$("hub-record-owner").value,due:$("hub-record-due").value,task_id:this.recordTask});$("hub-dialog").close();this.b.note("已保存到业务档案；尚未纳入正式销售台账或销售行动简报。");}
         else if(a==="toggle"){const r=this.entity().records.find(r=>r.id===id);await this.save({operation:"toggle",id:this.id,record_id:id,done:!r.done});}
         else if(a==="source-link")this.linksDialog([id]);
         else if(a==="batch-link"){if(!this.sources.size)throw Error("请先勾选资料。");this.linksDialog([...this.sources],true);}
@@ -191,7 +243,9 @@
         else if(a==="use-file"){this.files.add(id);this.b.show("chat");this.renderContext();}
         else if(a==="scope"){if(!this.data)await this.refresh();if(this.data)this.scopeDialog();}
         else if(a==="save-scope"){const ids=[...$("hub-dialog").querySelectorAll('[data-context-file]:checked')].map(n=>n.dataset.contextFile);if(ids.length>20)throw Error("每次最多选择 20 份资料。");this.context=$("hub-context").value;this.files=new Set(ids);this.b.clearLegacyContext();this.b.selectProject(this.entity(this.context)?.workspace_id||"project-default");$("hub-dialog").close();this.renderContext();}
-        else if(a==="clear-scope"){this.context="";this.files.clear();this.b.clearLegacyContext();this.renderContext();}
+        else if(a==="clear-scope"){this.context="";this.files.clear();this.projectMatch=null;this.projectChoice=null;this.b.clearLegacyContext();this.renderContext();}
+        else if(a==="choose-project"){if($("chat-input").value.trim()!==this.projectQuery)throw Error("问题已修改，请重新发送以检索项目。");this.projectChoice={text:this.projectQuery,id};await this.b.sendChat();}
+        else if(a==="project-library"){this.tab="project";this.id="";this.b.show("knowledge");await this.refresh();}
         else if(a==="chat")this.b.show("chat");
         else if(a==="task")this.b.openTask(id);
       }catch(error){if($("hub-dialog").open)$("hub-dialog-error").textContent=error.message;this.b.note(error.message,true);}

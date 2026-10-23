@@ -2,6 +2,8 @@
   let model = null;
   let workbench = null;
   let requestToken = null;
+  const taskOutputCache = new Map();
+  let snapshotLoading = false, lastSnapshotAt = null;
   let selectedProfile = null;
   let selectedService = null;
   let guidedRenderedService = null;
@@ -437,6 +439,8 @@
   }
 
   function switchView(view, { record = true, restoreScroll = true } = {}) {
+    const revealTasks = view === "tasks";
+    if (revealTasks) view = "chat";
     if (!viewTitles[view]) return;
     const previousView = currentView;
     if (view !== previousView) {
@@ -447,6 +451,7 @@
       }
     }
     currentView = view;
+    if (revealTasks) queueMicrotask(() => $("chat-work-progress").scrollIntoView({ block: "start" }));
     document.body.dataset.primaryView = view;
     if (window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
     document.querySelectorAll("[data-page]").forEach((page) => page.classList.toggle("active", page.dataset.page === view));
@@ -2207,6 +2212,16 @@
     queue.textContent = task.queued_message_count ? `${task.queued_message_count} 条消息排队中` : "消息队列空闲";
     header.append(heading, queue);
     section.append(header);
+    if (task.health) {
+      const health = document.createElement("div");health.className=`task-health ${task.health.tone||"warning"}`;
+      const title=document.createElement("strong");title.dataset.healthTitle="";title.textContent=task.health.title;
+      const detail=document.createElement("p");detail.textContent=task.health.detail;
+      const times=document.createElement("small");
+      const duration=seconds=>seconds==null?"未知":seconds<60?`${seconds} 秒`:`${Math.floor(seconds/60)} 分 ${seconds%60} 秒`;
+      times.textContent=`核心：${task.health.online?"在线":"未收到心跳"} · 当前活动持续 ${duration(task.health.phase_seconds)} · 距上次活动 ${duration(task.health.quiet_seconds)}`;
+      const progress=document.createElement("small");progress.textContent=`最近阶段记录：${task.health.last_progress_at?stepUpdatedTime(task.health.last_progress_at):"尚无"} · 状态确认于 ${progressTime(task.health.observed_at)}`;
+      health.append(title,detail,times,progress);section.append(health);
+    }
     const effectiveStatus = displayStatus(task);
     renderExecutionPlan(section, task, historical, effectiveStatus);
 
@@ -2322,6 +2337,7 @@
   }
 
   function renderTasks() {
+    $("chat-work-progress").hidden=!model.tasks.length&&!model.pending_requests?.length;
     const activeTasks = model.tasks.filter((task) => !isHistoricalTask(task));
     const historyTasks = model.tasks.filter(isHistoricalTask);
     const renderTaskCards = (box, tasks, historical) => {
@@ -2337,7 +2353,8 @@
       template.querySelector("strong").textContent = serviceName || task.service_id || "销售任务";
       const badge = template.querySelector(".status");
       const effectiveStatus = displayStatus(task);
-      badge.textContent = label[effectiveStatus] || "未知状态";
+      badge.textContent = task.health?.title || label[effectiveStatus] || "未知状态";
+      badge.dataset.healthBadge = "";
       if (Object.hasOwn(label, effectiveStatus)) badge.classList.add(effectiveStatus);
       const scheduleMeta = task.schedule_id ? ` · 每日任务 ${task.scheduled_for || ""}` : "";
       const nodeLabel = historical ? "任务已结束" : (task.waiting_node_display_name || task.current_node_display_name || "等待智能核心接手");
@@ -2347,6 +2364,9 @@
       template.querySelector(".task-request").textContent = displayTaskRequest(task);
       const actions = template.querySelector(".task-actions");
       const article = template.querySelector("article");
+      article.dataset.taskId = task.task_id;
+      const replies=document.createElement("section");replies.className="task-model-replies";replies.setAttribute("aria-label","模型回复原文");article.insertBefore(replies,actions);
+      renderTaskOutput(replies,task);
       renderTaskProgress(article, task, historical);
       const presentationRendered = renderPresentationReview(article, task);
       renderRawWriteIntent(article, task, presentationRendered);
@@ -2357,7 +2377,7 @@
       if (effectiveStatus === "interrupted") addRestartAction(actions, task, "重新开始");
       if (effectiveStatus === "interrupted") addAction(actions, task, "cancel", "结束任务");
       if (historical) addRestartAction(actions, task, "再次创建");
-      const expanded = taskCardExpansion.has(task.task_id) ? taskCardExpansion.get(task.task_id) : !historical;
+      const expanded = taskCardExpansion.has(task.task_id) ? taskCardExpansion.get(task.task_id) : !historical && task === activeTasks[0];
       article.classList.toggle("collapsed", !expanded);
       const collapse = document.createElement("button");
       collapse.type = "button";
@@ -2371,7 +2391,7 @@
         taskCardExpansion.set(task.task_id, nextExpanded);
         collapse.textContent = nextExpanded ? "收起详情" : "展开详情";
         collapse.setAttribute("aria-expanded", String(nextExpanded));
-        if (nextExpanded) renderWorkflow(task);
+        if (nextExpanded) { renderWorkflow(task); void loadTaskOutput(task); }
       };
       const titleControls = document.createElement("div");
       titleControls.className = "task-title-controls";
@@ -2385,6 +2405,49 @@
     renderTaskCards($("tasks"), activeTasks, false);
     renderTaskCards($("task-history"), historyTasks, true);
     renderWorkflow(activeTasks[0] || historyTasks[0]);
+    if (currentView === "chat" || currentView === "tasks") {
+      for(const task of model.tasks) if(taskCardExpansion.get(task.task_id) ?? task===activeTasks[0]) void loadTaskOutput(task);
+    }
+  }
+
+  function renderTaskOutput(box,task){
+    const cache=taskOutputCache.get(task.task_id);box.replaceChildren();
+    const heading=document.createElement("h3");heading.textContent="模型回复";box.append(heading);
+    const messageList=document.createElement("div");messageList.className="task-model-message-list";
+    for(const message of cache?.messages||[]){
+      const reply=document.createElement("article");reply.className="task-model-message";reply.dataset.messageId=message.id;
+      const label=document.createElement("small");label.textContent=`助手 · ${progressTime(message.at)}`;
+      const text=document.createElement("div");text.className="task-model-text";text.textContent=message.text;reply.append(label,text);messageList.append(reply);
+    }
+    box.append(messageList);
+    const note=document.createElement("p");note.className="hint";note.textContent=cache?.error?`模型回复暂未同步：${cache.error}`:cache?.note||"等待模型完成本轮回复后显示全文；生成期间可查看下方实际活动。";box.append(note);
+    if(cache?.has_more||cache?.error){const more=document.createElement("button");more.className="secondary";more.textContent=cache.error?"重试读取回复":"加载后续回复";more.onclick=event=>{event.stopPropagation();void loadTaskOutput(task,true);};box.append(more);}
+    queueMicrotask(()=>{if(messageList.isConnected)messageList.scrollTop=cache?.followLatest===false?cache.scrollTop||0:messageList.scrollHeight;});
+    messageList.onscroll=()=>{if(cache&&messageList.isConnected){cache.scrollTop=messageList.scrollTop;cache.followLatest=messageList.scrollHeight-messageList.scrollTop-messageList.clientHeight<=24;}};
+  }
+
+  async function loadTaskOutput(task,force=false){
+    let cache=taskOutputCache.get(task.task_id);
+    if(!cache){cache={messages:[],after:"",busy:false};taskOutputCache.set(task.task_id,cache);}
+    if(cache.busy||!requestToken||!force&&Date.now()-(cache.checked||0)<2500)return;
+    const waitingForMore=cache.has_more&&!force;
+    cache.busy=true;cache.checked=Date.now();
+    try{
+      const endpoint=`/api/tasks/${encodeURIComponent(task.task_id)}/conversation`;
+      const get=after=>api(`${endpoint}?after=${encodeURIComponent(after)}`,{headers:{"X-Director-Token":requestToken},signal:AbortSignal.timeout(10000)});
+      let result=await get(cache.after);
+      if(cache.after&&cache.source_id&&result.source_id&&cache.source_id!==result.source_id)result=await get("");
+      const sourceChanged=cache.source_id&&result.source_id&&cache.source_id!==result.source_id;
+      if(result.reset||sourceChanged){cache.messages=[];cache.after="";cache.scrollTop=0;}
+      if(["pending","unavailable","limited"].includes(result.status)){cache.messages=[];cache.after="";cache.scrollTop=0;}
+      // Continue validating the source/branch while pagination is paused, but
+      // leave subsequent pages for the reader's explicit “load more” action.
+      if(waitingForMore&&!sourceChanged&&!result.reset&&result.status==="ready"&&result.messages?.length){cache.note=result.note;cache.error="";return;}
+      const known=new Set(cache.messages.map(m=>m.id));
+      for(const message of result.messages||[])if(!known.has(message.id)){cache.messages.push(message);known.add(message.id);}
+      Object.assign(cache,{after:result.next_after||cache.after,has_more:result.has_more,note:result.note,source_id:result.source_id,error:""});
+    }catch(error){cache.error=error.message;}
+    finally{cache.busy=false;const box=document.querySelector(`article.task[data-task-id="${CSS.escape(task.task_id)}"] .task-model-replies`);if(box)renderTaskOutput(box,task);}
   }
 
   function addAction(box, task, decision, text) {
@@ -4765,9 +4828,9 @@
     };
   }
 
-  async function load() {
+  async function loadSnapshot() {
     try {
-      model = await api("/api/bootstrap");
+      model = await api("/api/bootstrap", {signal:AbortSignal.timeout(10000)});
     } catch (error) {
       if (error.code !== "UPDATING") throw error;
       syncAppUpdateState(await api("/api/app-updates"));
@@ -4795,6 +4858,20 @@
     if (!customerState.attentionLoaded) loadAttention();
     if (currentView === "home" && !customerState.recommendations.length && !customerState.recommendationsLoading) loadGlobalRecommendations();
   }
+
+  async function load(){
+    if(snapshotLoading)return;
+    snapshotLoading=true;
+    try{
+      await loadSnapshot();lastSnapshotAt=new Date();$("chat-sync-status").hidden=true;
+    }catch(error){
+      const status=$("chat-sync-status");status.hidden=false;status.textContent=`状态刷新失败，不能确认任务仍在处理。上次同步：${lastSnapshotAt?lastSnapshotAt.toLocaleTimeString("zh-CN"):"尚未成功"}。可点击“刷新状态”重试。`;
+      document.querySelectorAll("[data-health-title]").forEach(node=>{node.textContent="状态未同步，执行情况未知";node.closest(".task-health").className="task-health warning";});
+      document.querySelectorAll("[data-health-badge]").forEach(node=>{node.textContent="状态未同步";node.className="status interrupted";});
+      throw error;
+    }finally{snapshotLoading=false;}
+  }
+  $("chat-task-refresh").onclick=()=>load().catch(error=>note(error.message,true));
 
   $("create").onclick = async () => {
     try {
@@ -5941,6 +6018,7 @@
 
   workbench = window.Agent4MarketBusinessLibrary?.create({
     api, note, confirm: confirmAction, show: switchView,
+    sendChat: () => freeChat.send(),
     files: () => libraryState.entries, tasks: () => model?.tasks || [], wechatRows: () => wechatState.rows,
     pendingRequests: () => (model?.pending_requests || []).filter(r => r.profile_id === selectedProfile),
     renderWechat: () => { renderWechatConversations(); workbench?.update(); },
@@ -5950,11 +6028,33 @@
     selectProject: (id) => { if (projectById(id)?.status !== "active") throw Error("项目尚未加载或已归档，请刷新后重试。"); selectedProject = id; renderProjectSelectors(); },
     createProject: async (name, description) => { const project = await api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, description: description.slice(0, 500) }) }); model.projects.push(project); renderProjectSelectors(); return project; },
     projectStatus: (id, status) => api(`/api/projects/${encodeURIComponent(id)}/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }),
-    openTask: (id) => { switchView("tasks"); const task = model?.tasks.find(t => t.task_id === id); if (task) renderWorkflow(task); document.querySelector(`[data-task-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "start" }); },
+    openTask: (id) => { taskCardExpansion.set(id,true);$("chat-task-history").open=true;switchView("tasks");renderTasks();const task=model?.tasks.find(t=>t.task_id===id);if(task){renderWorkflow(task);void loadTaskOutput(task);}document.querySelector(`article.task[data-task-id="${CSS.escape(id)}"]`)?.scrollIntoView({block:"start"}); },
     prepareWechat: async () => { if (!wxdecipherState.copied) await copyWxDatabases(); if (wxdecipherState.copied) await runWxDecipher(); },
     startFlow: (serviceId, text, files) => {
       const chatModel = $("chat-model").value;
       if ([...$("task-model").options].some(option => option.value === chatModel)) { $("task-model").value = chatModel; renderTaskThinkingOptions(); }
+      if (serviceId === "bid-interpretation") {
+        switchView("bids");
+        let brief = $("bid-chat-brief");
+        if (!brief) {
+          brief = document.createElement("section"); brief.id = "bid-chat-brief"; brief.className = "panel hub-data-notice";
+          document.querySelector('[data-page="bids"]').prepend(brief);
+        }
+        brief.replaceChildren();
+        const title = document.createElement("strong"); title.textContent = "本次需求：招标文件解读";
+        const request = document.createElement("p"); request.textContent = text;
+        const hint = document.createElement("p"); hint.textContent = "请先选择投标项目并核对已登记的招标原件，再确认开始。聊天中选择的普通资料不会自动作为招标原件。";
+        const start = document.createElement("button"); start.type = "button"; start.className = "primary"; start.textContent = "确认所选投标项目并开始解读";
+        start.onclick = async () => {
+          const project = bidProject();
+          if (!project) { note("请先选择一个投标项目。", true); return; }
+          if (!await confirmAction({ title: "确认招标解读范围", message: `投标项目：${project.name}\n将读取此投标项目已登记的原件。\n本次需求：${text}`, confirmText: "开始解读" })) return;
+          start.disabled = true; try { await createBidStageTask(serviceId, text); } finally { start.disabled = false; }
+        };
+        const back = document.createElement("button"); back.type = "button"; back.className = "secondary"; back.textContent = "返回对话"; back.onclick = () => switchView("chat");
+        brief.append(title, request, hint, start, back); brief.scrollIntoView({ block: "start" });
+        return;
+      }
       openService(serviceId);
       if (serviceId === "wechat-review") return;
       if (serviceId === "presentation-studio") {
@@ -5970,8 +6070,10 @@
     },
   });
   const freeChat = window.Agent4MarketFreeChat.create({ api, getToken: () => requestToken,
+    prepareMessage: (text) => workbench?.prepareChat(text),
+    confirmProjectChange: () => confirmAction({title:"切换档案并开始新对话",message:"将清空当前临时对话，避免混用不同客户或项目的信息。已保存的业务档案和任务记录保留。",confirmText:"开始新对话"}),
     routeWork: (text) => workbench?.route(text),
-    onNewChat: () => { if (workbench) { workbench.context = ""; workbench.files.clear(); workbench.renderContext(); } clearCustomerContext(); },
+    onNewChat: () => { if (workbench) { workbench.context = ""; workbench.projectMatch=null;workbench.projectChoice=null;workbench.files.clear(); workbench.renderContext(); } clearCustomerContext(); },
   });
   initializeWxSourcePreferences();
   initializeAppUpdates();

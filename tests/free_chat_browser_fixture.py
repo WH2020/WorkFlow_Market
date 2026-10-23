@@ -33,6 +33,16 @@ def main():
         server.search_gateway_settings_summary = lambda *_a, **_k: {"configured": False}
         server.mail_settings_summary = lambda *_a, **_k: {"configured": False}
         server.desktop_runtime_summary = lambda: {"status": "offline", "label": "合成验收：仅聊天进程", "mode": "synthetic-chat-test"}
+        for name, description in (("星河制造（合成）", "本客户正在确认三条产线的试点范围"), ("北辰制造（合成）", "OTHER_CUSTOMER_CONTEXT_CANARY")):
+            view = server.business_library_snapshot()
+            server.business_library_mutation({"confirmed": True, "operation": "save", "revision": view["revision"],
+                                              "type": "customer", "fields": {"name": name, "description": description, "industry": "制造业"}})
+        for name, alias in (("苏州产业园项目", "园区,苏园"), ("杭州产业园项目", "园区,杭园")):
+            project = server.create_project_record({"name": name, "description": name + "的合成独立背景"})
+            view = server.business_library_snapshot()
+            entity = next(e for e in view["entities"] if e.get("workspace_id") == project["project_id"])
+            server.business_library_mutation({"confirmed": True, "operation": "save", "revision": view["revision"], "id": entity["id"],
+                                              "type": "project", "fields": {"aliases": alias, "stage": "方案评审"}})
 
         class Handler(server.ControlHandler):
             def log_message(self, *_args):
@@ -49,7 +59,8 @@ def main():
                     super().do_GET()
 
             def do_POST(self):
-                if self.path not in {"/api/chat/messages", "/api/chat/cancel", "/api/chat/close"}:
+                if self.path not in {"/api/chat/messages", "/api/chat/cancel", "/api/chat/close", "/api/chat/project-context", "/api/chat/customer-context",
+                                     "/api/chat/preferences", "/api/chat/preferences/save", "/api/chat/project-note"}:
                     self.send_json(403, {"error": "Only synthetic chat actions are permitted"})
                     return
                 super().do_POST()

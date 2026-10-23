@@ -22,7 +22,7 @@ try{
  const save=async()=>{await page.locator('#hub-dialog').getByRole('button',{name:'确认保存',exact:true}).click();await page.locator('#hub-dialog').waitFor({state:'hidden'});};
  const state=async()=>await(await context.request.get(fixture.url+'/fixture/state')).json();
  await page.goto(fixture.url);await page.locator('#chat-status').filter({hasText:'准备好了'}).waitFor();
- assert.deepEqual(await page.locator('#sidebar nav button').allTextContents(),['◌对话','▣资料库','☑工作进展']);
+ assert.deepEqual(await page.locator('#sidebar nav button').allTextContents(),['◌对话','▣资料库']);
  await page.screenshot({path:output+'/chat.png',fullPage:true});
  await nav('knowledge');await page.locator('#hub-list .hub-entity-row').waitFor();
  assert.equal(await page.getByRole('tab').count(),5);
@@ -35,7 +35,7 @@ try{
  await click('归档');await page.locator('.app-confirm-dialog').getByRole('button',{name:'确认',exact:true}).click();
  await click('恢复档案');await page.locator('.app-confirm-dialog').getByRole('button',{name:'确认',exact:true}).click();
  await page.getByRole('button',{name:'围绕此对象发起对话',exact:true}).waitFor();
- await click('概况');await click('为此客户新建项目');await page.locator('#hub-name').fill('产线试点（合成）');await save();
+ await click('概况');await click('为此客户新建项目');await page.locator('#hub-name').fill('产线试点（合成）');await page.locator('#hub-aliases').fill('合成产线');await save();
  await page.getByRole('heading',{name:'产线试点（合成）',exact:true}).waitFor();
  await click('关联资料');await click('关联已有资料');await page.locator('[data-entity-source]').check();await save();
  assert.equal(await page.locator('.hub-source-row').count(),1);
@@ -43,7 +43,7 @@ try{
  await page.locator('.hub-entity-row').filter({hasText:'产线试点（合成）'}).getByRole('button',{name:'查看档案',exact:true}).click();
  await click('关联资料');assert.equal(await page.locator('.hub-source-row').count(),1);
  await page.screenshot({path:output+'/project.png',fullPage:true});
- console.log('PASS: three navigation entries, five library tabs, entity/project creation, owner/contact/milestone, archive/restore, source references, reload persistence.');
+ console.log('PASS: two navigation entries, five library tabs, entity/project creation, owner/contact/milestone, archive/restore, source references, reload persistence.');
  await click('围绕此对象发起对话');await page.locator('#chat-input').fill('复盘客户进展');await page.locator('#chat-send').click();
  await page.getByRole('heading',{name:'确认本次工作流',exact:true}).waitFor();
  assert.equal((await state()).requests.length,0,'Routing is not execution');
@@ -51,11 +51,11 @@ try{
  await page.locator('#create').click();await page.locator('#hub-pending').filter({hasText:'请求已保存'}).waitFor();
  const requests=(await state()).requests;assert.equal(requests.length,1);assert.equal(requests[0].library_context.snapshot.name,'产线试点（合成）');assert.equal(requests[0].library_context.files.length,1);assert.notEqual(requests[0].project_id,'project-default');
  await page.reload();await page.locator('#hub-pending').filter({hasText:'请求已保存'}).waitFor();
- await context.request.post(fixture.url+'/fixture/complete');await page.locator('#task-history .task').waitFor();
+ await context.request.post(fixture.url+'/fixture/complete');await page.locator('#chat-task-history > summary').click();await page.locator('#task-history .task').waitFor();
  await nav('knowledge');await tab('项目');await page.locator('.hub-entity-row').filter({hasText:'产线试点（合成）'}).getByRole('button',{name:'查看档案',exact:true}).click();await click('工作与成果');await click('核对后保存行动');await page.locator('#hub-record-text').fill('已核对：准备会议议题（合成）');await save();
  await click('跟进与行动');assert.equal(await page.locator('.hub-record').count(),1);assert.match(await page.locator('.hub-record').innerText(),/用户核对工作结果后保存/);
  assert.equal((await state()).legacy_unchanged,true);
- await click('围绕此对象发起对话');assert.match(await page.locator('#hub-chat-scope').innerText(),/本次选择 0 份资料/);
+ await click('围绕此对象发起对话');assert.match(await page.locator('#hub-chat-scope').innerText(),/工作流已选 0 份资料/);
  await page.locator('#chat-input').fill('制作一份 8 页 PPT');await page.locator('#chat-send').click();await page.locator('#presentation-task-form').waitFor();assert.equal(await page.locator('#ppt-pages').inputValue(),'8');
  await page.screenshot({path:output+'/ppt-workflow.png',fullPage:true});
  await page.locator('#hub-flow-type').selectOption('pdf-import');await page.locator('#generic-task-form').waitFor();assert.match(await page.locator('#task-form-title').innerText(),/电子文档/);

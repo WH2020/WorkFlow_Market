@@ -56,6 +56,8 @@ def main():
                         task={**r,"task_id":r["request_id"],"status":"completed","version":1,"completed_nodes":[],"current_node":None,"waiting_node":None,"waiting_nodes":[],"artifacts":[],"updated_at":server.now()}
                         server.atomic_json(server.TASKS/(task["task_id"]+".json"),task)
                     self.send_json(200,{"ok":True})
+                elif self.path=="/api/chat/project-context":
+                    super().do_POST()
                 elif self.path.startswith("/api/chat/"):
                     self.send_json(400,{"error":"测试夹具不调用模型"})
                 elif self.path in {"/api/business-library","/api/projects","/api/task-requests"} or self.path.startswith("/api/projects/"):

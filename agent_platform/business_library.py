@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 TYPES = {"sales", "customer", "project"}
-FIELDS = {"name", "owner", "customer", "team", "stage", "industry", "description", "project_type"}
+FIELDS = {"name", "aliases", "owner", "customer", "team", "stage", "industry", "description", "project_type"}
 MAX_ENTITIES = 10000
 
 
@@ -228,12 +228,26 @@ def _require_entity(entities: dict, identity: str, kind: str | None = None, acti
 
 
 def mutate(root: Path, payload: dict, *, sources: list[dict] | None = None,
-           valid_sources: set[str] | None = None, task: dict | None = None) -> dict:
+           valid_sources: set[str] | None = None, task: dict | None = None, conversation: dict | None = None) -> dict:
     if not isinstance(payload, dict) or payload.get("confirmed") is not True:
         raise DossierError("CONFIRMATION_REQUIRED", "请确认保存本次档案修改")
     with _connection(root, True) as connection:
         state = _read(connection)
         view = _snapshot(state, sources or [])
+        chat_record_id = ""
+        if conversation is not None:
+            if (payload.get("operation") != "record" or payload.get("id") != conversation["project_id"]
+                    or payload.get("task_id") or payload.get("owner")):
+                raise DossierError("INVALID_INPUT", "对话只能向本轮档案追加经用户确认的记录")
+            chat_record_id = "chat-" + hashlib.sha256(
+                (conversation["session_id"] + ":" + conversation["request_id"]).encode()).hexdigest()[:32]
+            existing = next((r for e in view["entities"] if e["id"] == payload["id"]
+                             for r in e.get("records", []) if r["id"] == chat_record_id), None)
+            if existing:
+                if (any(existing[k] != payload.get(k, "") for k in ("text", "kind", "due"))
+                        or ("\n用户原话" in existing["source"]) != bool(conversation.get("include_source_quote"))):
+                    raise DossierError("DUPLICATE", "本轮记录已保存；不能用重复请求覆盖已保存内容")
+                return {**view, "saved_id": payload["id"], "message": "本轮记录已保存，没有重复添加。"}
         if payload.get("revision") != view["revision"]:
             raise DossierError("CONFLICT", "档案已由其他窗口或来源更新，请刷新后重试；未覆盖修改")
         entities = {item["id"]: item for item in view["entities"]}
@@ -312,9 +326,15 @@ def mutate(root: Path, payload: dict, *, sources: list[dict] | None = None,
                         raise DossierError("DUPLICATE", "该工作建议已保存，请勿重复提交")
                 if len(item["records"]) >= 5000:
                     raise DossierError("LIMIT", "记录数量已达上限")
-                item["records"].insert(0, {"id": uuid.uuid4().hex, "kind": kind, "text": _text(payload.get("text"), "记录内容", 2000, True),
+                source = "用户核对工作结果后保存" if task_id else "手工录入"
+                if conversation:
+                    source = f"用户确认的对话记录（非独立核验） · {conversation['created_at']} · {chat_record_id}"
+                    if conversation.get("include_source_quote"):
+                        excerpt = conversation["text"][:1200]
+                        source += f"\n用户原话{'（截取前 1200 字）' if len(conversation['text']) > 1200 else ''}：{excerpt}"
+                item["records"].insert(0, {"id": chat_record_id or uuid.uuid4().hex, "kind": kind, "text": _text(payload.get("text"), "记录内容", 2000, True),
                     "owner": owner, "due": due, "done": False, "created_at": _now(), "task_id": task_id,
-                    "source": "用户核对工作结果后保存" if task_id else "手工录入"})
+                    "source": source})
                 _history(item, "新增记录", {}, {"record_id": item["records"][0]["id"]})
             else:
                 record = next((r for r in item["records"] if r["id"] == payload.get("record_id")), None)

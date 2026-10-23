@@ -1,0 +1,20 @@
+.chat-work-progress{margin:16px 0;padding:16px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);scroll-margin-top:90px}
+.chat-work-progress[hidden],.task.collapsed .task-model-replies{display:none}
+.chat-work-progress .task{margin:12px 0;background:#fafcff}
+.chat-work-progress .task-title{align-items:flex-start;gap:12px}
+.chat-work-progress .task-title-controls{flex-wrap:wrap;justify-content:flex-end}
+.chat-work-progress .status{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.chat-workflow-details,.chat-work-progress .task-history-panel{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:9px}
+.chat-workflow-details>summary,.chat-work-progress .task-history-panel>summary{font-weight:650;cursor:pointer}
+.task-health{margin:12px 0;padding:12px 14px;border:1px solid #b8cff0;border-radius:9px;background:#edf5ff;color:#27518b}
+.task-health strong{font-size:14px}.task-health p{margin:6px 0;font-size:12px;line-height:1.65}.task-health small{display:block;margin-top:4px;font-size:11px;line-height:1.5}
+.task-health.warning,#chat-sync-status{border-color:#e4c483;background:#fff8e8;color:#8c5814}
+.task-health.error{border-color:#e3a7ac;background:#fff0f1;color:#a12835}
+.task-health.success{border-color:#a5d8c4;background:#edf9f3;color:#196a50}
+.task-health.neutral{border-color:var(--line);background:#f2f4f7;color:var(--muted)}
+#chat-sync-status{padding:12px;border:1px solid #e4c483;border-radius:8px;line-height:1.6}
+.task-model-replies{margin:16px 0}.task-model-replies h3{font-size:14px}.task-model-message-list{max-height:680px;overflow:auto;overscroll-behavior:contain}
+.task-model-message{margin:10px 0;padding:14px 16px;border:1px solid #d7e2f2;border-radius:12px;background:white;min-width:0}
+.task-model-message small{color:var(--muted);font-size:11px}.task-model-text{margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.8}
+.task-model-replies .hint{margin:8px 0;line-height:1.5}
+@media(max-width:620px){.chat-work-progress{padding:12px 0}.chat-work-progress .task-title{display:block}.chat-work-progress .task-title-controls{margin-top:8px;align-items:flex-start;flex-direction:row;justify-content:flex-start}.task-model-message{padding:10px}.task-progress-panel{padding:10px}.task-health{padding:10px}}

@@ -4,10 +4,12 @@
   const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
   const labels = { off: "关闭", minimal: "最少", low: "较低", medium: "标准", high: "深入", xhigh: "极深", max: "最大" };
   class FreeChat {
-    constructor({ api, getToken, routeWork, onNewChat }) {
+    constructor({ api, getToken, routeWork, onNewChat, prepareMessage, confirmProjectChange }) {
       this.api = api; this.getToken = getToken;
       this.routeWork = routeWork; this.onNewChat = onNewChat;
+      this.prepareMessage=prepareMessage;this.confirmProjectChange=confirmProjectChange;this.preparing=false;this.projectId="";
       this.session = null; this.version = 0; this.running = null; this.blocked = false; this.catalog = [];
+      this.cards = window.Agent4MarketChatCards?.create(this);
       $("chat-form").addEventListener("submit", (event) => { event.preventDefault(); void this.send(); });
       $("chat-input").addEventListener("input", () => this.controls());
       $("chat-input").addEventListener("keydown", (event) => {
@@ -16,6 +18,10 @@
       $("chat-model").addEventListener("change", () => { this.renderThinking(); this.controls(); });
       $("chat-stop").addEventListener("click", () => void this.stop());
       $("chat-new").addEventListener("click", () => void this.newChat());
+      document.querySelectorAll("[data-chat-prompt]").forEach(button => button.addEventListener("click", () => {
+        if (this.running || this.preparing) return;
+        $("chat-input").value = button.dataset.chatPrompt; this.controls(); $("chat-input").focus();
+      }));
       window.addEventListener("pagehide", () => {
         if (this.session) void fetch("/api/chat/close", { method: "POST", keepalive: true,
           headers: { "Content-Type": "application/json", "X-Director-Token": this.getToken() || "" },
@@ -58,14 +64,16 @@
       $("chat-thinking").value = item?.default_thinking_level || (item?.reasoning ? "medium" : "off");
     }
     controls() {
-      const busy = Boolean(this.running), hasModel = this.catalog.some((item) => item.key === $("chat-model").value);
+      const busy = Boolean(this.running)||this.preparing, hasModel = this.catalog.some((item) => item.key === $("chat-model").value);
       $("chat-model").disabled = busy || Boolean(this.session) || !this.catalog.length;
       $("chat-thinking").disabled = busy || Boolean(this.session) || !hasModel;
       $("chat-send").disabled = busy || this.blocked || (!hasModel && !this.routeWork) || !$("chat-input").value.trim() || !this.getToken();
       $("chat-input").disabled = busy;
-      $("chat-stop").hidden = !busy;
+      $("chat-stop").hidden = !this.running;
       $("chat-stop").disabled = Boolean(this.running?.stopping);
       $("chat-new").disabled = busy;
+      document.querySelectorAll("#hub-chat-scope button, #hub-chat-scope input").forEach(control=>{control.disabled=busy;});
+      this.cards?.controls();
     }
     message(role, text) {
       $("chat-welcome")?.remove();
@@ -75,18 +83,19 @@
       article.append(speaker, content); $("chat-conversation").append(article); this.scroll();
       return { article, content };
     }
-    scroll() { const area = $("chat-conversation"); area.scrollTop = area.scrollHeight; }
+    scroll() { const area = $("chat-reading-area"); area.scrollTop = area.scrollHeight; }
     post(path, payload) { return this.api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); }
     async newChat() {
-      if (this.running) return;
-      if (this.session) {
-        try { await this.post("/api/chat/close", { session_id: this.session }); }
-        catch (error) { this.status(`暂时无法关闭对话：${error.message}`, true); return; }
-      }
-      this.session = null; this.version = 0; this.blocked = false;
-      this.onNewChat?.();
-      $("chat-conversation").replaceChildren(); $("chat-input").value = "";
-      this.renderThinking(); this.controls(); this.status("新对话已准备好。可以选择模型后发送消息。"); $("chat-input").focus();
+      if (this.running||this.preparing) return;
+      this.preparing=true;this.controls();
+      try{
+        if(this.session)await this.post("/api/chat/close", { session_id: this.session });
+        this.session = null; this.version = 0; this.blocked = false;this.projectId="";
+        this.onNewChat?.();
+        $("chat-conversation").replaceChildren(); $("chat-input").value = "";
+        this.renderThinking();this.status("新对话已准备好。可以选择模型后发送消息。");
+      }catch(error){this.status(`暂时无法关闭对话：${error.message}`, true);}
+      finally{this.preparing=false;this.controls();$("chat-input").focus();}
     }
     async stop() {
       const run = this.running;
@@ -99,8 +108,24 @@
     }
     async send() {
       const text = $("chat-input").value.trim();
-      if (this.running || this.blocked || !text || !this.getToken()) return;
+      if (this.running || this.preparing || this.blocked || !text || !this.getToken()) return;
       if (text.length > 8000) { this.status("每条消息最多 8000 字。", true); return; }
+      let projectSelection={},prepared={},contextId="";
+      this.preparing=true;this.controls();this.status("正在准备问题与档案背景…");
+      try{
+        prepared=await this.prepareMessage?.(text)||{};
+        if(prepared.blocked){this.status("请先选择项目，再发送问题。");return;}
+        projectSelection=prepared.customer_selection?{customer_selection:prepared.customer_selection}:prepared.project_selection?{project_selection:prepared.project_selection}:{};
+        const nextProject=contextId=(prepared.customer_selection||prepared.project_selection)?.entity_id||"";
+        if(this.session&&this.version>0&&nextProject!==this.projectId){
+          if(!await this.confirmProjectChange?.()){prepared.cancel?.();this.status("已取消切换，本轮问题未发送。原对话仍保留。");return;}
+          await this.post("/api/chat/close",{session_id:this.session});
+          this.session=null;this.version=0;this.projectId="";
+          $("chat-conversation").replaceChildren();
+        }
+        prepared.commit?.();
+      }catch(error){prepared.cancel?.();this.status(`档案资料检索未完成：${error.message}。可重试，或关闭档案背景后普通对话。`,true);return;}
+      finally{this.preparing=false;this.controls();}
       if (this.routeWork?.(text)) {
         this.message("user", text); this.message("assistant", "已展开相应工作流。请核对背景、资料和模型，确认开始后运行。");
         $("chat-input").value = ""; this.controls(); return;
@@ -116,11 +141,12 @@
         const response = await fetch("/api/chat/messages", { method: "POST", signal: run.controller.signal,
           headers: { "Content-Type": "application/json", "X-Director-Token": this.getToken() },
           body: JSON.stringify({ ...(this.session ? { session_id: this.session } : {}), request_id: run.id,
-            version: this.version, message: text, requested_model: $("chat-model").value, requested_thinking_level: $("chat-thinking").value }) });
+            version: this.version, message: text, requested_model: $("chat-model").value, requested_thinking_level: $("chat-thinking").value,
+            ui_version: 1, use_preferences: $("chat-use-preferences")?.checked !== false, ...projectSelection }) });
         if (!response.ok) {
           run.knownError = true;
           const error = await response.json();
-          if (["SESSION_EXPIRED", "RECIPIENT_CHANGED", "TURN_CONFLICT", "CONTEXT_LIMIT"].includes(error.code)) this.blocked = true;
+          if (["SESSION_EXPIRED", "RECIPIENT_CHANGED", "TURN_CONFLICT", "CONTEXT_LIMIT", "PROJECT_CHANGED"].includes(error.code)) this.blocked = true;
           throw new Error(error.error || "消息发送失败");
         }
         if (!response.body || !response.headers.get("Content-Type")?.startsWith("application/x-ndjson")) throw new Error("回复格式无效");
@@ -139,15 +165,23 @@
             if (run.done) throw new Error("回复状态无效");
             if (event.type === "meta") {
               if (run.meta || !/^[a-f0-9]{32}$/u.test(event.session_id) || event.request_id !== run.id || event.version !== this.version || event.model !== $("chat-model").value) throw new Error("对话状态无效");
-              run.meta = true; this.session = event.session_id;
+              run.meta = true; this.session = event.session_id;run.projectId=event.project_id||"";
+              if(run.projectId!==contextId)throw new Error("档案范围校验失败");
               this.status(`${event.model_label} · 正在生成回复…`);
+            } else if (event.type === "ui" && run.meta && !run.ui) {
+              run.ui = true;
+              const context = document.createElement("div"); context.className = "chat-assist-context";
+              reply.article.insertBefore(context, reply.content); this.cards?.render(event.cards, context);
             } else if (event.type === "delta" && run.meta && typeof event.text === "string") {
               answer += event.text;
               if (answer.length > 128 * 1024) throw new Error("回复超过显示上限");
-              const area = $("chat-conversation"), follow = area.scrollHeight - area.scrollTop - area.clientHeight < 90;
+              const area = $("chat-reading-area"), follow = area.scrollHeight - area.scrollTop - area.clientHeight < 90;
               reply.content.textContent = answer; if (follow) this.scroll();
             } else if (event.type === "done" && run.meta && event.version === this.version + 1) {
-              run.done = true; this.version = event.version;
+              run.done = true; this.version = event.version;this.projectId=run.projectId;
+              const area = $("chat-reading-area"), follow = area.scrollHeight - area.scrollTop - area.clientHeight < 90;
+              this.cards?.render(event.cards, reply.article);
+              if (follow) this.scroll();
               this.status(event.limited ? "回复已达到本轮长度上限，可以继续追问。" : "回复完成，可以继续对话。");
             } else if (event.type === "error") {
               run.knownError = true; throw new Error(event.error || "模型请求未完成");

@@ -214,7 +214,7 @@ class ChatHttpTests(unittest.TestCase):
         return handler
 
     def test_every_chat_route_requires_local_user_token_and_json(self):
-        for route in ("messages", "cancel", "close"):
+        for route in ("messages", "cancel", "close", "project-context", "preferences", "preferences/save", "project-note"):
             for condition in ("foreign_user", "bad_token", "non_json", "ok"):
                 handler = self.handler("/api/chat/" + route, {})
                 if condition == "foreign_user":

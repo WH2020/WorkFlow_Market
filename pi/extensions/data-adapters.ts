@@ -2766,8 +2766,8 @@ export function registerDataAdapters(pi: ExtensionAPI, hooks: AdapterHooks): Dat
       if (!context.project_id || scopeProjectId !== context.project_id) {
         throw new Error("微信会话授权范围与当前项目空间不一致");
       }
-      result = await reviewWechatSnapshot(result, reviewModel, signal, (text) => {
-        onUpdate?.({ content: [{ type: "text", text }], details: { status: "processing" } });
+      result = await reviewWechatSnapshot(result, reviewModel, signal, (text, progress) => {
+        onUpdate?.({ content: [{ type: "text", text }], details: { status: "processing", workbench_progress: progress } });
       }, () => assertWechatScopeActive(hooks.projectRoot(), result.scope, context.model_recipient));
       signal?.throwIfAborted();
       assertResultSize(result);

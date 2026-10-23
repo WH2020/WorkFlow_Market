@@ -14,6 +14,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { cliTaskThinking } from "./cli-model-provider.ts";
 import { createWechatReviewModel } from "./wechat-review-model.ts";
+import { RuntimeActivityTracker, type RuntimeActivity } from "./runtime-activity.ts";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
@@ -162,6 +163,8 @@ type AgentRuntimeLease = {
   task_status: WorkflowTask["status"] | null;
   heartbeat_at: string;
   model_error?: string;
+  activity?: RuntimeActivity;
+  session_leaf_id?: string | null;
 };
 
 const TASK_PROGRESS_PHASES = new Set([
@@ -1251,6 +1254,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   let profileSwitchQueued = false;
   let runtimeLeaseNonce = "";
   let runtimeLeasePath: string | undefined;
+  const runtimeActivity = new RuntimeActivityTracker();
+  let runtimeLeaf: (() => string | null) | undefined;
   let runtimeModelRegistry: ExtensionContext["modelRegistry"] | undefined;
   let currentRuntimeModel: RuntimePiModel | undefined;
   let defaultRuntimeModel: RuntimePiModel | undefined;
@@ -1364,11 +1369,15 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
       task_id: task?.task_id ?? null,
       task_status: task?.status ?? null,
       ...(modelBoundaryError ? { model_error: modelBoundaryError.slice(0, 500) } : {}),
+      ...(task ? { activity: runtimeActivity.snapshot(task.task_id) } : {}),
+      ...(runtimeLeaf ? { session_leaf_id: runtimeLeaf() } : {}),
       heartbeat_at: new Date().toISOString(),
     });
   };
 
   const clearRuntimeLease = () => {
+    runtimeActivity.reset();
+    runtimeLeaf = undefined;
     removeAgentRuntimeLease(runtimeLeasePath, runtimeLeaseNonce);
     runtimeLeasePath = undefined;
     runtimeLeaseNonce = "";
@@ -1464,6 +1473,8 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
 
   const sendTaskPrompt = (task: WorkflowTask, service: Service, workflow: Workflow, recoveryNote = "") => {
     requireNotUpdating();
+    runtimeActivity.start(task.task_id);
+    updateRuntimeLease();
     pi.sendUserMessage(
       `/skill:${service.skill} [DIRECTOR_TASK_CONTEXT ${task.task_id}]\n${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护资料库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}${renderLibraryContext(task.library_context)}`,
       { expandPromptTemplates: true, deliverAs: "followUp" },
@@ -2000,6 +2011,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     }
     clearRuntimeLease();
     runtimeLeaseNonce = randomUUID();
+    runtimeLeaf = () => ctx.sessionManager.getLeafId?.() ?? null;
     profileSwitchQueued = false;
     projectRoot = resolve(ctx.cwd);
     runtimeIsIdle = () => typeof ctx.isIdle !== "function" || ctx.isIdle();
@@ -2136,6 +2148,29 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
   }));
 
   pi.on("model_select", (event) => { currentRuntimeModel = event.model; });
+  // Track actual execution separately from the process heartbeat. All published
+  // fields are controlled labels/counts; never inspect or serialize model text.
+  const trackActivity = (update: (id: string) => void, publish = true) => {
+    if (!activeTask || isTerminal(activeTask)) return;
+    try { update(activeTask.task_id); if (publish) updateRuntimeLease(); }
+    catch { /* Observability must not change workflow execution or approval. */ }
+  };
+  pi.on("agent_start", () => trackActivity(id => runtimeActivity.start(id)));
+  pi.on("message_start", event => {
+    if (event.message.role === "assistant") trackActivity(id => runtimeActivity.model(id));
+  });
+  pi.on("message_update", () => trackActivity(id => runtimeActivity.touch(id), false));
+  pi.on("message_end", event => {
+    if (event.message.role === "assistant") {
+      const reason = event.message.stopReason;
+      trackActivity(id => runtimeActivity.messageEnd(id, reason));
+    }
+  });
+  pi.on("tool_execution_start", event => trackActivity(id => runtimeActivity.toolStart(id, event.toolCallId, event.toolName)));
+  pi.on("tool_execution_update", event => trackActivity(id => runtimeActivity.toolUpdate(id, event.toolCallId,
+    event.partialResult?.details?.workbench_progress), false));
+  pi.on("tool_execution_end", event => trackActivity(id => runtimeActivity.toolEnd(id, event.toolCallId, event.isError)));
+  pi.on("agent_settled", () => trackActivity(id => runtimeActivity.settled(id)));
   const assertRuntimeModelBoundary = () => {
     if (unboundSensitiveHistory) throw new Error("旧会话含未绑定接收方的微信内容，请新建 AI 核心会话并重新授权");
     if (process.env.AGENT4MARKET_MODEL_ERROR) throw new Error(process.env.AGENT4MARKET_MODEL_ERROR);

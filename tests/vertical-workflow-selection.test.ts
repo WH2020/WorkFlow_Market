@@ -231,6 +231,34 @@ function writeRequest(root: string, profileId: string): void {
   writeFileSync(join(directory, "request-profile-switch.json"), JSON.stringify(payload), "utf8");
 }
 
+test("real extension event hooks publish model failures and safe tool progress without changing the DAG", async()=>{
+  const root=mkdtempSync(join(tmpdir(),"director-health-"));const previous=process.env.WORKFLOW_AGENT_PROFILE;
+  process.env.WORKFLOW_AGENT_PROFILE="sales-director";
+  try{
+    writeRequest(root,"sales-director");
+    writeFileSync(join(root,".pi/director-runtime/requests/request-profile-switch.json"),JSON.stringify({
+      ...request("request-profile-switch","sales-director"),service_id:"sales-review",workflow_id:"market.sales.pipeline-review",requested_model:"agent4market-newapi/gpt-5.5"}));
+    const runtime=harness(root);await runtime.handlers.get("session_start")?.({},runtime.context);
+    await new Promise(resolve=>setTimeout(resolve,50));
+    const path=join(root,".pi/director-runtime/agent-leases",`${process.pid}.json`);
+    const lease=()=>JSON.parse(readFileSync(path,"utf8"));assert.ok(lease().task_id);
+    runtime.handlers.get("agent_start")?.({});runtime.handlers.get("message_start")?.({message:{role:"assistant"}});
+    runtime.handlers.get("message_end")?.({message:{role:"assistant",stopReason:"error",errorMessage:"PRIVATE_ERROR_CANARY",content:[{type:"thinking",thinking:"PRIVATE_THOUGHT"}]}});
+    assert.equal(lease().activity.phase,"retry_wait");runtime.handlers.get("agent_settled")?.({});
+    assert.equal(lease().activity.phase,"error");assert.equal(lease().task_status,"running");
+    assert.doesNotMatch(JSON.stringify(lease()),/PRIVATE_/);
+    runtime.handlers.get("agent_start")?.({});runtime.handlers.get("message_start")?.({message:{role:"assistant"}});
+    runtime.handlers.get("tool_execution_start")?.({toolCallId:"call",toolName:"director_wechat_read",args:{secret:"PRIVATE_ARGS"}});
+    runtime.handlers.get("tool_execution_update")?.({toolCallId:"call",partialResult:{content:[{type:"text",text:"PRIVATE_CONTENT"}],details:{workbench_progress:{phase:"batch",current:2,total:4,messages:900,level:0}}}});
+    // End of an assistant event publishes the in-memory progress before next heartbeat.
+    runtime.handlers.get("message_end")?.({message:{role:"assistant",stopReason:"toolUse"}});
+    assert.equal(lease().activity.batch.current,2);assert.doesNotMatch(JSON.stringify(lease()),/PRIVATE_/);
+    runtime.handlers.get("tool_execution_end")?.({toolCallId:"call",isError:false});runtime.handlers.get("agent_settled")?.({});
+    assert.equal(lease().activity.phase,"settled");
+    await runtime.handlers.get("session_shutdown")?.({},runtime.context);
+  }finally{if(previous===undefined)delete process.env.WORKFLOW_AGENT_PROFILE;else process.env.WORKFLOW_AGENT_PROFILE=previous;rmSync(root,{recursive:true,force:true});}
+});
+
 test("update trial loads the core but pauses session writes and requests until commit", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-update-trial-"));
   const id = "a".repeat(32), nonce = "b".repeat(64);

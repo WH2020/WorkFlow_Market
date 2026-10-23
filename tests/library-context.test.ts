@@ -26,8 +26,14 @@ test('intent routing does not interpret how-to questions or negative requests as
   const sandbox=vm.createContext({window:{}});
   vm.runInContext(readFileSync(new URL('../ui/business-library.js',import.meta.url),'utf8'),sandbox);
   const detect=sandbox.window.Agent4MarketBusinessLibrary.detectIntent;
-  for(const text of ['如何制作 PPT？','什么是销售复盘','不要制作 PPT','为什么需要复盘客户','聊一下业务想法'])assert.equal(detect(text),null);
-  for(const [text,expected] of [['复盘本周客户进展','sales-review'],['做一份 8 页 PPT','presentation-studio'],['解读招标文件','pdf-import'],['整理客户微信群','wechat-review']])assert.equal(detect(text),expected);
+  for(const text of ['如何制作 PPT？','什么是销售复盘','不要制作 PPT','为什么需要复盘客户','聊一下业务想法','请先不要生成 PPT','不用复盘客户，也不用做 PPT','复盘客户，研究行业趋势'])assert.equal(detect(text),null,text);
+  for(const [text,expected] of [
+    ['复盘本周客户进展','sales-review'],['做一份 8 页 PPT','presentation-studio'],['解读招标文件','bid-interpretation'],['整理客户微信群','wechat-review'],
+    ['帮我把这份方案整理成 8 页 PPT','presentation-studio'],['复盘一下苏园','sales-review'],
+    ['先不要生成 PPT，帮我复盘本周客户进展','sales-review'],['不要做 PPT，改为分析招标文件','bid-interpretation'],
+    ['解读这份 PDF 文件','pdf-import'],['生成本周行动简报','weekly-deck'],['如何复盘客户？请生成本周周报','weekly-deck'],
+    ['不要分析文件；请整理客户微信群','wechat-review'],['不要做 PPT，而是研究行业趋势','industry-research']
+  ])assert.equal(detect(text),expected,text);
 });
 
 test('PDF parsing enforces the frozen exact selection and byte digest',async()=>{

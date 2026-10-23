@@ -15,8 +15,15 @@
 #hub-dialog{width:min(650px,92vw);max-height:90vh;overflow:auto;border:1px solid #d5dfd9;border-radius:16px;padding:24px;color:#203b31;box-shadow:0 24px 90px #18352640}
 #hub-dialog::backdrop{background:#142d2459}#hub-dialog label{display:grid;gap:7px;margin:12px 0}#hub-dialog input:not([type=checkbox]),#hub-dialog select,#hub-dialog textarea,.hub-toolbar input,.hub-toolbar select{width:100%;padding:10px;border:1px solid #cbd8d1;border-radius:7px;font:inherit;min-width:0}#hub-dialog textarea{min-height:90px;resize:vertical}
 .hub-context{padding:12px;background:#f1f7f4;border:1px solid #dce8e1;border-radius:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.hub-context small{flex-basis:100%;color:#668073}
+.free-chat-composer .hub-context{padding:8px 10px;gap:6px 10px;font-size:12px;max-height:25vh;overflow:auto}
+.hub-data-notice{padding:12px 14px;margin:12px 0;border:1px solid #e4c483;border-radius:8px;background:#fff8e8;color:#79531b;font-size:13px;line-height:1.6}
+.hub-data-notice p{margin:6px 0}.hub-data-notice button{margin:4px 8px 0 0}
 .hub-group-filters{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:14px 0}.hub-group-filters label{display:grid;gap:6px}.hub-group-filters small{flex-basis:100%;color:#76897f}.hub-group-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.hub-group-actions select{max-width:130px}.hub-flow-return{margin-bottom:16px}
 #hub-file-library>.page-heading h1{font-size:20px}#hub-prepare-wechat{margin:12px 0}#business-library .panel{margin-bottom:18px}#business-library .text-button{overflow-wrap:anywhere;white-space:normal}
 body[data-primary-view=chat] .task-runtime-picker{display:none}body[data-primary-view=work] #services{display:none}
 body[data-primary-view=knowledge]:not([data-library-tab=wechat]) .task-runtime-picker{display:none}
 @media(max-width:850px){.hub-grid{grid-template-columns:1fr}.hub-toolbar>label{flex:1;min-width:130px}.hub-entity-row .grow,.hub-source-row .grow{min-width:160px}.hub-kv{grid-template-columns:100px 1fr}.hub-entity-heading{align-items:flex-start}.hub-group-filters select{max-width:240px}#hub-dialog{padding:18px}.hub-tabs{gap:3px}.hub-tabs button{padding:9px 10px}}
+/* Project lookup stays inline; no new navigation layer or diagram editor. */
+.hub-project-matches{flex-basis:100%;display:grid;gap:10px;padding:12px;border:1px solid #c8d8f1;border-radius:8px;background:#f7faff}
+.hub-project-matches>div{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.hub-project-matches button{white-space:normal;overflow-wrap:anywhere;text-align:left}

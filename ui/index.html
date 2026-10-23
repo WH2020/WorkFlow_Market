@@ -8,15 +8,15 @@
   <link rel="stylesheet" href="/wxdecipher.css">
   <link rel="stylesheet" href="/free-chat.css">
   <link rel="stylesheet" href="/business-library.css">
+  <link rel="stylesheet" href="/task-conversation.css">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
       <div class="brand"><span class="brand-mark">S</span><div><strong>销售总监</strong><small>AI 工作台</small></div></div>
       <nav aria-label="主导航">
-        <button class="nav-item active" data-view="chat"><span>◌</span>对话</button>
+        <button class="nav-item active" data-view="chat"><span>◌</span>对话<i id="nav-task-count"></i></button>
         <button class="nav-item" data-view="knowledge"><span>▣</span>资料库</button>
-        <button class="nav-item" data-view="tasks"><span>☑</span>工作进展<i id="nav-task-count"></i></button>
       </nav>
       <button id="app-updates-button" class="nav-item sidebar-updates" type="button" title="检查 Agent4Market 更新"><span aria-hidden="true">↻</span><b id="app-updates-button-label">检查更新</b><i id="app-updates-badge" hidden aria-label="发现新版本"></i></button>
       <button class="nav-item sidebar-settings" data-view="settings"><span>⚙</span>设置</button>
@@ -33,24 +33,34 @@
 
       <main>
         <section class="page" data-page="chat">
-          <div class="page-heading"><div><p class="section-kicker">CONVERSATION</p><h1>对话</h1><p>说出需求，复盘、资料解读和 PPT 工作流随之展开。</p></div><button id="chat-new" class="secondary" type="button">新对话</button></div>
+          <div class="page-heading"><div><h1>对话</h1><p>普通问答为临时会话，关闭后清空；确认保存的档案记录和任务长期保留。</p></div><button id="chat-new" class="secondary" type="button">新对话</button></div>
           <section class="panel free-chat-panel" aria-label="自由聊天">
             <div class="free-chat-toolbar">
               <label>对话模型<select id="chat-model" aria-describedby="chat-model-hint"><option value="">正在读取模型…</option></select></label>
               <label>思考强度<select id="chat-thinking"><option value="">模型默认</option></select></label>
               <button id="chat-settings" class="text-button" type="button" data-view="settings">模型设置</button>
+              <button id="chat-memory-open" class="text-button" type="button" aria-expanded="false" aria-controls="chat-memory-panel">回答偏好</button>
             </div>
-            <p id="chat-model-hint" class="hint">每段对话使用一个模型。切换模型或本机 CLI 登录账号后，请开始新对话。</p>
+            <div class="chat-options-row"><label class="chat-memory-toggle"><input id="chat-use-preferences" type="checkbox" checked>应用回答偏好</label><small id="chat-model-hint" class="hint">切换模型或 CLI 登录账号时，请开始新对话。</small></div>
+            <div id="chat-reading-area" class="chat-reading-area" tabindex="0" aria-label="对话与任务阅读区">
+            <section id="chat-memory-panel" class="chat-assist-card" aria-label="回答偏好管理" hidden></section>
             <div id="chat-conversation" class="free-chat-conversation" role="log" aria-label="对话内容">
-              <div id="chat-welcome" class="free-chat-welcome"><span aria-hidden="true">◌</span><h2>说说你想完成什么</h2><p>例如：复盘本周客户进展、解读这份文件、制作客户方案 PPT。</p><small>普通问题直接对话；任务关键词展开相应工作流，确认开始后才运行。</small></div>
+              <div id="chat-welcome" class="free-chat-welcome"><h2>从一件具体工作开始</h2><div class="chat-starters"><button type="button" class="secondary" data-chat-prompt="复盘本周客户进展">复盘客户进展</button><button type="button" class="secondary" data-chat-prompt="解读这份文件">解读资料</button><button type="button" class="secondary" data-chat-prompt="制作一份 8 页客户方案 PPT">制作客户方案 PPT</button></div><small>点击示例填写需求；发送后核对工作流，确认开始才执行。</small></div>
+            </div>
+            <section id="chat-work-progress" class="chat-work-progress" aria-label="对话中的任务与模型回复">
+              <div id="chat-task-heading" class="panel-heading"><div><h2>任务对话</h2><p class="hint">模型回复、工作进展、审批和重试都在这里。</p></div><button id="chat-task-refresh" class="secondary" type="button">刷新状态</button></div>
+              <p id="chat-sync-status" role="status" hidden></p>
+              <div id="tasks" class="empty">正在读取任务状态…</div>
+              <details class="chat-workflow-details"><summary>查看工作流阶段</summary><div id="workflow" class="empty">选择任务后显示。</div></details>
+              <details id="chat-task-history" class="task-history-panel"><summary>历史任务与回复</summary><div id="task-history" class="empty">暂无历史任务。</div></details>
+            </section>
             </div>
             <div id="chat-status" class="free-chat-status" role="status" aria-live="polite">正在读取模型…</div>
             <form id="chat-form" class="free-chat-composer">
-              <label class="free-chat-input-label" for="chat-input">发送消息</label>
-              <textarea id="chat-input" maxlength="8000" rows="3" placeholder="输入问题，或说：复盘客户 / 解读文件 / 制作 PPT…" aria-describedby="chat-input-hint"></textarea>
+              <label class="free-chat-input-label" for="chat-input">普通问答 / 发起新任务 <small>补充已有任务请使用任务卡内的输入框</small></label>
+              <textarea id="chat-input" maxlength="8000" rows="2" placeholder="输入问题，或说：复盘客户 / 解读文件 / 制作 PPT…" aria-describedby="chat-input-hint"></textarea>
               <div class="free-chat-send-row"><small id="chat-input-hint">Enter 发送 · Shift + Enter 换行</small><button id="chat-stop" class="secondary" type="button" hidden>停止生成</button><button id="chat-send" class="primary" type="submit" disabled>发送</button></div>
             </form>
-            <p class="hint">聊天记录只保留在本次会话中。刷新页面或关闭应用后将开始新对话。</p>
           </section>
         </section>
         <section class="page active" data-page="home">
@@ -102,7 +112,6 @@
           </section>
         </section>
 
-        <section class="page" data-page="tasks"><div class="page-heading"><div><p class="section-kicker">TASK CENTRE</p><h1>工作进展</h1><p>查看 AI 处理过程、排队补充消息、调整方向并处理审批。</p></div><button class="primary" data-view="chat">开始新对话</button></div><div class="two-column task-layout"><section class="panel"><h2>当前任务</h2><div id="tasks" class="empty">正在读取任务状态…</div></section><section class="panel sticky-panel"><h2>工作流阶段</h2><div id="workflow" class="empty">选择任务后显示。</div></section></div><section class="panel task-history-panel"><div class="panel-heading"><div><h2>历史任务</h2><p class="hint">已完成、已结束和已替代的任务保留在这里，可按原内容再次创建。</p></div></div><div id="task-history" class="empty">暂无历史任务。</div></section></section>
         <section class="page" data-page="sales"><div class="page-heading"><div><p class="section-kicker">CUSTOMER OPERATIONS</p><h1>客户经营</h1><p>基于本地台账整理客户状态、行动、风险与证据；所有写入仍需审批。</p></div><button class="primary" data-service="sales-review">开始客户复盘</button></div>
           <section id="customer-context-bar" class="customer-context-bar" hidden><div><span class="context-label">当前客户</span><strong id="customer-context-name">未选择</strong><small id="customer-context-meta"></small></div><div class="context-actions"><button id="customer-context-open" class="secondary" type="button">查看客户全景</button><button id="customer-context-clear" class="secondary" type="button">清空</button></div></section>
           <section class="panel customer-filter-panel"><div class="panel-heading"><div><h2>客户筛选</h2><p class="hint">筛选仅影响当前列表，不会修改台账。</p></div><div class="panel-heading-actions"><button id="customer-refresh" class="text-button" type="button">刷新数据</button><button id="customer-filter-clear" class="text-button" type="button">清空筛选</button></div></div><div class="customer-filters"><label class="customer-filter-keyword"><span>关键词</span><input id="customer-filter-query" maxlength="100" placeholder="客户名称、负责人或行业"></label><label><span>负责人</span><input id="customer-filter-owner" list="customer-owner-options" maxlength="100" placeholder="全部"><datalist id="customer-owner-options"></datalist></label><label><span>地区</span><input id="customer-filter-region" list="customer-region-options" maxlength="100" placeholder="全部"><datalist id="customer-region-options"></datalist></label><label><span>行业</span><input id="customer-filter-industry" list="customer-industry-options" maxlength="100" placeholder="全部"><datalist id="customer-industry-options"></datalist></label><label><span>阶段</span><input id="customer-filter-stage" list="customer-stage-options" maxlength="100" placeholder="全部"><datalist id="customer-stage-options"></datalist></label><label><span>健康度</span><input id="customer-filter-health" list="customer-health-options" maxlength="100" placeholder="全部"><datalist id="customer-health-options"></datalist></label><label><span>更新时间</span><select id="customer-filter-updated"><option value="">全部时间</option><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option></select></label></div></section>
@@ -186,6 +195,7 @@
         <section class="page" data-page="weekly">
           <div class="page-heading"><div><p class="section-kicker">销售行动</p><h1>个性化销售行动简报</h1><p>系统先按销售人员与客户关系自动整理，再生成每位销售的行动卡和销售总监汇总。</p></div><button id="refresh-weekly-preview" class="secondary">刷新本周数据</button></div>
           <section id="weekly-task-form" class="panel task-form weekly-form">
+            <div id="weekly-data-scope" class="hub-data-notice"><strong>本次简报的数据范围：正式销售台账</strong><p>资料库中新建的客户、人员及跟进 / 行动记录不会自动纳入本简报。请核对正式台账与下方预览，避免遗漏；档案保存成功不代表已完成正式登记。</p><button type="button" class="secondary" data-view="sales">核对经营台账</button><button type="button" class="text-button" data-view="knowledge">查看业务档案</button></div>
             <div class="form-heading"><div><h2>生成个人简报＋总监汇报</h2><p class="hint">不用逐项填写。系统自动读取本周客户、跟进、资源申请和已授权销售资料。</p></div><span id="weekly-period" class="period-badge"></span></div>
             <div class="weekly-summary"><strong>自动完成四件事</strong><ul><li>按明确归属拆分每位销售的客户与跟进</li><li>为每位销售提炼最多 3 个优先动作</li><li>只推荐已授权且有真实来源路径的销售资料</li><li>汇总待分配客户、资源阻塞和销售总监关注项</li></ul></div>
             <label>本周特别想强调什么？（可选）<textarea id="weekly-focus" maxlength="120" placeholder="例如：重点突出 A 客户停滞原因，以及需要技术团队支持的事项。"></textarea></label>
@@ -428,6 +438,7 @@
     </section>
   </template>
   <script src="/business-library.js"></script>
+  <script src="/chat-cards.js"></script>
   <script src="/free-chat.js"></script>
   <script src="/app.js"></script>
 </body>

@@ -1,7 +1,8 @@
 """Ephemeral, text-only conversations using one explicitly configured recipient.
 
-Only provider configuration/its credential is read. Dialogue stays in memory
-and crosses a pipe to the tool-free model adapter, never a task or data store.
+Reads provider configuration/credentials and accepts bounded project context
+only from the trusted server. Dialogue stays in memory and crosses a pipe to
+the tool-free model adapter, never a task or data store.
 """
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import copy
 import hashlib
 import hmac
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -276,6 +278,8 @@ class Session:
     touched: float = field(default_factory=time.monotonic)
     requests: list[str] = field(default_factory=list)
     current: Any = None
+    project_id: str = ""
+    completed: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -285,6 +289,7 @@ class Turn:
     text: str
     transport: dict
     cancel: threading.Event = field(default_factory=threading.Event)
+    project_id: str = ""
 
 
 class ChatManager:
@@ -294,7 +299,8 @@ class ChatManager:
         self.lock = threading.RLock()
         self.resolver, self.transport, self.clock = resolver, transport, clock
 
-    def begin(self, root: Path, payload: dict) -> Turn:
+    def begin(self, root: Path, payload: dict, *, project_context: dict | None = None,
+              preference_context: dict | None = None) -> Turn:
         fields = {"session_id", "request_id", "message", "version", "requested_model", "requested_thinking_level"}
         if not isinstance(payload, dict) or set(payload) - fields:
             raise ChatError("自由聊天只接受文字、会话标识与模型选择")
@@ -332,12 +338,23 @@ class ChatManager:
                 raise ChatError("该轮消息已提交或对话状态已变化，请等待回复。", "TURN_CONFLICT", 409)
             if session.key != selected["key"] or session.identity != selected["identity"] or session.thinking != selected["thinking"]:
                 raise ChatError("模型或思考配置已变化，请开始新对话。", "RECIPIENT_CHANGED", 409)
+            project_id = project_context["entity_id"] if project_context else ""
+            if session.messages and session.project_id != project_id:
+                raise ChatError("档案范围已变化，请开始新对话，避免混用不同客户或项目的资料。", "PROJECT_CHANGED", 409)
             model = selected["transport"]["model"]
             budget = min(MAX_HISTORY_BYTES, model["contextWindow"] - min(model["maxTokens"], 8192) - 2048)
             messages = [*session.messages, {"role": "user", "content": text.strip()}]
-            if len(session.messages) >= MAX_MESSAGES or sum(len(item["content"].encode()) for item in messages) > budget:
+            context_bytes = len(json.dumps(project_context, ensure_ascii=False).encode()) if project_context else 0
+            if preference_context:
+                context_bytes += len(json.dumps(preference_context, ensure_ascii=False).encode())
+            if len(session.messages) >= MAX_MESSAGES or sum(len(item["content"].encode()) for item in messages) + context_bytes > budget:
                 raise ChatError("本次对话已达到上下文上限，请开始新对话或缩短消息。", "CONTEXT_LIMIT", 409)
             turn = Turn(session, request_id, text.strip(), {**selected["transport"], "messages": copy.deepcopy(messages)})
+            turn.project_id = project_id
+            if project_context:
+                turn.transport["project_context"] = copy.deepcopy(project_context)
+            if preference_context:
+                turn.transport["preference_context"] = copy.deepcopy(preference_context)
             session.requests = [*session.requests[-31:], request_id]
             session.current, session.touched = turn, self.clock()
             self.sessions[session.session_id] = session
@@ -348,7 +365,8 @@ class ChatManager:
         session, text, terminal = turn.session, "", False
         try:
             yield {"type": "meta", "session_id": session.session_id, "request_id": turn.request_id, "version": session.version,
-                   "model": session.key, "model_label": session.label, "thinking": session.thinking}
+                   "model": session.key, "model_label": session.label, "thinking": session.thinking,
+                   "project_id": turn.project_id}
             for event in self.transport(root, turn.transport, turn.cancel):
                 kind = event.get("type")
                 if kind == "ping":
@@ -366,7 +384,13 @@ class ChatManager:
                         if turn.cancel.is_set() or self.sessions.get(session.session_id) is not session or session.current is not turn:
                             raise ChatError(ERROR_MESSAGES["CANCELLED"], "CANCELLED")
                         session.messages.extend([{"role": "user", "content": turn.text}, {"role": "assistant", "content": text}])
+                        session.completed[turn.request_id] = {
+                            "session_id": session.session_id, "request_id": turn.request_id,
+                            "project_id": turn.project_id, "text": turn.text,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                        }
                         session.version += 1
+                        session.project_id = turn.project_id
                         session.touched = self.clock()
                         session.current = None
                     terminal = True
@@ -394,6 +418,20 @@ class ChatManager:
                 turn.session.current = None
             if self.active.get(turn.request_id) is turn:
                 del self.active[turn.request_id]
+
+    def completed_turn(self, payload: dict) -> dict:
+        """A browser cannot invent a source turn or write to a different project."""
+        session_id, request_id = _identifier(payload.get("session_id")), _identifier(payload.get("request_id"))
+        with self.lock:
+            session = self.sessions.get(session_id)
+            if session is None or self.clock() - session.touched > SESSION_TTL:
+                raise ChatError("对话已过期，请在项目资料库核对后添加记录", "SESSION_EXPIRED", 409)
+            if session.current:
+                raise ChatError("请等待当前回复完成后再保存记录", "BUSY", 409)
+            turn = session.completed.get(request_id)
+            if not turn or not turn["project_id"]:
+                raise ChatError("只能保存本段对话中已完成的项目轮次", "INVALID_TURN", 400)
+            return copy.deepcopy(turn)
 
     def cancel(self, payload: dict) -> dict:
         if not isinstance(payload, dict) or set(payload) != {"session_id", "request_id"}:

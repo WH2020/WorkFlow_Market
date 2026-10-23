@@ -50,6 +50,11 @@ if sys.platform == "darwin":
     from agent_platform.macos_updates import MacOSUpdateManager, public_failure as update_public_failure  # noqa: E402
 from agent_platform.windows_update_engine import UpdateFailure  # noqa: E402
 from agent_platform.free_chat import ChatError, ChatManager  # noqa: E402
+from agent_platform import chat_assistance  # noqa: E402
+from agent_platform import project_index  # noqa: E402
+from agent_platform import task_health  # noqa: E402
+from agent_platform import task_conversation  # noqa: E402
+from agent_platform.model_provider import pi_agent_dir  # noqa: E402
 from agent_platform import business_library as dossiers  # noqa: E402
 from ui.business_library_api import source_records as dossier_sources, frozen_file  # noqa: E402
 
@@ -608,7 +613,7 @@ def task_display_state(
         return status, "historical"
     if status == "requested":
         return "requested", "queued"
-    lease = (leases if leases is not None else live_agent_task_leases()).get(str(task.get("task_id") or ""))
+    lease = task_health.bound_lease(task, (leases if leases is not None else live_agent_task_leases()).get(str(task.get("task_id") or "")))
     if lease and lease.get("model_error") and not isinstance(task.get("approval_request"), dict):
         return "interrupted", "interrupted"
     approval = task.get("approval_request")
@@ -636,6 +641,8 @@ def task_display_state(
         lease and lease.get("profile_id") == task.get("profile_id") and
         lease.get("session_key") == task.get("session_key") and lease.get("task_status") == "running"
     ):
+        if task_health.activity_for(task, lease, reference).get("phase") in {"settled", "error"}:
+            return "interrupted", "interrupted"
         return "running", "active"
     return "interrupted", "interrupted"
 
@@ -2292,6 +2299,7 @@ def task_summaries() -> list[dict[str, Any]]:
             summary["progress"] = task_progress_timeline(
                 task, task_events, task_messages, summary["display_status"]
             )
+            summary["health"] = task_health.summary(task, leases.get(task_id), task_events, summary["display_status"])
             summary["queued_message_count"] = sum(
                 message.get("status") in {"queued", "dispatching"} for message in task_messages
             )
@@ -3315,6 +3323,32 @@ class ControlHandler(SimpleHTTPRequestHandler):
         if route == "/api/tasks":
             self.send_json(HTTPStatus.OK, task_summaries())
             return
+        conversation_match = re.fullmatch(r"/api/tasks/([A-Za-z0-9_-]{1,128})/conversation", route)
+        if conversation_match:
+            if not secrets.compare_digest(self.headers.get("X-Director-Token", ""), SERVER_TOKEN):
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "任务回复需要当前工作台令牌"})
+                return
+            path = TASKS / (conversation_match[1] + ".json")
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": "任务不存在"})
+                return
+            task = load_json(path)
+            if task.get("task_id") != conversation_match[1] or task.get("profile_id") != "sales-director":
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "任务范围不匹配"})
+                return
+            if task.get("service_id") == "wechat-review" and not wechat_http_supported():
+                self.send_json(HTTPStatus.FORBIDDEN, {"error": "当前平台尚无微信内容等效用户隔离"})
+                return
+            query = parse_qs(parsed_request.query, max_num_fields=2)
+            after = query.get("after", [""])[0]
+            if len(after) > 128 or set(query) - {"after"}:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "回复分页标识无效"})
+                return
+            lease = task_health.bound_lease(task, live_agent_task_leases().get(task["task_id"]))
+            leaf = lease.get("session_leaf_id") if lease else None
+            self.send_json(HTTPStatus.OK, task_conversation.read(ROOT, pi_agent_dir() / "sessions", task,
+                           after=after, leaf=leaf if isinstance(leaf, str) else None))
+            return
         if route == "/api/knowledge":
             self.send_json(HTTPStatus.OK, knowledge_entries())
             return
@@ -3517,7 +3551,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
-        elif route not in ("/app.js", "/styles.css", "/wxdecipher.css", "/free-chat.js", "/free-chat.css", "/business-library.js", "/business-library.css"):
+        elif route not in ("/app.js", "/styles.css", "/wxdecipher.css", "/free-chat.js", "/free-chat.css", "/chat-cards.js", "/business-library.js", "/business-library.css", "/task-conversation.css"):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         super().do_GET()
@@ -3614,8 +3648,8 @@ class ControlHandler(SimpleHTTPRequestHandler):
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "只接受 JSON 请求"})
                 return
-            payload = self.body(limit=65_536) if route == "/api/chat/messages" else self.body()
-            if route in {"/api/chat/messages", "/api/chat/cancel", "/api/chat/close"}:
+            payload = self.body(limit=65_536) if route.startswith("/api/chat/") else self.body()
+            if route in {"/api/chat/messages", "/api/chat/cancel", "/api/chat/close", "/api/chat/project-context", "/api/chat/customer-context", "/api/chat/preferences", "/api/chat/preferences/save", "/api/chat/project-note"}:
                 self.handle_free_chat(route, payload)
             elif route in {"/api/wechat/decipher/sessions", "/api/wechat/decipher/run", "/api/wechat/decipher/discard", "/api/wechat/decipher/finish-copy", "/api/wechat/decipher/processes", "/api/wechat/decipher/capture-consent", "/api/wechat/decipher/discover", "/api/wechat/decipher/import-discovered", "/api/wechat/storage/plan", "/api/wechat/storage/grant", "/api/wechat/export"}:
                 if ACTIVE_PROFILE_ID not in {None, "sales-director"}:
@@ -4617,7 +4651,59 @@ class ControlHandler(SimpleHTTPRequestHandler):
             if route == "/api/chat/close":
                 self.send_json(HTTPStatus.OK, FREE_CHAT.close(payload))
                 return
-            turn = FREE_CHAT.begin(ROOT, payload)
+            if route == "/api/chat/project-context":
+                self.send_json(HTTPStatus.OK, project_index.resolve(business_library_snapshot(), payload))
+                return
+            if route == "/api/chat/customer-context":
+                self.send_json(HTTPStatus.OK, project_index.resolve_customer(business_library_snapshot(), payload))
+                return
+            if route == "/api/chat/preferences":
+                if payload != {}:
+                    raise ChatError("读取回答偏好不接受自定义范围")
+                self.send_json(HTTPStatus.OK, chat_assistance.preferences(ROOT))
+                return
+            if route == "/api/chat/preferences/save":
+                self.send_json(HTTPStatus.OK, chat_assistance.change_preference(ROOT, payload))
+                return
+            if route == "/api/chat/project-note":
+                if (not isinstance(payload, dict) or set(payload) != {
+                        "session_id", "request_id", "revision", "text", "kind", "due", "confirmed", "include_source_quote"}
+                        or type(payload.get("include_source_quote")) is not bool):
+                    raise ChatError("项目记录参数无效")
+                source_turn = FREE_CHAT.completed_turn(payload)
+                source_turn["include_source_quote"] = payload["include_source_quote"]
+                sources = dossier_sources(ROOT, project_records())
+                result = dossiers.mutate(ROOT, {
+                    "operation": "record", "id": source_turn["project_id"],
+                    **{k: payload[k] for k in ("revision", "text", "kind", "due", "confirmed")},
+                }, sources=sources, conversation=source_turn)
+                self.send_json(HTTPStatus.OK, {"message": result["message"], "revision": result["revision"]})
+                return
+            context = None
+            if not isinstance(payload, dict):
+                raise ChatError("对话参数无效")
+            payload = dict(payload)
+            # Older pages retain the original text-only, no-memory contract.
+            ui_version = payload.pop("ui_version", 0)
+            if type(ui_version) is not int or ui_version not in {0, 1}:
+                raise ChatError("对话卡片协议版本不支持，请刷新工作台")
+            use_preferences = payload.pop("use_preferences", False)
+            if type(use_preferences) is not bool:
+                raise ChatError("回答偏好开关无效")
+            preferences = chat_assistance.preferences(ROOT) if use_preferences else {"values": {}, "revision": ""}
+            if "project_selection" in payload and "customer_selection" in payload:
+                raise ChatError("每段对话只能选择一个客户或项目背景")
+            if "project_selection" in payload:
+                context = project_index.context(business_library_snapshot(), payload.pop("project_selection"))
+            elif "customer_selection" in payload:
+                context = project_index.context(business_library_snapshot(), payload.pop("customer_selection"), kind="customer")
+            preference_context = chat_assistance.preference_context(preferences)
+            turn = FREE_CHAT.begin(ROOT, payload, **({"project_context": context} if context else {}),
+                                   **({"preference_context": preference_context} if preference_context else {}))
+        except dossiers.DossierError as error:
+            self.send_json(HTTPStatus.CONFLICT if error.code == "CONFLICT" else HTTPStatus.BAD_REQUEST,
+                           {"error": str(error), "code": error.code})
+            return
         except ChatError as error:
             self.send_json(error.status, {"error": str(error), "code": error.code})
             return
@@ -4631,8 +4717,15 @@ class ControlHandler(SimpleHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             for event in events:
+                if event["type"] == "done" and ui_version == 1:
+                    event = {**event, "cards": chat_assistance.completion_cards(turn, preferences, use_preferences=use_preferences)}
                 self.wfile.write((json.dumps(event, ensure_ascii=True) + "\n").encode("utf-8"))
                 self.wfile.flush()
+                if event["type"] == "meta" and ui_version == 1:
+                    cards = chat_assistance.context_cards(context, preferences)
+                    if cards:
+                        self.wfile.write((json.dumps({"type": "ui", "cards": cards}, ensure_ascii=True) + "\n").encode("utf-8"))
+                        self.wfile.flush()
         except (OSError, ValueError):
             pass  # A disconnected page cancels only this owned request.
         finally:
