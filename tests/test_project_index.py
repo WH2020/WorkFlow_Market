@@ -88,18 +88,22 @@ class ProjectIndexTests(unittest.TestCase):
         self.assertEqual(project_index.resolve(fixture(), {"message": "看看苏州产业园"})["status"], "ambiguous")
 
     def test_followups_and_unknown_named_project_do_not_cross_scopes(self):
-        for query in ("它负责人是谁", "这个项目还有什么缺失"):
+        for query in ("它负责人是谁", "这个项目还有什么缺失", "那下一步呢", "风险呢？", "继续", "那么，接下来怎么推进",
+                      "受众是管理层，重点是风险", "请帮我把方案改成8页PPT", "先复盘客户，然后制作8页PPT"):
             self.assertEqual(project_index.resolve(fixture(), {"message": query, "current_entity_id": "p1"})["project"]["entity_id"], "p1")
-        for query in ("北京未收录项目", "北京园区负责人是谁", "你好"):
+        for query in ("北京未收录项目", "北京园区负责人是谁", "你好", "换个话题", "另一个项目的风险呢", "继续研究另一家公司"):
             self.assertEqual(project_index.resolve(fixture(), {"message": query, "current_entity_id": "p1"})["status"], "not_found")
         self.assertEqual(project_index.resolve(fixture(), {"message": "你好"})["status"], "not_found")
         self.assertEqual(project_index.resolve(fixture(), {"message": "notSZ-PARKother"})["status"], "not_found")
+        self.assertEqual(project_index.resolve(fixture(), {"message":"风险呢"})["status"], "not_found")
+        self.assertEqual(project_index.resolve(fixture(), {"message":"杭州试点项目风险呢", "current_entity_id":"p1"})["project"]["entity_id"], "p2")
 
     def test_archived_unavailable_stale_and_forged_context_rejected(self):
         view = fixture()
         for marker in ("archived", "source_unavailable"):
             bad = copy.deepcopy(view); bad["entities"][2][marker] = True
             self.assertEqual(project_index.resolve(bad, {"message": "苏园"})["status"], "not_found")
+            self.assertEqual(project_index.resolve(bad, {"message":"那下一步呢", "current_entity_id":"p1"})["status"], "not_found")
             with self.assertRaises(dossiers.DossierError):
                 project_index.context(bad, {"entity_id": "p1", "revision": bad["revision"]})
         for choice in ({"entity_id": "customer", "revision": view["revision"]}, {"entity_id": "p1", "revision": "old"},

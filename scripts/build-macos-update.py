@@ -16,7 +16,7 @@ from agent_platform import macos_update_engine as engine
 SCRIPTS = {'start-macos.sh', 'setup-macos.sh', 'start-coding-agent.sh', 'coding-agent.sh',
            'sync-coding-agent-skills.py', 'enroll-macos-update.py'}
 UI = {'server.py', 'business_library_api.py', 'app.js', 'index.html', 'styles.css', 'wxdecipher.css',
-      'free-chat.css', 'free-chat.js', 'chat-cards.js', 'business-library.js', 'business-library.css',
+      'free-chat.css', 'free-chat.js', 'chat-cards.js', 'business-library.js', 'business-library.css', 'work-plan.js',
       'task-conversation.css'}
 
 

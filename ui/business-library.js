@@ -5,27 +5,32 @@
   const labels = {sales:"销售",customer:"客户",project:"项目",files:"文件",wechat:"微信会话"};
   const kinds = {followup:"跟进",action:"行动",milestone:"里程碑"};
   const button = (text, action, id="", cls="secondary") => `<button type="button" class="${cls}" data-hub-action="${action}" data-id="${esc(id)}">${esc(text)}</button>`;
-  function detectIntent(text) {
-    const intents = new Set();
-    const clauses = text.replace(/(?:但是|不过|而是|改为|改成|然后|接着)/gu, "，").split(/[，,。；;！!？?\n]+/u);
+  function detectPlan(text) {
+    const steps = [];
+    const clauses = text.replace(/(?:但是|不过|而是|改为|然后|接着|之后)|(?:再|并且|并)(?=制作|生成|做|整理|分析|复盘|研究|调研|输出)/gu, "，").split(/[，,。；;！!？?\n]+/u);
     for (const clause of clauses) {
       const part = clause.trim();
       if (!part || /如何|怎么|怎样|什么是|为什么|能否解释|请解释|什么意思|是什么/u.test(part)) continue;
-      const action = part.search(/制作|生成|做|准备|输出|整理|转成|改成|解读|分析|提取|总结|复盘|回顾|研究|调研/u);
+      const action = part.search(/制作|生成|做|准备|输出|整理|转成|改成|压缩成|解读|分析|提取|总结|复盘|回顾|研究|调研/u);
       const negative = part.search(/不要|不用|无需|不必|暂不|先不|不想|不需要|别/u);
       if (negative >= 0 && (action < 0 || negative < action)) continue;
       let intent = null;
       if (/(微信|群聊|聊天记录|会话).*(整理|复盘|总结|分析)|(整理|复盘|总结|分析).*(微信|群聊|聊天记录|会话)/u.test(part)) intent = "wechat-review";
-      else if (/(制作|生成|做|准备|输出|整理|转成).*(ppt|演示文稿|幻灯片)/iu.test(part)) intent = "presentation-studio";
+      else if (/(制作|生成|做|准备|输出|整理|转成|改成|压缩成).*(ppt|演示文稿|幻灯片)/iu.test(part)) intent = "presentation-studio";
       else if (/(生成|制作|整理).*(周报|行动简报)/u.test(part)) intent = "weekly-deck";
       else if (/(解读|分析|提取|总结).*(招标|标书|采购文件)|(招标|标书|采购文件).*(解读|分析|提取|总结)/u.test(part)) intent = "bid-interpretation";
       else if (/(复盘|回顾).+|(客户|销售|进展).*(复盘|回顾)/u.test(part)) intent = "sales-review";
       else if (/(解读|分析|提取|总结).*(文档|文件|资料|pdf)/iu.test(part)) intent = "pdf-import";
       else if (/(研究|调研).*(行业|客户|竞品|趋势)/u.test(part)) intent = "industry-research";
-      if (intent) intents.add(intent);
+      if (intent) {
+        const existing = steps.at(-1)?.service_id === intent ? steps.at(-1) : null;
+        if (existing) existing.request += "；" + part;
+        else steps.push({service_id:intent, request:part});
+      }
     }
-    return intents.size === 1 ? [...intents][0] : null;
+    return steps;
   }
+  function detectIntent(text) { const steps=detectPlan(text);return steps.length===1?steps[0].service_id:null; }
 
   class BusinessLibrary {
     constructor(bridge) {
@@ -68,7 +73,7 @@
       const back=document.createElement("div");back.className="hub-flow-return";
       back.innerHTML=button("← 继续对话","chat")+button("选择本次资料与背景","scope");
       const flowSelect=document.createElement("select");flowSelect.id="hub-flow-type";flowSelect.setAttribute("aria-label","调整工作流类型");flowSelect.innerHTML='<option value="sales-review">客户复盘</option><option value="pdf-import">资料解读</option><option value="bid-interpretation">招标文件解读</option><option value="presentation-studio">PPT 制作</option><option value="industry-research">行业研究</option><option value="wechat-review">微信整理</option><option value="weekly-deck">销售简报</option>';
-      flowSelect.onchange=()=>this.b.startFlow(flowSelect.value,this.lastRequest||"",[...this.files].map(id=>this.b.files().find(f=>f.library_id===id)).filter(Boolean));back.append(flowSelect);
+      flowSelect.onchange=()=>{if(this.b.changeFlow?.(flowSelect.value))return;this.b.startFlow(flowSelect.value,this.lastRequest||"",[...this.files].map(id=>this.b.files().find(f=>f.library_id===id)).filter(Boolean));};back.append(flowSelect);
       back.addEventListener("click",event=>this.action(event));document.querySelector('[data-page="work"]').prepend(back);
       this.render();
     }
@@ -167,7 +172,7 @@
               this.b.selectProject(result.project.workspace_id||"project-default");
               if(this.context!==result.project.entity_id)this.files.clear();
               this.context=result.project.entity_id;this.b.clearLegacyContext();
-            }else if(current?.type==="project"&&!detectIntent(text)){
+            }else if(current?.type==="project"){
               this.b.selectProject("project-default");this.context="";this.files.clear();this.b.clearLegacyContext();
             }
             this.projectChoice=null;this.renderContext();
@@ -178,7 +183,13 @@
     }
     selection(){return this.data&&(this.context||this.files.size)?{library_selection:{entity_id:this.context,revision:this.data.revision,file_ids:[...this.files]}}:{};}
     scopeDialog(){this.dialog("本次工作的资料与背景",`<label>关联对象<select id="hub-context"><option value="">不关联</option>${this.data.entities.filter(e=>!e.archived&&!e.source_unavailable).map(e=>`<option value="${esc(e.id)}" ${this.context===e.id?"selected":""}>${labels[e.type]} · ${esc(e.name)}</option>`).join("")}</select></label><p class="hint">文件需逐项选择，关联档案不会自动勾选其全部资料。本地正文目前通过受控 PDF 工具读取，其他格式仅作为来源引用；不支持的格式请先转换为 PDF。微信群请单独选择范围。</p><div class="hub-options">${this.fileSources().map(f=>`<label><input type="checkbox" data-context-file="${esc(f.file.library_id)}" ${this.files.has(f.file.library_id)?"checked":""}>${esc(f.name)}</label>`).join("")}</div>`,"save-scope");}
-    route(text){const intent=detectIntent(text);if(!intent)return false;this.lastRequest=text;$("hub-flow-type").value=intent;this.b.startFlow(intent,text,[...this.files].map(id=>this.b.files().find(f=>f.library_id===id)).filter(Boolean));return true;}
+    route(text){
+      const steps=detectPlan(text);if(!steps.length)return false;
+      this.lastRequest=text;
+      if(this.b.reviewPlan&&steps.every(s=>!["wechat-review","bid-interpretation"].includes(s.service_id))){this.b.reviewPlan(steps,text);return true;}
+      if(steps.length>1){this.b.note("这项需求涉及专用资料授权，请先分别核对微信或投标范围，再发起后续任务。",true);return true;}
+      $("hub-flow-type").value=steps[0].service_id;this.b.startFlow(steps[0].service_id,text,[...this.files].map(id=>this.b.files().find(f=>f.library_id===id)).filter(Boolean));return true;
+    }
     filterGroups(rows){return rows.filter(g=>(!this.groupFilter||(g.chat_type==="group"&&(this.groupFilter==="unclassified"?!this.data?.groups["wechat:"+g.conversation_id]:this.data?.groups["wechat:"+g.conversation_id]===this.groupFilter)))&&(!this.groupEntity||(this.data?.links["wechat:"+g.conversation_id]||[]).includes(this.groupEntity)));}
     decorateGroup(card,row){
       if(row.chat_type!=="group")return;
@@ -252,5 +263,5 @@
       finally{btn.disabled=false;}
     }
   }
-  window.Agent4MarketBusinessLibrary={create:bridge=>new BusinessLibrary(bridge),detectIntent};
+  window.Agent4MarketBusinessLibrary={create:bridge=>new BusinessLibrary(bridge),detectIntent,detectPlan};
 })();

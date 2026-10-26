@@ -573,6 +573,38 @@ test("restored CLI role overrides keep task-created thinking after the configure
   }
 });
 
+test("native request consumption persists reviewed requirements, sends them in the task prompt, and rejects mismatched plans", async () => {
+  const root=mkdtempSync(join(tmpdir(),"director-task-handoff-"));
+  const fields=["WORKFLOW_AGENT_PROFILE","WORKFLOW_AGENT_EDITION_PROFILE"];
+  const previous=Object.fromEntries(fields.map(key=>[key,process.env[key]]));
+  process.env.WORKFLOW_AGENT_PROFILE=process.env.WORKFLOW_AGENT_EDITION_PROFILE="sales-director";
+  try {
+    for(const valid of [true,false]){
+      const caseRoot=join(root,String(valid)),requestId="request-handoff-fixture";
+      const directory=join(caseRoot,".pi","director-runtime","requests");mkdirSync(directory,{recursive:true});
+      const handoff={schema:1,plan_id:"a".repeat(32),step:0,scope_id:"",brief:"用户确认：管理层关注交付风险",
+        steps:[{service_id:valid?"sales-review":"presentation-studio",request:"复盘客户"},{service_id:"presentation-studio",request:"做8页PPT"}],previous:null,previous_result:""};
+      const path=join(directory,`${requestId}.json`);
+      writeFileSync(path,JSON.stringify({...request(requestId,"sales-director"),service_id:"sales-review",workflow_id:"market.sales.pipeline-review",handoff}),"utf8");
+      const runtime=harness(caseRoot);
+      try {
+        await runtime.handlers.get("session_start")?.({},runtime.context);
+        await new Promise(resolve=>setTimeout(resolve,50));
+        const taskPath=join(caseRoot,".pi","director-runtime","tasks",`${requestId}.json`);
+        assert.equal(existsSync(taskPath),valid);
+        if(valid){
+          assert.deepEqual(JSON.parse(readFileSync(taskPath,"utf8")).handoff,handoff);
+          assert.ok(runtime.messages.some(message=>message.includes(handoff.brief)&&message.includes("只执行第 1 项")));
+          assert.equal(JSON.parse(readFileSync(path,"utf8")).status,"accepted");
+        }else assert.equal(JSON.parse(readFileSync(path,"utf8")).status,"requested");
+      }finally{await runtime.handlers.get("session_shutdown")?.({},runtime.context);}
+    }
+  }finally{
+    for(const key of fields)if(previous[key]===undefined)delete process.env[key];else process.env[key]=previous[key];
+    rmSync(root,{recursive:true,force:true});
+  }
+});
+
 test("a tampered workbench model request is not accepted or persisted", async () => {
   const root = mkdtempSync(join(tmpdir(), "director-task-model-reject-"));
   const previousProfile = process.env.WORKFLOW_AGENT_PROFILE;

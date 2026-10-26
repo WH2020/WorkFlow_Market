@@ -46,6 +46,7 @@ export type TaskAuditEvent = {
 
 export type WorkflowTask = {
   library_context?: import("./library-context.ts").LibraryContext;
+  handoff?: import("./task-handoff.ts").TaskHandoff;
   schema_version: "1.0";
   task_id: string;
   session_key: string;
@@ -282,6 +283,7 @@ function refreshDerivedState(state: WorkflowTask, workflow: RuntimeWorkflow): vo
 
 export function createTask(input: {
   libraryContext?: import("./library-context.ts").LibraryContext;
+  handoff?: import("./task-handoff.ts").TaskHandoff;
   sessionKey: string;
   profileId: string;
   serviceId: string;
@@ -315,6 +317,7 @@ export function createTask(input: {
     workflow_id: input.workflow.id,
     request: input.request,
     ...(input.libraryContext ? { library_context: structuredClone(input.libraryContext) } : {}),
+    ...(input.handoff ? { handoff: structuredClone(input.handoff) } : {}),
     ...(input.requestedModel ? { requested_model: input.requestedModel } : {}),
     ...(input.requestedThinkingLevel ? { requested_thinking_level: input.requestedThinkingLevel } : {}),
     ...(input.effectiveModel ? { effective_model: input.effectiveModel } : {}),

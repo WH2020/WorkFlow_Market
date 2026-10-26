@@ -23,6 +23,8 @@
     "test:chat-assistance": "python -B -m unittest tests.test_chat_assistance tests.test_project_index tests.test_free_chat.ConversationTests tests.test_free_chat.ChatHttpTests tests.test_chat_ui_packaging && node --test pi/tests/free-chat.test.ts",
     "test:chat-assistance-browser": "node tests/ui-chat-assistance-browser.mjs",
     "test:user-experience-browser": "node tests/ui-user-experience-browser.mjs",
+    "test:task-handoff": "python -B -m unittest tests.test_task_handoff tests.test_project_index tests.test_chat_ui_packaging && node --test tests/task-handoff.test.ts tests/library-context.test.ts",
+    "test:task-handoff-browser": "node tests/ui-task-handoff-browser.mjs",
     "test:business-library": "python -m unittest tests.test_business_library tests.test_business_library_api tests.test_project_index && node --test tests/library-context.test.ts",
     "test:business-library-browser": "node tests/ui-business-library-browser.mjs",
     "test:task-conversation": "python -m unittest tests.test_task_conversation && node --test tests/runtime-activity.test.ts tests/vertical-workflow-selection.test.ts pi/tests/wechat-batching.test.ts",

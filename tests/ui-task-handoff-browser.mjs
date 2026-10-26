@@ -1,0 +1,108 @@
+// Real HTTP/UI; only synthetic model responses and disposable task records.
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { once } from "node:events";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve, join } from "node:path";
+const { chromium }=await import(process.env.A4M_BROWSER_PLAYWRIGHT||"playwright");
+const output=resolve(process.env.A4M_BROWSER_OUTPUT||`outputs/verification/task-handoff-${Date.now()}`);
+await mkdir(output,{recursive:true});
+const child=spawn(process.env.A4M_BROWSER_PYTHON||"python",["-I","-B","-u","tests/free_chat_browser_fixture.py"],
+  {windowsHide:true,env:{...process.env,A4M_TEST_TASK_HANDOFF:"1"},stdio:["pipe","pipe","pipe"]});
+const exited=once(child,"exit");let diagnostics="",browser,context,page;
+child.stderr.on("data",chunk=>{diagnostics=(diagnostics+chunk).slice(-6000);});
+try {
+  const fixture=await new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>reject(Error("Fixture timeout: "+diagnostics)),20000);
+    createInterface({input:child.stdout}).once("line",line=>{clearTimeout(timer);resolve(JSON.parse(line));});
+    child.once("exit",()=>{clearTimeout(timer);reject(Error(diagnostics));});
+  });
+  browser=await chromium.launch({headless:true,channel:process.env.A4M_BROWSER_CHANNEL||"msedge"});
+  context=await browser.newContext({viewport:{width:1366,height:768}});
+  await context.route("**/*",route=>new URL(route.request().url()).origin===fixture.url?route.continue():route.abort());
+  await context.addInitScript(()=>localStorage.setItem("agent4market-auto-updates","false"));
+  page=await context.newPage();page.setDefaultTimeout(10000);
+  const errors=[],checks=[],sent=[];page.on("pageerror",e=>errors.push(e.message));
+  page.on("request",r=>{if(new URL(r.url()).pathname==="/api/task-requests")sent.push({body:r.postDataJSON(),headers:r.headers()});});
+  const records=async()=>await (await context.request.get(fixture.url+"/fixture/task-requests")).json();
+  const stats=async()=>await (await context.request.get(fixture.url+"/fixture/stats")).json();
+  const send=async text=>{await page.locator("#chat-input").fill(text);await page.locator("#chat-send").click();};
+  const done=()=>page.locator("#chat-status").filter({hasText:"回复完成"}).waitFor({timeout:30000});
+  const fresh=async()=>{await page.locator('#sidebar nav [data-view="chat"]').click();await page.locator("#chat-new").click();await page.locator("#chat-status").filter({hasText:"新对话已准备好"}).waitFor();};
+  const start=async selector=>{const response=page.waitForResponse(r=>r.url().endsWith("/api/task-requests"));await page.locator(selector).click();const result=await response;assert.ok(result.ok(),await result.text());return await result.json();};
+  await page.goto(fixture.url);await page.locator("#chat-status").filter({hasText:"准备好了"}).waitFor();
+  await send("苏州产业园项目现在进展如何？");await done();
+  const session=(await stats()).sessions;
+  for(const text of ["那下一步呢","风险呢","继续","受众是管理层，重点是交付风险"]){await send(text);await done();}
+  assert.equal((await stats()).sessions,session);
+  assert.equal(await page.locator(".free-chat-message.user").count(),5);
+  const last=JSON.stringify((await stats()).requests.at(-1).body);
+  assert.match(last,/苏州产业园/);assert.doesNotMatch(last,/杭州产业园/);
+  checks.push("short follow-ups retain the same project and dialogue without resetting");
+  await send("请帮我把方案改成8页PPT");await page.locator("#task-handoff-editor").waitFor();
+  const brief=await page.locator("#task-handoff-brief").inputValue();
+  for(const required of ["受众是管理层","交付风险","不视为已确认事实"])assert.ok(brief.includes(required));
+  assert.equal((await records()).length,0);assert.equal(await page.locator("#ppt-pages").inputValue(),"8");
+  await page.locator("#task-handoff-brief").fill("x".repeat(6001));await page.locator("#create-presentation").click();
+  await page.locator("#notice").filter({hasText:"超过 6000 字"}).waitFor();assert.equal((await records()).length,0);
+  await page.locator("#task-handoff-brief").fill(brief+"\n已核对：只汇报已证实的风险。");
+  const single=await start("#create-presentation");assert.match(single.handoff.brief,/只汇报已证实/);
+  assert.match(single.handoff.brief,/受众是管理层/);assert.ok(single.library_context.entity_id);
+  checks.push("multi-turn requirements are editable, bounded without truncation, and saved with the actual governed PPT request");
+  await fresh();await send("先复盘客户，然后制作8页PPT");
+  await page.locator(".work-plan-draft").waitFor();assert.equal((await records()).length,1);
+  assert.equal(await page.getByLabel("第 1 步工作类型").inputValue(),"sales-review");
+  assert.equal(await page.getByLabel("第 2 步工作类型").inputValue(),"presentation-studio");
+  await page.getByRole("button",{name:"核对需求并打开任务",exact:true}).click();
+  const first=await start("#create");assert.equal(first.handoff.steps.length,2);assert.equal(first.handoff.step,0);
+  const retry=await context.request.post(fixture.url+"/api/task-requests",{headers:sent.at(-1).headers,data:sent.at(-1).body});
+  assert.equal(retry.status(),200);assert.equal((await records()).length,2);
+  await page.reload();await page.locator(".work-plan-saved").filter({hasText:"等待智能核心接手"}).waitFor();
+  assert.equal(await page.getByRole("button",{name:/带入结果，准备/}).count(),0);
+  const complete=await context.request.post(fixture.url+"/fixture/complete",{data:{request_id:first.request_id}});assert.ok(complete.ok());
+  await page.reload();
+  const conversationURL=fixture.url+`/api/tasks/${first.request_id}/conversation`;
+  await context.route(conversationURL,route=>route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:"合成临时故障，请重试"})}));
+  await page.getByRole("button",{name:"带入结果，准备第 2 步",exact:true}).click();
+  await page.locator(".work-plan-saved [role=alert]").filter({hasText:"合成临时故障"}).waitFor();
+  await context.unroute(conversationURL);
+  let release,arrived;const gate=new Promise(resolve=>{release=resolve;});const pending=new Promise(resolve=>{arrived=resolve;});
+  await context.route(conversationURL,async route=>{arrived();await gate;await route.continue();});
+  await page.getByRole("button",{name:"带入结果，准备第 2 步",exact:true}).click();await pending;
+  await page.locator("#chat-new").click();await page.locator("#chat-status").filter({hasText:"新对话已准备好"}).waitFor();
+  const ignored=page.waitForResponse(conversationURL);release();await (await ignored).finished();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await page.locator(".work-plan-draft").count(),0);assert.equal(await page.locator("#task-handoff-result").count(),0);
+  await context.unroute(conversationURL);
+  await page.getByRole("button",{name:"带入结果，准备第 2 步",exact:true}).click();
+  await page.waitForFunction(()=>document.getElementById("task-handoff-result")||document.getElementById("notice").textContent);
+  assert.equal(await page.locator("#task-handoff-result").count(),1,await page.locator("#notice").textContent());
+  await page.locator("#task-handoff-result").waitFor();
+  assert.match(await page.locator("#task-handoff-result").inputValue(),/交付日期尚未确认/);
+  assert.equal(await page.locator("#ppt-pages").inputValue(),"8");assert.equal((await records()).length,2);
+  await page.locator("#task-handoff-result").fill("用户核对：交付日期需客户确认，PPT 不承诺日期。");
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await page.screenshot({path:join(output,"review-next-step-mobile.png"),fullPage:true});
+  await page.setViewportSize({width:1366,height:768});
+  const second=await start("#create-presentation");assert.equal(second.handoff.step,1);
+  assert.deepEqual(second.handoff.previous,{task_id:first.request_id,version:1});assert.match(second.handoff.previous_result,/不承诺日期/);
+  await page.reload();assert.equal((await records()).length,3);
+  await context.request.post(fixture.url+"/fixture/complete",{data:{request_id:second.request_id}});
+  await page.reload();await page.locator(".work-plan-saved").filter({hasText:"计划已完成"}).waitFor();
+  assert.equal(await page.getByRole("button",{name:/带入结果，准备/}).count(),0);
+  checks.push("two-step plan is restored after reload, waits for completion, transfers the reviewed result, and registers each step once");
+  checks.push("result read errors remain visible and retryable; starting a new chat discards late continuation responses");
+  await fresh();await page.locator("#chat-input").fill("把上面的讨论变成汇报材料");await page.locator("#chat-to-task").click();
+  await page.getByLabel("第 1 步工作类型").selectOption("presentation-studio");
+  await page.getByRole("button",{name:"核对需求并打开任务",exact:true}).click();await page.locator("#presentation-task-form").waitFor();
+  assert.equal((await records()).length,3);checks.push("manual task entry lets users correct unrecognized wording without sending or creating work");
+  assert.deepEqual(errors,[]);await page.screenshot({path:join(output,"task-draft.png"),fullPage:true});
+  await writeFile(join(output,"result.json"),JSON.stringify({checks,errors},null,2));console.log(JSON.stringify({output,checks},null,2));
+} catch(error) {
+  if(page){await writeFile(join(output,"failure.txt"),await page.locator("body").ariaSnapshot());await page.screenshot({path:join(output,"failure.png"),fullPage:true});}
+  console.error(diagnostics);throw error;
+} finally {
+  await context?.close();await browser?.close();child.stdin.end("stop\n");const timer=setTimeout(()=>child.kill(),10000);await exited;clearTimeout(timer);
+}

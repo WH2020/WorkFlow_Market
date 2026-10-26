@@ -54,6 +54,7 @@ from agent_platform import chat_assistance  # noqa: E402
 from agent_platform import project_index  # noqa: E402
 from agent_platform import task_health  # noqa: E402
 from agent_platform import task_conversation  # noqa: E402
+from agent_platform import task_handoff  # noqa: E402
 from agent_platform.model_provider import pi_agent_dir  # noqa: E402
 from agent_platform import business_library as dossiers  # noqa: E402
 from ui.business_library_api import source_records as dossier_sources, frozen_file  # noqa: E402
@@ -2254,7 +2255,9 @@ def pending_task_requests(tasks: list[dict]) -> list[dict]:
             record = load_json(path)
             if record.get("status") != "requested" or record.get("request_id") != path.stem:
                 continue
-            pending.append({k: record.get(k, "") for k in ("request_id", "service_id", "profile_id", "project_id", "created_at")})
+            summary = {k: record.get(k, "") for k in ("request_id", "service_id", "profile_id", "project_id", "created_at")}
+            summary.update({k: record[k] for k in ("handoff", "library_context") if isinstance(record.get(k), dict)})
+            pending.append(summary)
         except (ValueError, OSError):
             continue
     return sorted(pending, key=lambda r: r["created_at"], reverse=True)[:200]
@@ -2278,7 +2281,7 @@ def task_summaries() -> list[dict[str, Any]]:
                 "task_id", "project_id", "schedule_id", "scheduled_for", "profile_id", "service_id", "workflow_id", "status", "current_stage",
                 "current_node", "waiting_node", "completed_nodes", "version", "created_at", "updated_at",
                 "approval_request", "pending_write", "artifacts", "request", "restarted_from_task_id", "superseded_by_task_id",
-                "requested_model", "requested_thinking_level", "effective_model", "effective_thinking_level", "library_context"
+                "requested_model", "requested_thinking_level", "effective_model", "effective_thinking_level", "library_context", "handoff"
             )}
             if isinstance(summary.get("approval_request"), dict):
                 summary["approval_request"] = {
@@ -3551,7 +3554,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
             return
         if route in ("/", "/index.html"):
             self.path = "/index.html"
-        elif route not in ("/app.js", "/styles.css", "/wxdecipher.css", "/free-chat.js", "/free-chat.css", "/chat-cards.js", "/business-library.js", "/business-library.css", "/task-conversation.css"):
+        elif route not in ("/app.js", "/styles.css", "/wxdecipher.css", "/free-chat.js", "/free-chat.css", "/chat-cards.js", "/business-library.js", "/business-library.css", "/task-conversation.css", "/work-plan.js"):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         super().do_GET()
@@ -3648,7 +3651,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 self.send_json(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, {"error": "只接受 JSON 请求"})
                 return
-            payload = self.body(limit=65_536) if route.startswith("/api/chat/") else self.body()
+            payload = self.body(limit=65_536) if route.startswith("/api/chat/") or route == "/api/task-requests" else self.body()
             if route in {"/api/chat/messages", "/api/chat/cancel", "/api/chat/close", "/api/chat/project-context", "/api/chat/customer-context", "/api/chat/preferences", "/api/chat/preferences/save", "/api/chat/project-note"}:
                 self.handle_free_chat(route, payload)
             elif route in {"/api/wechat/decipher/sessions", "/api/wechat/decipher/run", "/api/wechat/decipher/discard", "/api/wechat/decipher/finish-copy", "/api/wechat/decipher/processes", "/api/wechat/decipher/capture-consent", "/api/wechat/decipher/discover", "/api/wechat/decipher/import-discovered", "/api/wechat/storage/plan", "/api/wechat/storage/grant", "/api/wechat/export"}:
@@ -4080,6 +4083,13 @@ class ControlHandler(SimpleHTTPRequestHandler):
             if any(i not in entries or entries[i].get("status") in {"archived", "rejected"} for i in file_ids):
                 raise ValueError("所选资料已失效，请重新选择")
             library_context["files"] = [frozen_file(ROOT, entries[i], project_id) for i in dict.fromkeys(file_ids)]
+        handoff = None
+        if "handoff" in payload:
+            if payload.get("handoff_confirmed") is not True:
+                raise ValueError("请先核对带入任务的对话需求与上一步结果")
+            handoff = task_handoff.validate(payload["handoff"], service_id=service_id,
+                entity_id=(library_context or {}).get("entity_id", ""), project_id=project_id,
+                profile_id=profile_id, tasks=TASKS)
         if service_id == "wechat-review":
             if library_context is not None:
                 raise ValueError("微信整理仅使用已确认的会话范围，不附带其他档案或文件背景")
@@ -4106,14 +4116,28 @@ class ControlHandler(SimpleHTTPRequestHandler):
                 raise ValueError("搜索聚合网关配置已变更；请关闭并重新打开销售总监智能工作台后重试")
             if search.get("restart_required"):
                 raise ValueError("公开检索密钥已保存，但智能核心尚未加载；请关闭并重新打开销售总监智能工作台后重试")
-        request_id = f"request-{uuid.uuid4().hex[:12]}"
+        request_id = f"request-plan-{handoff['plan_id']}-{handoff['step']}" if handoff else f"request-{uuid.uuid4().hex[:12]}"
         record = {"schema_version": "1.0", "request_id": request_id, "status": "requested", "profile_id": profile_id,
                   "service_id": service_id, "workflow_id": service["workflow"], "request": request_text,
                   "created_at": now(), "source": "local-workbench", "project_id": project_id,
                   **runtime_selection}
         if library_context is not None:
             record["library_context"] = library_context
-        atomic_json(REQUESTS / f"{request_id}.json", record)
+        if handoff:
+            record["handoff"] = handoff
+            request_path = REQUESTS / f"{request_id}.json"
+            with exclusive_task(request_path):
+                if request_path.exists():
+                    if request_path.is_symlink():
+                        raise ValueError("任务登记路径不可用")
+                    existing = load_json(request_path)
+                    if any(existing.get(k) != v for k, v in record.items() if k not in {"status", "created_at"}):
+                        raise ValueError("这一步已登记且内容不同，请从已有任务继续或重新整理计划")
+                    self.send_json(HTTPStatus.OK, existing)
+                    return
+                atomic_json(request_path, record)
+        else:
+            atomic_json(REQUESTS / f"{request_id}.json", record)
         self.send_json(HTTPStatus.CREATED, record)
 
     def create_task_message(self, task_id: str, payload: dict[str, Any]) -> None:
@@ -4470,6 +4494,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "project_id": project_id, "request_kind": "task-restart",
                     "restart_of_task_id": task_id, "source_task_version": expected_version,
                     **({"library_context": task["library_context"]} if task.get("library_context") else {}),
+                    **({"handoff": task["handoff"]} if task.get("handoff") else {}),
                     **_stored_runtime_selection(task),
                 }
                 atomic_json(request_path, record)
@@ -4608,6 +4633,7 @@ class ControlHandler(SimpleHTTPRequestHandler):
                     "request_kind": "presentation-plan-revision",
                     "revision_of_task_id": task_id, "source_plan_sha256": expected_plan_sha256,
                     **({"library_context": task["library_context"]} if task.get("library_context") else {}),
+                    **({"handoff": task["handoff"]} if task.get("handoff") else {}),
                     "source_task_version": expected_version,
                     **_stored_runtime_selection(task),
                 }

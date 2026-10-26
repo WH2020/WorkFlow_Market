@@ -63,10 +63,18 @@ def resolve(view: dict, payload: dict) -> dict:
                 weak.append(item)
     candidates = strong or weak
     match = available.get(selected) if selected else strong[0] if len(strong) == 1 else None
-    # A follow-up may reuse the current project, but an unknown named project
-    # must not silently fall back to the previous project's facts.
+    # Elliptical follow-ups and requirements stay in the current scope. Named
+    # entities still take precedence; an unknown named scope must not inherit it.
     if not match and not candidates and payload.get("current_entity_id"):
-        if re.search(r"(?:这个|该|本|当前|上面|上述)项目|^(?:那|那么)?它", query):
+        reference = r"(?:这个|该|本|当前|上面|上述)项目|(?:这个|该)客户|它"
+        remainder = re.sub(reference, "", query)
+        remainder = re.sub(r"(?:复盘|回顾)(?:一下|本周)?客户(?:进展)?", "", remainder)
+        changes_scope = re.search(r"换个话题|另一个|其他项目|其他客户|不谈|不聊|新话题|项目|园区|客户|公司", remainder)
+        followup = re.match(
+            r"^(?:(?:那么|那|请|帮我|再|先|接下来|现在)[，,\s]*)*(?:继续|下一步|风险|预算|负责人|截止|时间|进度|进展|"
+            r"还有|为什么|怎么推进|如何推进|具体|详细|展开|补充|受众|听众|重点|目标|要求|限制|"
+            r"页数|时长|语气|风格|不要涉及|只关注|按刚才|根据刚才|把刚才|基于刚才|把方案|整理成|改成|做成|复盘|回顾|制作|生成|做一份)", query)
+        if not changes_scope and (re.search(reference, query) or len(query) <= 160 and followup):
             match = available.get(payload["current_entity_id"])
     return {"status": "matched" if match else "ambiguous" if candidates else "not_found",
             "revision": view["revision"], "project": card(match, entities) if match else None,

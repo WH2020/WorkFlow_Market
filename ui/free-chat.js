@@ -8,7 +8,7 @@
       this.api = api; this.getToken = getToken;
       this.routeWork = routeWork; this.onNewChat = onNewChat;
       this.prepareMessage=prepareMessage;this.confirmProjectChange=confirmProjectChange;this.preparing=false;this.projectId="";
-      this.session = null; this.version = 0; this.running = null; this.blocked = false; this.catalog = [];
+      this.session = null; this.version = 0; this.running = null; this.blocked = false; this.catalog = [];this.completedMessages=[];
       this.cards = window.Agent4MarketChatCards?.create(this);
       $("chat-form").addEventListener("submit", (event) => { event.preventDefault(); void this.send(); });
       $("chat-input").addEventListener("input", () => this.controls());
@@ -72,6 +72,7 @@
       $("chat-stop").hidden = !this.running;
       $("chat-stop").disabled = Boolean(this.running?.stopping);
       $("chat-new").disabled = busy;
+      if($("chat-to-task"))$("chat-to-task").disabled=busy||this.blocked;
       document.querySelectorAll("#hub-chat-scope button, #hub-chat-scope input").forEach(control=>{control.disabled=busy;});
       this.cards?.controls();
     }
@@ -90,7 +91,7 @@
       this.preparing=true;this.controls();
       try{
         if(this.session)await this.post("/api/chat/close", { session_id: this.session });
-        this.session = null; this.version = 0; this.blocked = false;this.projectId="";
+        this.session = null; this.version = 0; this.blocked = false;this.projectId="";this.completedMessages=[];
         this.onNewChat?.();
         $("chat-conversation").replaceChildren(); $("chat-input").value = "";
         this.renderThinking();this.status("新对话已准备好。可以选择模型后发送消息。");
@@ -120,14 +121,14 @@
         if(this.session&&this.version>0&&nextProject!==this.projectId){
           if(!await this.confirmProjectChange?.()){prepared.cancel?.();this.status("已取消切换，本轮问题未发送。原对话仍保留。");return;}
           await this.post("/api/chat/close",{session_id:this.session});
-          this.session=null;this.version=0;this.projectId="";
+          this.session=null;this.version=0;this.projectId="";this.completedMessages=[];
           $("chat-conversation").replaceChildren();
         }
         prepared.commit?.();
       }catch(error){prepared.cancel?.();this.status(`档案资料检索未完成：${error.message}。可重试，或关闭档案背景后普通对话。`,true);return;}
       finally{this.preparing=false;this.controls();}
       if (this.routeWork?.(text)) {
-        this.message("user", text); this.message("assistant", "已展开相应工作流。请核对背景、资料和模型，确认开始后运行。");
+        this.message("user", text); this.message("assistant", "已整理任务需求。请核对步骤、资料和模型，点击开始后运行。");
         $("chat-input").value = ""; this.controls(); return;
       }
       if (!$("chat-model").value) { this.status("普通问答需要先配置可用模型。", true); return; }
@@ -189,6 +190,7 @@
           }
           if (chunk.done) { if (buffer.trim() || !run.done) throw new Error("连接中断，回复尚未完成"); break; }
         }
+        this.completedMessages.push({role:"user",text},{role:"assistant",text:answer});
       } catch (error) {
         if (!run.knownError) this.blocked = true; // Lost terminal state cannot silently replay a committed turn.
         user.article.classList.add("failed"); reply.article.classList.add("failed");

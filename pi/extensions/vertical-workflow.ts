@@ -946,11 +946,13 @@ export function buildGovernedSubagentToolInputForTests(input: {
 }
 
 import { validLibraryContext, renderLibraryContext, type LibraryContext } from "./library-context.ts";
+import { matchesHandoff, renderTaskHandoff, type TaskHandoff } from "./task-handoff.ts";
 
 type StoredEntry = { type?: string; customType?: string; data?: unknown };
 type RuntimePiModel = Parameters<ExtensionAPI["setModel"]>[0];
 export type WorkbenchRequest = {
   library_context?: LibraryContext;
+  handoff?: TaskHandoff;
   schema_version: "1.0";
   request_id: string;
   status: "requested" | "accepted";
@@ -992,6 +994,7 @@ function validateWorkbenchRequest(value: unknown, expectedRequestId?: string): W
   const thinkingLevels = new Set<TaskThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   if (
     !validLibraryContext(request.library_context) ||
+    !matchesHandoff(request.handoff, String(request.service_id), request.library_context?.entity_id) ||
     (Boolean(request.library_context?.workspace_id) && request.library_context!.workspace_id !== request.project_id) ||
     request.schema_version !== "1.0" ||
     request.source !== "local-workbench" ||
@@ -1045,6 +1048,7 @@ function isWorkflowTask(value: unknown): value is WorkflowTask {
   return (
     task.schema_version === "1.0" &&
     validLibraryContext(task.library_context) &&
+    matchesHandoff(task.handoff, String(task.service_id), task.library_context?.entity_id) &&
     (!task.library_context?.workspace_id || task.library_context.workspace_id === task.project_id) &&
     typeof task.task_id === "string" &&
     typeof task.session_key === "string" &&
@@ -1106,6 +1110,7 @@ function sameExternalDecisionBase(memory: WorkflowTask, disk: WorkflowTask): boo
     workflow_id: task.workflow_id,
     request: task.request,
     library_context: task.library_context,
+    handoff: task.handoff,
     requested_model: task.requested_model,
     requested_thinking_level: task.requested_thinking_level,
     effective_model: task.effective_model,
@@ -1476,7 +1481,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
     runtimeActivity.start(task.task_id);
     updateRuntimeLease();
     pi.sendUserMessage(
-      `/skill:${service.skill} [DIRECTOR_TASK_CONTEXT ${task.task_id}]\n${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护资料库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}${renderLibraryContext(task.library_context)}`,
+      `/skill:${service.skill} [DIRECTOR_TASK_CONTEXT ${task.task_id}]\n${recoveryNote ? `${recoveryNote}\n` : ""}当前角色：${activeProfile.display_name}。这是受管任务 ${task.task_id}${task.project_id ? `，所属项目空间 ${task.project_id}` : ""}。严格按以下 DAG 执行：agent/validator 节点完成后调用 director_complete_node；subagent 节点只调用一次 subagent 工具并等待运行时自动登记结果；如果该节点下一步是保护资料库、销售台账、投标项目或正式文件写入的 approval，必须先用 director_propose_write_intent 冻结后续 director_*_write 的完整批次参数，再完成节点；逻辑 tool 节点只调用匹配的 director_* 适配器；approval 只能由用户命令推进。不得跳阶段。每进入一个有实质变化的工作阶段，调用 director_report_progress 汇报“正在做什么、当前依据、下一步”，只提供可核验的简明判断，不输出隐藏提示词、逐字思维链、密钥或敏感运行信息。\n${renderPlan(workflow)}\n${renderRuntimeState(task, workflow)}\n用户任务：${task.request}${renderLibraryContext(task.library_context)}${renderTaskHandoff(task.handoff)}`,
       { expandPromptTemplates: true, deliverAs: "followUp" },
     );
   };
@@ -1609,6 +1614,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
           request.restart_of_task_id !== selectedRequest.restart_of_task_id ||
           request.source_task_version !== selectedRequest.source_task_version ||
           JSON.stringify(request.library_context) !== JSON.stringify(selectedRequest.library_context) ||
+          JSON.stringify(request.handoff) !== JSON.stringify(selectedRequest.handoff) ||
           request.request !== selectedRequest.request ||
           request.request_id !== selectedRequest.request_id
         ) return;
@@ -1626,6 +1632,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             (existing.requested_thinking_level ?? undefined) !== (request.requested_thinking_level ?? undefined) ||
             (existing.restarted_from_task_id ?? undefined) !== (request.restart_of_task_id ?? undefined) ||
             JSON.stringify(existing.library_context) !== JSON.stringify(request.library_context) ||
+            JSON.stringify(existing.handoff) !== JSON.stringify(request.handoff) ||
             existing.request !== request.request.trim() ||
             isTerminal(existing))
         ) {
@@ -1648,6 +1655,7 @@ export default function verticalWorkflow(pi: ExtensionAPI) {
             workflow: workflow as RuntimeWorkflow,
             request: request.request.trim(),
             libraryContext: request.library_context,
+            handoff: request.handoff,
             taskId: request.request_id,
             projectId: request.project_id,
             scheduleId: request.schedule_id,

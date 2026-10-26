@@ -20,10 +20,23 @@
 .hub-data-notice p{margin:6px 0}.hub-data-notice button{margin:4px 8px 0 0}
 .hub-group-filters{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin:14px 0}.hub-group-filters label{display:grid;gap:6px}.hub-group-filters small{flex-basis:100%;color:#76897f}.hub-group-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.hub-group-actions select{max-width:130px}.hub-flow-return{margin-bottom:16px}
 #hub-file-library>.page-heading h1{font-size:20px}#hub-prepare-wechat{margin:12px 0}#business-library .panel{margin-bottom:18px}#business-library .text-button{overflow-wrap:anywhere;white-space:normal}
-body[data-primary-view=chat] .task-runtime-picker{display:none}body[data-primary-view=work] #services{display:none}
+body[data-primary-view=chat] .task-runtime-picker{display:none}body[data-primary-view=work] .panel:has(> #services){display:none}
 body[data-primary-view=knowledge]:not([data-library-tab=wechat]) .task-runtime-picker{display:none}
 @media(max-width:850px){.hub-grid{grid-template-columns:1fr}.hub-toolbar>label{flex:1;min-width:130px}.hub-entity-row .grow,.hub-source-row .grow{min-width:160px}.hub-kv{grid-template-columns:100px 1fr}.hub-entity-heading{align-items:flex-start}.hub-group-filters select{max-width:240px}#hub-dialog{padding:18px}.hub-tabs{gap:3px}.hub-tabs button{padding:9px 10px}}
 /* Project lookup stays inline; no new navigation layer or diagram editor. */
 .hub-project-matches{flex-basis:100%;display:grid;gap:10px;padding:12px;border:1px solid #c8d8f1;border-radius:8px;background:#f7faff}
 .hub-project-matches>div{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .hub-project-matches button{white-space:normal;overflow-wrap:anywhere;text-align:left}
+.work-plans { display: grid; gap: 12px; margin: 12px 0; }
+.work-plans[hidden], .work-plan-editor[hidden] { display: none; }
+.work-plans .panel { margin: 0; min-width: 0; }
+.work-plan-step { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(180px, 2fr) auto; gap: 8px; align-items: end; margin: 10px 0; }
+.work-plan-step label, .work-plan-editor label { display: grid; gap: 6px; min-width: 0; }
+.work-plan-step textarea, .work-plan-editor textarea { box-sizing: border-box; width: 100%; min-width: 0; resize: vertical; border: 1px solid var(--line, #bccbe3); border-radius: 8px; padding: 10px 12px; background: white; color: var(--ink, #152b49); font: inherit; line-height: 1.6; }
+.work-plan-step select { min-width: 0; width: 100%; border: 1px solid var(--line, #bccbe3); border-radius: 8px; padding: 10px; background: white; font: inherit; }
+.work-plan-editor textarea:focus, .work-plan-step textarea:focus, .work-plan-step select:focus { outline: 2px solid var(--blue, #2968f5); outline-offset: 2px; }
+.work-plan-editor { background: var(--surface, #f7fafc); border: 1px solid var(--border, #dce3ec); margin-bottom: 16px; }
+.work-plan-editor label { margin: 12px 0; }
+.work-plans button, .work-plan-editor button { margin: 4px 8px 4px 0; white-space: normal; }
+.work-plan-saved p { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .work-plan-step { grid-template-columns: 1fr; } #chat-to-task { padding: 6px 8px; } }

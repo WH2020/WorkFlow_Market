@@ -1,6 +1,7 @@
 (() => {
   let model = null;
   let workbench = null;
+  let workPlan = null;
   let requestToken = null;
   const taskOutputCache = new Map();
   let snapshotLoading = false, lastSnapshotAt = null;
@@ -4748,11 +4749,14 @@
     if (createTask.pending) throw Error("任务正在提交，请勿重复点击。");
     createTask.pending = true;
     try {
+    const selection = explicitSelection ?? workbench?.selection() ?? {};
+    const handoff = !explicitSelection && typeof workPlan !== "undefined" ? workPlan?.submission(serviceId, selection) ?? {} : {};
     const response = await api("/api/task-requests", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: selectedProfile, service_id: serviceId, project_id: selectedProject, request: structured || explicitSelection ? request : `${request}${selectedCustomerContextText()}`, ...taskRuntimeSelection(), ...(explicitSelection ?? workbench?.selection() ?? {}) }),
+      body: JSON.stringify({ profile_id: selectedProfile, service_id: serviceId, project_id: selectedProject, request: structured || explicitSelection ? request : `${request}${selectedCustomerContextText()}`, ...taskRuntimeSelection(), ...selection, ...handoff }),
     });
     workbench?.created(response);
+    if(typeof workPlan !== "undefined")workPlan?.created(response);
     return response;
     } finally { createTask.pending = false; }
   }
@@ -4851,6 +4855,7 @@
     restoreTaskComposerFocus(composerFocus);
     freeChat.update(model.model);
     workbench?.update();
+    workPlan?.update(model.tasks||[],model.pending_requests||[]);
     if (currentView === "tools" && activeTool === "wechat" && model?.wechat?.configured && model.wechat.revision !== wechatState.revision) {
       loadWechatConversations({ force: true });
     }
@@ -6019,6 +6024,8 @@
   workbench = window.Agent4MarketBusinessLibrary?.create({
     api, note, confirm: confirmAction, show: switchView,
     sendChat: () => freeChat.send(),
+    reviewPlan: (steps,text) => workPlan.start(steps,text),
+    changeFlow: service => workPlan?.changeService(service),
     files: () => libraryState.entries, tasks: () => model?.tasks || [], wechatRows: () => wechatState.rows,
     pendingRequests: () => (model?.pending_requests || []).filter(r => r.profile_id === selectedProfile),
     renderWechat: () => { renderWechatConversations(); workbench?.update(); },
@@ -6073,7 +6080,22 @@
     prepareMessage: (text) => workbench?.prepareChat(text),
     confirmProjectChange: () => confirmAction({title:"切换档案并开始新对话",message:"将清空当前临时对话，避免混用不同客户或项目的信息。已保存的业务档案和任务记录保留。",confirmText:"开始新对话"}),
     routeWork: (text) => workbench?.route(text),
-    onNewChat: () => { if (workbench) { workbench.context = ""; workbench.projectMatch=null;workbench.projectChoice=null;workbench.files.clear(); workbench.renderContext(); } clearCustomerContext(); },
+    onNewChat: () => { workPlan?.clearDraft();if (workbench) { workbench.context = ""; workbench.projectMatch=null;workbench.projectChoice=null;workbench.files.clear(); workbench.renderContext(); } clearCustomerContext(); },
+  });
+  workPlan = window.Agent4MarketWorkPlan?.create({
+    api:path=>api(path,{headers:{"X-Director-Token":requestToken},signal:AbortSignal.timeout(10000)}),
+    note, messages:()=>freeChat.projectId===workbench.context?freeChat.completedMessages:[],scope:()=>workbench.context,
+    showChat:()=>switchView("chat"),openTask:id=>workbench.b.openTask(id),
+    open:(service,text)=>{ $("hub-flow-type").value=service;workbench.b.startFlow(service,text,[...workbench.files].map(id=>libraryState.entries.find(f=>f.library_id===id)).filter(Boolean)); },
+    restoreScope:async (record,isCurrent)=>{
+      await workbench.refresh();
+      if(!isCurrent())return;
+      const scope=record.library_context?.entity_id||"",entity=workbench.entity(scope);
+      if(scope&&(!entity||entity.archived||entity.source_unavailable))throw Error("原任务关联档案已不可用，请先恢复档案。");
+      workbench.b.selectProject(record.project_id||"project-default");
+      workbench.context=scope;workbench.files=new Set((record.library_context?.files||[]).map(f=>f.library_id));
+      clearCustomerContext();workbench.renderContext();
+    },
   });
   initializeWxSourcePreferences();
   initializeAppUpdates();
